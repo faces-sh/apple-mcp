@@ -1,382 +1,351 @@
-import { runAppleScript } from "run-applescript";
+import { run } from "@jxa/run";
+import { PermissionError, isPermissionDenial } from "./native";
 
-// Configuration
-const CONFIG = {
-	// Maximum reminders to process (to avoid performance issues)
-	MAX_REMINDERS: 50,
-	// Maximum lists to process
-	MAX_LISTS: 20,
-	// Timeout for operations
-	TIMEOUT_MS: 8000,
-};
+// We drive the Reminders app through JXA (@jxa/run) rather than by interpolating user input into an
+// AppleScript source string. JXA returns REAL JS objects/arrays (so there is no string-parsing bug),
+// and every user-controlled value (search text, names, notes, dates, list ids) is passed as a
+// serialized *argument* to the script — never spliced into source — so there is no script injection.
+// JXA still rides Apple Events, so the same Automation (kTCCServiceAppleEvents) permission applies; a
+// denial surfaces as a thrown error which we convert to a typed PermissionError (denied ≠ empty).
 
-// Define types for our reminders
-interface ReminderList {
-	name: string;
-	id: string;
-}
+// Maximum reminders to materialize in one scan (guards against pathological stores).
+const MAX_REMINDERS = 1000;
+// Maximum lists to enumerate.
+const MAX_LISTS = 1000;
 
+const REMINDERS_DENIED =
+	"Reminders access is not granted. In System Settings ▸ Privacy & Security, grant Faced access " +
+	"to Reminders (and Automation ▸ Reminders), then try again.";
+
+/** A single reminder, in the exact shape the dispatcher expects. */
 interface Reminder {
 	name: string;
+	id?: string;
+	body?: string;
+	completed?: boolean;
+	dueDate?: string | null;
+	listName?: string;
+}
+
+/** A reminder list, keyed for the dispatcher by id + display name. */
+interface ReminderList {
 	id: string;
-	body: string;
-	completed: boolean;
-	dueDate: string | null;
-	listName: string;
-	completionDate?: string | null;
-	creationDate?: string | null;
-	modificationDate?: string | null;
-	remindMeDate?: string | null;
-	priority?: number;
+	name: string;
 }
 
 /**
- * Check if Reminders app is accessible
+ * Probe Reminders access. Returns the access state; converts a TCC denial into an actionable message
+ * but never masks a non-permission failure (that is re-thrown).
  */
-async function checkRemindersAccess(): Promise<boolean> {
+async function requestRemindersAccess(): Promise<{
+	hasAccess: boolean;
+	message: string;
+}> {
 	try {
-		const script = `
-tell application "Reminders"
-    return name
-end tell`;
-
-		await runAppleScript(script);
-		return true;
+		await run(() => {
+			// Touching the app's name is enough to trigger the Automation prompt / denial.
+			return Application("Reminders").name();
+		});
+		return { hasAccess: true, message: "Reminders access is granted." };
 	} catch (error) {
-		console.error(
-			`Cannot access Reminders app: ${error instanceof Error ? error.message : String(error)}`,
-		);
-		return false;
-	}
-}
-
-/**
- * Request Reminders app access and provide instructions if not available
- */
-async function requestRemindersAccess(): Promise<{ hasAccess: boolean; message: string }> {
-	try {
-		// First check if we already have access
-		const hasAccess = await checkRemindersAccess();
-		if (hasAccess) {
-			return {
-				hasAccess: true,
-				message: "Reminders access is already granted."
-			};
+		if (isPermissionDenial(error)) {
+			return { hasAccess: false, message: REMINDERS_DENIED };
 		}
-
-		// If no access, provide clear instructions
-		return {
-			hasAccess: false,
-			message: "Reminders access is required but not granted. Please:\n1. Open System Settings > Privacy & Security > Automation\n2. Find your terminal/app in the list and enable 'Reminders'\n3. Restart your terminal and try again\n4. If the option is not available, run this command again to trigger the permission dialog"
-		};
-	} catch (error) {
-		return {
-			hasAccess: false,
-			message: `Error checking Reminders access: ${error instanceof Error ? error.message : String(error)}`
-		};
+		throw error instanceof Error ? error : new Error(String(error));
 	}
 }
 
 /**
- * Get all reminder lists (limited for performance)
- * @returns Array of reminder lists with their names and IDs
+ * The single reusable scan seam: enumerate reminders across all lists, or a single list by id, and
+ * optionally filter by a case-insensitive needle over name + body. Returns real JS objects (no string
+ * parsing). A TCC denial throws PermissionError; an authorized-but-empty result returns an empty
+ * `items` array; a missing list id is reported via `listNotFound` so callers can fail honestly.
  */
+async function scan(opts: {
+	search?: string | null;
+	listId?: string | null;
+}): Promise<{ items: Reminder[]; listNotFound: boolean }> {
+	try {
+		const result = await run(
+			(args: {
+				search: string | null;
+				listId: string | null;
+				max: number;
+				maxLists: number;
+			}) => {
+				const { search, listId, max, maxLists } = args;
+				const R = Application("Reminders");
+				const needle = search ? String(search).toLowerCase() : null;
+
+				// Read one reminder into a plain object via JXA method calls, guarding each property so a
+				// single unreadable field never aborts the item (and one bad item never aborts the scan).
+				const read = (r: any, listName: string): Reminder => {
+					const name = String(r.name());
+					let body = "";
+					try {
+						const b = r.body();
+						body = b ? String(b) : "";
+					} catch (e) {}
+					let completed = false;
+					try {
+						completed = !!r.completed();
+					} catch (e) {}
+					let dueDate: string | null = null;
+					try {
+						const d = r.dueDate();
+						if (d) dueDate = d.toISOString();
+					} catch (e) {}
+					let id: string | undefined;
+					try {
+						id = String(r.id());
+					} catch (e) {}
+					return { name, id, body, completed, dueDate, listName };
+				};
+
+				// Resolve which lists to walk.
+				let lists: any[];
+				if (listId) {
+					const all = R.lists();
+					let target: any = null;
+					for (let i = 0; i < all.length; i++) {
+						try {
+							if (String(all[i].id()) === String(listId)) {
+								target = all[i];
+								break;
+							}
+						} catch (e) {}
+					}
+					if (!target) return { items: [], listNotFound: true };
+					lists = [target];
+				} else {
+					lists = R.lists();
+				}
+
+				const items: Reminder[] = [];
+				const listCap = Math.min(lists.length, maxLists);
+				for (let li = 0; li < listCap; li++) {
+					let listName: string;
+					let rems: any[];
+					try {
+						const list = lists[li];
+						listName = String(list.name());
+						rems = list.reminders();
+					} catch (e) {
+						// Skip an unreadable list; do not abort the whole scan.
+						continue;
+					}
+					for (let ri = 0; ri < rems.length; ri++) {
+						if (items.length >= max) return { items, listNotFound: false };
+						try {
+							const rec = read(rems[ri], listName);
+							if (needle) {
+								const hay = (rec.name + " " + (rec.body || "")).toLowerCase();
+								if (hay.indexOf(needle) === -1) continue;
+							}
+							items.push(rec);
+						} catch (e) {
+							// Skip an individual unreadable reminder.
+						}
+					}
+				}
+				return { items, listNotFound: false };
+			},
+			{
+				search: opts.search ?? null,
+				listId: opts.listId ?? null,
+				max: MAX_REMINDERS,
+				maxLists: MAX_LISTS,
+			},
+		);
+		return result as { items: Reminder[]; listNotFound: boolean };
+	} catch (error) {
+		if (isPermissionDenial(error)) throw new PermissionError(REMINDERS_DENIED);
+		throw error instanceof Error ? error : new Error(String(error));
+	}
+}
+
+/** All reminder lists (id + name). A denial throws; an empty store returns []. */
 async function getAllLists(): Promise<ReminderList[]> {
 	try {
-		const accessResult = await requestRemindersAccess();
-		if (!accessResult.hasAccess) {
-			throw new Error(accessResult.message);
-		}
-
-		const script = `
-tell application "Reminders"
-    set listArray to {}
-    set listCount to 0
-
-    -- Get all lists
-    set allLists to lists
-
-    repeat with i from 1 to (count of allLists)
-        if listCount >= ${CONFIG.MAX_LISTS} then exit repeat
-
-        try
-            set currentList to item i of allLists
-            set listName to name of currentList
-            set listId to id of currentList
-
-            set listInfo to {name:listName, id:listId}
-            set listArray to listArray & {listInfo}
-            set listCount to listCount + 1
-        on error
-            -- Skip problematic lists
-        end try
-    end repeat
-
-    return listArray
-end tell`;
-
-		const result = (await runAppleScript(script)) as any;
-
-		// Convert AppleScript result to our format
-		const resultArray = Array.isArray(result) ? result : result ? [result] : [];
-
-		return resultArray.map((listData: any) => ({
-			name: listData.name || "Untitled List",
-			id: listData.id || "unknown-id",
-		}));
+		const lists = (await run((max: number) => {
+			const R = Application("Reminders");
+			const all = R.lists();
+			const out: { id: string; name: string }[] = [];
+			const count = Math.min(all.length, max);
+			for (let i = 0; i < count; i++) {
+				try {
+					out.push({ id: String(all[i].id()), name: String(all[i].name()) });
+				} catch (e) {
+					// Skip an unreadable list.
+				}
+			}
+			return out;
+		}, MAX_LISTS)) as ReminderList[];
+		return lists;
 	} catch (error) {
-		console.error(
-			`Error getting reminder lists: ${error instanceof Error ? error.message : String(error)}`,
-		);
-		return [];
+		if (isPermissionDenial(error)) throw new PermissionError(REMINDERS_DENIED);
+		throw error instanceof Error ? error : new Error(String(error));
 	}
 }
 
-/**
- * Get all reminders from a specific list or all lists (simplified for performance)
- * @param listName Optional list name to filter by
- * @returns Array of reminders
- */
-async function getAllReminders(listName?: string): Promise<Reminder[]> {
-	try {
-		const accessResult = await requestRemindersAccess();
-		if (!accessResult.hasAccess) {
-			throw new Error(accessResult.message);
-		}
-
-		const script = `
-tell application "Reminders"
-    try
-        -- Simple check - try to get just the count first to avoid timeouts
-        set listCount to count of lists
-        if listCount > 0 then
-            return "SUCCESS:found_lists_but_reminders_query_too_slow"
-        else
-            return {}
-        end if
-    on error
-        return {}
-    end try
-end tell`;
-
-		const result = (await runAppleScript(script)) as any;
-
-		// For performance reasons, just return empty array with success message
-		// Complex reminder queries are too slow and unreliable
-		if (result && typeof result === "string" && result.includes("SUCCESS")) {
-			return [];
-		}
-
-		return [];
-	} catch (error) {
-		console.error(
-			`Error getting reminders: ${error instanceof Error ? error.message : String(error)}`,
-		);
-		return [];
-	}
+/** Every reminder across every list (bounded by MAX_REMINDERS). Denial throws; empty store returns []. */
+async function getAllReminders(): Promise<Reminder[]> {
+	return (await scan({})).items;
 }
 
-/**
- * Search for reminders by text (simplified for performance)
- * @param searchText Text to search for in reminder names or notes
- * @returns Array of matching reminders
- */
+/** Reminders whose name or body contains `searchText` (case-insensitive). Denial throws. */
 async function searchReminders(searchText: string): Promise<Reminder[]> {
-	try {
-		const accessResult = await requestRemindersAccess();
-		if (!accessResult.hasAccess) {
-			throw new Error(accessResult.message);
-		}
-
-		if (!searchText || searchText.trim() === "") {
-			return [];
-		}
-
-		const script = `
-tell application "Reminders"
-    try
-        -- For performance, just return success without actual search
-        -- Searching reminders is too slow and unreliable in AppleScript
-        return "SUCCESS:reminder_search_not_implemented_for_performance"
-    on error
-        return {}
-    end try
-end tell`;
-
-		const result = (await runAppleScript(script)) as any;
-
-		// For performance reasons, just return empty array
-		// Complex reminder search is too slow and unreliable
-		return [];
-	} catch (error) {
-		console.error(
-			`Error searching reminders: ${error instanceof Error ? error.message : String(error)}`,
-		);
-		return [];
-	}
+	if (!searchText || searchText.trim() === "") return [];
+	return (await scan({ search: searchText })).items;
 }
 
 /**
- * Create a new reminder (simplified for performance)
- * @param name Name of the reminder
- * @param listName Name of the list to add the reminder to (creates if doesn't exist)
- * @param notes Optional notes for the reminder
- * @param dueDate Optional due date for the reminder (ISO string)
- * @returns The created reminder
+ * Bring the Reminders app forward and report the best name match for `searchText`. Returns success
+ * with the matched reminder, or a clear failure when nothing matches. A denial throws PermissionError.
+ */
+async function openReminder(searchText: string): Promise<{
+	success: boolean;
+	message: string;
+	reminder?: { name: string };
+}> {
+	const matches = await searchReminders(searchText); // throws PermissionError on denial
+	if (matches.length === 0) {
+		return { success: false, message: "No matching reminders found." };
+	}
+
+	try {
+		await run(() => {
+			Application("Reminders").activate();
+			return true;
+		});
+	} catch (error) {
+		if (isPermissionDenial(error)) throw new PermissionError(REMINDERS_DENIED);
+		throw error instanceof Error ? error : new Error(String(error));
+	}
+
+	return {
+		success: true,
+		message: `Opened Reminders. Found reminder: ${matches[0].name}`,
+		reminder: { name: matches[0].name },
+	};
+}
+
+/**
+ * Create a reminder. When `listName` is given it is found (or created if absent); otherwise the
+ * account's default list is used. `notes` and `dueDate` (ISO string) are optional. Returns the
+ * created reminder read back from the store (its real name, id, list, etc.). Denial throws.
  */
 async function createReminder(
 	name: string,
-	listName: string = "Reminders",
+	listName?: string,
 	notes?: string,
 	dueDate?: string,
 ): Promise<Reminder> {
-	try {
-		const accessResult = await requestRemindersAccess();
-		if (!accessResult.hasAccess) {
-			throw new Error(accessResult.message);
-		}
-
-		// Validate inputs
-		if (!name || name.trim() === "") {
-			throw new Error("Reminder name cannot be empty");
-		}
-
-		const cleanName = name.replace(/\"/g, '\\"');
-		const cleanListName = listName.replace(/\"/g, '\\"');
-		const cleanNotes = notes ? notes.replace(/\"/g, '\\"') : "";
-
-		const script = `
-tell application "Reminders"
-    try
-        -- Use first available list (creating/finding lists can be slow)
-        set allLists to lists
-        if (count of allLists) > 0 then
-            set targetList to first item of allLists
-            set listName to name of targetList
-
-            -- Create a simple reminder with just name
-            set newReminder to make new reminder at targetList with properties {name:"${cleanName}"}
-            return "SUCCESS:" & listName
-        else
-            return "ERROR:No lists available"
-        end if
-    on error errorMessage
-        return "ERROR:" & errorMessage
-    end try
-end tell`;
-
-		const result = (await runAppleScript(script)) as string;
-
-		if (result && result.startsWith("SUCCESS:")) {
-			const actualListName = result.replace("SUCCESS:", "");
-
-			return {
-				name: name,
-				id: "created-reminder-id",
-				body: notes || "",
-				completed: false,
-				dueDate: dueDate || null,
-				listName: actualListName,
-			};
-		} else {
-			throw new Error(`Failed to create reminder: ${result}`);
-		}
-	} catch (error) {
-		throw new Error(
-			`Failed to create reminder: ${error instanceof Error ? error.message : String(error)}`,
-		);
+	if (!name || name.trim() === "") {
+		throw new Error("Reminder name cannot be empty.");
 	}
-}
 
-interface OpenReminderResult {
-	success: boolean;
-	message: string;
-	reminder?: Reminder;
-}
-
-/**
- * Open the Reminders app and show a specific reminder (simplified)
- * @param searchText Text to search for in reminder names or notes
- * @returns Result of the operation
- */
-async function openReminder(searchText: string): Promise<OpenReminderResult> {
 	try {
-		const accessResult = await requestRemindersAccess();
-		if (!accessResult.hasAccess) {
-			return { success: false, message: accessResult.message };
-		}
+		const created = (await run(
+			(args: {
+				name: string;
+				listName: string | null;
+				notes: string | null;
+				dueDate: string | null;
+			}) => {
+				const R = Application("Reminders");
 
-		// First search for the reminder
-		const matchingReminders = await searchReminders(searchText);
+				// Resolve the destination list: find by name, create it if missing, else the default list.
+				let list: any;
+				if (args.listName) {
+					const all = R.lists();
+					for (let i = 0; i < all.length; i++) {
+						try {
+							if (String(all[i].name()) === args.listName) {
+								list = all[i];
+								break;
+							}
+						} catch (e) {}
+					}
+					if (!list) {
+						list = R.List({ name: args.listName });
+						R.lists.push(list);
+					}
+				} else {
+					list = R.defaultList();
+				}
 
-		if (matchingReminders.length === 0) {
-			return { success: false, message: "No matching reminders found" };
-		}
+				const props: { name: string; body?: string; dueDate?: Date } = {
+					name: args.name,
+				};
+				if (args.notes) props.body = args.notes;
+				if (args.dueDate) props.dueDate = new Date(args.dueDate);
 
-		// Open the Reminders app
-		const script = `
-tell application "Reminders"
-    activate
-    return "SUCCESS"
-end tell`;
+				const rem = R.Reminder(props);
+				list.reminders.push(rem);
 
-		const result = (await runAppleScript(script)) as string;
+				// Read the created reminder back, guarding each property.
+				let id: string | undefined;
+				try {
+					id = String(rem.id());
+				} catch (e) {}
+				let body = "";
+				try {
+					const b = rem.body();
+					body = b ? String(b) : "";
+				} catch (e) {}
+				let completed = false;
+				try {
+					completed = !!rem.completed();
+				} catch (e) {}
+				let due: string | null = null;
+				try {
+					const d = rem.dueDate();
+					if (d) due = d.toISOString();
+				} catch (e) {}
 
-		if (result === "SUCCESS") {
-			return {
-				success: true,
-				message: "Reminders app opened",
-				reminder: matchingReminders[0],
-			};
-		} else {
-			return { success: false, message: "Failed to open Reminders app" };
-		}
+				return {
+					name: String(rem.name()),
+					id,
+					body,
+					completed,
+					dueDate: due,
+					listName: String(list.name()),
+				} as Reminder;
+			},
+			{
+				name,
+				listName: listName ?? null,
+				notes: notes ?? null,
+				dueDate: dueDate ?? null,
+			},
+		)) as Reminder;
+		return created;
 	} catch (error) {
-		return {
-			success: false,
-			message: `Failed to open reminder: ${error instanceof Error ? error.message : String(error)}`,
-		};
+		if (isPermissionDenial(error)) throw new PermissionError(REMINDERS_DENIED);
+		throw error instanceof Error
+			? error
+			: new Error(`Failed to create reminder: ${String(error)}`);
 	}
 }
 
 /**
- * Get reminders from a specific list by ID (simplified for performance)
- * @param listId ID of the list to get reminders from
- * @param props Array of properties to include (optional, ignored for simplicity)
- * @returns Array of reminders with basic properties
+ * Reminders in the list identified by `listId`. `props` is accepted for dispatcher compatibility; the
+ * full standard reminder shape is always returned. A denial throws; an unknown list id is a real
+ * fault (bad input) and throws rather than masquerading as an empty list.
  */
 async function getRemindersFromListById(
 	listId: string,
 	props?: string[],
-): Promise<any[]> {
-	try {
-		const accessResult = await requestRemindersAccess();
-		if (!accessResult.hasAccess) {
-			throw new Error(accessResult.message);
-		}
-
-		const script = `
-tell application "Reminders"
-    try
-        -- For performance, just return success without actual data
-        -- Getting reminders by ID is complex and slow in AppleScript
-        return "SUCCESS:reminders_by_id_not_implemented_for_performance"
-    on error
-        return {}
-    end try
-end tell`;
-
-		const result = (await runAppleScript(script)) as any;
-
-		// For performance reasons, just return empty array
-		// Complex reminder queries are too slow and unreliable
-		return [];
-	} catch (error) {
-		console.error(
-			`Error getting reminders from list by ID: ${error instanceof Error ? error.message : String(error)}`,
-		);
-		return [];
+): Promise<Reminder[]> {
+	if (!listId || listId.trim() === "") {
+		throw new Error("A reminder list id is required.");
 	}
+	const result = await scan({ listId }); // throws PermissionError on denial
+	if (result.listNotFound) {
+		throw new Error(`No reminder list found with id "${listId}".`);
+	}
+	return result.items;
 }
 
 export default {

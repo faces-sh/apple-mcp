@@ -1,161 +1,55 @@
-# 🍎 Apple MCP - Better Siri that can do it all :)
+# apple-mcp (Faces fork)
 
-> **Plot twist:** Your Mac can do more than just look pretty. Turn your Apple apps into AI superpowers!
+An MCP server that lets an agent work with five native macOS apps:
 
-Love this MCP? Check out supermemory MCP too - https://mcp.supermemory.ai
+| Tool        | Operations |
+|-------------|------------|
+| `contacts`  | look up phone numbers / names (phones **and** emails) |
+| `messages`  | send, read, schedule, list unread (iMessage, via `chat.db` + AppleScript) |
+| `notes`     | list, search, create |
+| `reminders` | list, search, open, create, list-by-id |
+| `calendar`  | list, search, open, create |
 
+This is **Faces'** fork of the (now-archived) [`supermemoryai/apple-mcp`](https://github.com/supermemoryai/apple-mcp).
+Faced bundles it and runs it under its own Node runtime. It is a substantial rewrite — not a config tweak:
 
-Click below for one click install with `.dxt`
+- **JXA, not AppleScript-string-building.** Every app is driven through `@jxa/run`, which returns real
+  JS objects (the upstream modules treated AppleScript's *string* return as an array, so list/search
+  silently returned nothing — and several functions were outright stubs). All user input is passed as
+  **arguments** to the JXA script, never spliced into source, so there is no script-injection surface.
+- **Honest permission errors** (denied ≠ empty ≠ broke). A TCC denial throws a typed `PermissionError`
+  that the dispatcher surfaces with `isError: true` — it never masquerades as "you have no data."
+- **Correct international phone handling** via `libphonenumber-js` (no hardcoded `+1`); iMessage
+  **email handles** are matched as emails, not phones.
+- **`sqlite3` via `execFile`** (argv, no shell) for Messages history — no shell-injection surface.
+- **Per-app filtering** (see below) so the host can expose exactly the apps the user enabled.
+- Builds to a single self-contained `dist/index.js` with **esbuild** (Node, no Bun).
 
-<a href="https://github.com/supermemoryai/apple-mcp/releases/download/1.0.0/apple-mcp.dxt">
-  <img  width="280" alt="Install with Claude DXT" src="https://github.com/user-attachments/assets/9b0fa2a0-a954-41ee-ac9e-da6e63fc0881" />
-</a>
+`mail`, `maps`, and `web-search` from upstream were removed — see [`ROADMAP.md`](./ROADMAP.md).
 
-[![smithery badge](https://smithery.ai/badge/@Dhravya/apple-mcp)](https://smithery.ai/server/@Dhravya/apple-mcp)
+## Configuration (env)
 
+- `APPLE_MCP_ENABLED_APPS` — comma-separated tool names to expose, e.g.
+  `messages,contacts,notes,reminders,calendar`. Gates **both** the advertised tool list and the call
+  dispatch. Unset ⇒ all tools; empty ⇒ none.
+- `APPLE_REGION` — ISO-3166-1 alpha-2 region (e.g. `US`, `IT`, `GB`) used to parse **bare** local
+  phone numbers. Numbers already in `+CC…` form ignore it. Defaults to `US`.
 
-<a href="https://glama.ai/mcp/servers/gq2qg6kxtu">
-  <img width="380" height="200" src="https://glama.ai/mcp/servers/gq2qg6kxtu/badge" alt="Apple Server MCP server" />
-</a>
+## Permissions (macOS TCC)
 
-## 🤯 What Can This Thing Do?
+The app embedding this server is the responsible process, so **its** `Info.plist` must carry the
+usage strings and the user grants access to **it**:
 
-**Basically everything you wish your Mac could do automatically (but never bothered to set up):**
+- Contacts / Notes / Reminders / Calendar / sending Messages → **Automation** (`NSAppleEventsUsageDescription`).
+- Reading Messages history (`~/Library/Messages/chat.db`) → **Full Disk Access**.
 
-### 💬 **Messages** - Because who has time to text manually?
+## Build
 
-- Send messages to anyone in your contacts (even that person you've been avoiding)
-- Read your messages (finally catch up on those group chats)
-- Schedule messages for later (be that organized person you pretend to be)
-
-### 📝 **Notes** - Your brain's external hard drive
-
-- Create notes faster than you can forget why you needed them
-- Search through that digital mess you call "organized notes"
-- Actually find that brilliant idea you wrote down 3 months ago
-
-### 👥 **Contacts** - Your personal network, digitized
-
-- Find anyone in your contacts without scrolling forever
-- Get phone numbers instantly (no more "hey, what's your number again?")
-- Actually use that contact database you've been building for years
-
-### 📧 **Mail** - Email like a pro (or at least pretend to)
-
-- Send emails with attachments, CC, BCC - the whole professional shebang
-- Search through your email chaos with surgical precision
-- Schedule emails for later (because 3 AM ideas shouldn't be sent at 3 AM)
-- Check unread counts (prepare for existential dread)
-
-### ⏰ **Reminders** - For humans with human memory
-
-- Create reminders with due dates (finally remember to do things)
-- Search through your reminder graveyard
-- List everything you've been putting off
-- Open specific reminders (face your procrastination)
-
-### 📅 **Calendar** - Time management for the chronically late
-
-- Create events faster than you can double-book yourself
-- Search for that meeting you're definitely forgetting about
-- List upcoming events (spoiler: you're probably late to something)
-- Open calendar events directly (skip the app hunting)
-
-### 🗺️ **Maps** - For people who still get lost with GPS
-
-- Search locations (find that coffee shop with the weird name)
-- Save favorites (bookmark your life's important spots)
-- Get directions (finally stop asking Siri while driving)
-- Create guides (be that friend who plans everything)
-- Drop pins like you're claiming territory
-
-## 🎭 The Magic of Chaining Commands
-
-Here's where it gets spicy. You can literally say:
-
-_"Read my conference notes, find contacts for the people I met, and send them a thank you message"_
-
-And it just... **works**. Like actual magic, but with more code.
-
-## 🚀 Installation (The Easy Way)
-
-### Option 1: Smithery (For the Sophisticated)
-
-```bash
-npx -y install-mcp apple-mcp --client claude
+```sh
+npm install      # also builds via the `prepare` script
+npm run build    # esbuild → dist/index.js (self-contained)
+npm start        # node dist/index.js
+npm run typecheck
 ```
 
-For Cursor users (we see you):
-
-```bash
-npx -y install-mcp apple-mcp --client cursor
-```
-
-### Option 2: Manual Setup (For the Brave)
-
-<details>
-<summary>Click if you're feeling adventurous</summary>
-
-First, get bun (if you don't have it already):
-
-```bash
-brew install oven-sh/bun/bun
-```
-
-Then add this to your `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "apple-mcp": {
-      "command": "bunx",
-      "args": ["--no-cache", "apple-mcp@latest"]
-    }
-  }
-}
-```
-
-</details>
-
-## 🎬 See It In Action
-
-Here's a step-by-step video walkthrough: https://x.com/DhravyaShah/status/1892694077679763671
-
-(Yes, it's actually as cool as it sounds)
-
-## 🎯 Example Commands That'll Blow Your Mind
-
-```
-"Send a message to mom saying I'll be late for dinner"
-```
-
-```
-"Find all my AI research notes and email them to sarah@company.com"
-```
-
-```
-"Create a reminder to call the dentist tomorrow at 2pm"
-```
-
-```
-"Show me my calendar for next week and create an event for coffee with Alex on Friday"
-```
-
-```
-"Find the nearest pizza place and save it to my favorites"
-```
-
-## 🛠️ Local Development (For the Tinkerers)
-
-```bash
-git clone https://github.com/dhravya/apple-mcp.git
-cd apple-mcp
-bun install
-bun run index.ts
-```
-
-Now go forth and automate your digital life! 🚀
-
----
-
-_Made with ❤️ by supermemory (and honestly, claude code)_
+Licensed MIT (see [`LICENSE`](./LICENSE)); fork retains upstream attribution.
