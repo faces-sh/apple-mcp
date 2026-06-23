@@ -5,9 +5,27 @@ import {
 	CallToolRequestSchema,
 	ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { runAppleScript } from "run-applescript";
 import tools from "./tools";
 
+// Per-app filtering. Faced bundles this server and exposes only the Apple apps the user has toggled
+// on by passing APPLE_MCP_ENABLED_APPS as a comma-separated list of tool names. Tool names map 1:1
+// to apps (contacts, notes, messages, reminders, calendar). Unset => every tool is exposed; an empty
+// value => nothing is exposed. This gates BOTH the advertised tool list and the dispatch switch, so
+// a disabled app is invisible and uncallable rather than merely hidden.
+const ENABLED_APPS: ReadonlySet<string> | null = (() => {
+	const raw = process.env.APPLE_MCP_ENABLED_APPS;
+	if (raw === undefined) return null; // no filtering
+	return new Set(
+		raw
+			.split(",")
+			.map((s) => s.trim().toLowerCase())
+			.filter(Boolean),
+	);
+})();
+
+function isAppEnabled(toolName: string): boolean {
+	return ENABLED_APPS === null || ENABLED_APPS.has(toolName.toLowerCase());
+}
 
 // Safe mode implementation - lazy loading of modules
 let useEagerLoading = true;
@@ -20,21 +38,17 @@ console.error("Starting apple-mcp server...");
 let contacts: typeof import("./utils/contacts").default | null = null;
 let notes: typeof import("./utils/notes").default | null = null;
 let message: typeof import("./utils/message").default | null = null;
-let mail: typeof import("./utils/mail").default | null = null;
 let reminders: typeof import("./utils/reminders").default | null = null;
 
 let calendar: typeof import("./utils/calendar").default | null = null;
-let maps: typeof import("./utils/maps").default | null = null;
 
 // Type map for module names to their types
 type ModuleMap = {
 	contacts: typeof import("./utils/contacts").default;
 	notes: typeof import("./utils/notes").default;
 	message: typeof import("./utils/message").default;
-	mail: typeof import("./utils/mail").default;
 	reminders: typeof import("./utils/reminders").default;
 	calendar: typeof import("./utils/calendar").default;
-	maps: typeof import("./utils/maps").default;
 };
 
 // Helper function for lazy module loading
@@ -43,10 +57,8 @@ async function loadModule<
 		| "contacts"
 		| "notes"
 		| "message"
-		| "mail"
 		| "reminders"
 		| "calendar"
-		| "maps",
 >(moduleName: T): Promise<ModuleMap[T]> {
 	if (safeModeFallback) {
 		console.error(`Loading ${moduleName} module on demand (safe mode)...`);
@@ -63,18 +75,12 @@ async function loadModule<
 			case "message":
 				if (!message) message = (await import("./utils/message")).default;
 				return message as ModuleMap[T];
-			case "mail":
-				if (!mail) mail = (await import("./utils/mail")).default;
-				return mail as ModuleMap[T];
 			case "reminders":
 				if (!reminders) reminders = (await import("./utils/reminders")).default;
 				return reminders as ModuleMap[T];
 			case "calendar":
 				if (!calendar) calendar = (await import("./utils/calendar")).default;
 				return calendar as ModuleMap[T];
-			case "maps":
-				if (!maps) maps = (await import("./utils/maps")).default;
-				return maps as ModuleMap[T];
 			default:
 				throw new Error(`Unknown module: ${moduleName}`);
 		}
@@ -96,7 +102,6 @@ loadingTimeout = setTimeout(() => {
 	contacts = null;
 	notes = null;
 	message = null;
-	mail = null;
 	reminders = null;
 	calendar = null;
 
@@ -119,8 +124,6 @@ async function attemptEagerLoading() {
 		message = (await import("./utils/message")).default;
 		console.error("- Message module loaded successfully");
 
-		mail = (await import("./utils/mail")).default;
-		console.error("- Mail module loaded successfully");
 
 		reminders = (await import("./utils/reminders")).default;
 		console.error("- Reminders module loaded successfully");
@@ -129,8 +132,6 @@ async function attemptEagerLoading() {
 		calendar = (await import("./utils/calendar")).default;
 		console.error("- Calendar module loaded successfully");
 
-		maps = (await import("./utils/maps")).default;
-		console.error("- Maps module loaded successfully");
 
 		// If we get here, clear the timeout and proceed with eager loading
 		if (loadingTimeout) {
@@ -158,10 +159,8 @@ async function attemptEagerLoading() {
 		contacts = null;
 		notes = null;
 		message = null;
-		mail = null;
 		reminders = null;
 			calendar = null;
-		maps = null;
 
 		// Initialize the server in safe mode
 		initServer();
@@ -193,7 +192,7 @@ function initServer() {
 	);
 
 	server.setRequestHandler(ListToolsRequestSchema, async () => ({
-		tools,
+		tools: tools.filter((tool) => isAppEnabled(tool.name)),
 	}));
 
 	server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -202,6 +201,18 @@ function initServer() {
 
 			if (!args) {
 				throw new Error("No arguments provided");
+			}
+
+			if (!isAppEnabled(name)) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `The "${name}" app is disabled. Enable it in Faced's settings to use this tool.`,
+						},
+					],
+					isError: true,
+				};
 			}
 
 			switch (name) {
@@ -506,325 +517,6 @@ function initServer() {
 					}
 				}
 
-				case "mail": {
-					if (!isMailArgs(args)) {
-						throw new Error("Invalid arguments for mail tool");
-					}
-
-					try {
-						const mailModule = await loadModule("mail");
-
-						switch (args.operation) {
-							case "unread": {
-								// If an account is specified, we'll try to search specifically in that account
-								let emails;
-								if (args.account) {
-									console.error(
-										`Getting unread emails for account: ${args.account}`,
-									);
-									// Use AppleScript to get unread emails from specific account
-									const script = `
-tell application "Mail"
-    set resultList to {}
-    try
-        set targetAccount to first account whose name is "${args.account.replace(/"/g, '\\"')}"
-
-        -- Get mailboxes for this account
-        set acctMailboxes to every mailbox of targetAccount
-
-        -- If mailbox is specified, only search in that mailbox
-        set mailboxesToSearch to acctMailboxes
-        ${
-					args.mailbox
-						? `
-        set mailboxesToSearch to {}
-        repeat with mb in acctMailboxes
-            if name of mb is "${args.mailbox.replace(/"/g, '\\"')}" then
-                set mailboxesToSearch to {mb}
-                exit repeat
-            end if
-        end repeat
-        `
-						: ""
-				}
-
-        -- Search specified mailboxes
-        repeat with mb in mailboxesToSearch
-            try
-                set unreadMessages to (messages of mb whose read status is false)
-                if (count of unreadMessages) > 0 then
-                    set msgLimit to ${args.limit || 10}
-                    if (count of unreadMessages) < msgLimit then
-                        set msgLimit to (count of unreadMessages)
-                    end if
-
-                    repeat with i from 1 to msgLimit
-                        try
-                            set currentMsg to item i of unreadMessages
-                            set msgData to {subject:(subject of currentMsg), sender:(sender of currentMsg), ¬
-                                        date:(date sent of currentMsg) as string, mailbox:(name of mb)}
-
-                            -- Try to get content if possible
-                            try
-                                set msgContent to content of currentMsg
-                                if length of msgContent > 500 then
-                                    set msgContent to (text 1 thru 500 of msgContent) & "..."
-                                end if
-                                set msgData to msgData & {content:msgContent}
-                            on error
-                                set msgData to msgData & {content:"[Content not available]"}
-                            end try
-
-                            set end of resultList to msgData
-                        on error
-                            -- Skip problematic messages
-                        end try
-                    end repeat
-
-                    if (count of resultList) ≥ ${args.limit || 10} then exit repeat
-                end if
-            on error
-                -- Skip problematic mailboxes
-            end try
-        end repeat
-    on error errMsg
-        return "Error: " & errMsg
-    end try
-
-    return resultList
-end tell`;
-
-									try {
-										const asResult = await runAppleScript(script);
-										if (asResult && asResult.startsWith("Error:")) {
-											throw new Error(asResult);
-										}
-
-										// Parse the results - similar to general getUnreadMails
-										const emailData = [];
-										const matches = asResult.match(/\{([^}]+)\}/g);
-										if (matches && matches.length > 0) {
-											for (const match of matches) {
-												try {
-													const props = match
-														.substring(1, match.length - 1)
-														.split(",");
-													const email: any = {};
-
-													props.forEach((prop) => {
-														const parts = prop.split(":");
-														if (parts.length >= 2) {
-															const key = parts[0].trim();
-															const value = parts.slice(1).join(":").trim();
-															email[key] = value;
-														}
-													});
-
-													if (email.subject || email.sender) {
-														emailData.push({
-															subject: email.subject || "No subject",
-															sender: email.sender || "Unknown sender",
-															dateSent: email.date || new Date().toString(),
-															content:
-																email.content || "[Content not available]",
-															isRead: false,
-															mailbox: `${args.account} - ${email.mailbox || "Unknown"}`,
-														});
-													}
-												} catch (parseError) {
-													console.error(
-														"Error parsing email match:",
-														parseError,
-													);
-												}
-											}
-										}
-
-										emails = emailData;
-									} catch (error) {
-										console.error(
-											"Error getting account-specific emails:",
-											error,
-										);
-										// Fallback to general method if specific account fails
-										emails = await mailModule.getUnreadMails(args.limit);
-									}
-								} else {
-									// No account specified, use the general method
-									emails = await mailModule.getUnreadMails(args.limit);
-								}
-
-								return {
-									content: [
-										{
-											type: "text",
-											text:
-												emails.length > 0
-													? `Found ${emails.length} unread email(s)${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` and mailbox "${args.mailbox}"` : ""}:\n\n` +
-														emails
-															.map(
-																(email: any) =>
-																	`[${email.dateSent}] From: ${email.sender}\nMailbox: ${email.mailbox}\nSubject: ${email.subject}\n${email.content.substring(0, 500)}${email.content.length > 500 ? "..." : ""}`,
-															)
-															.join("\n\n")
-													: `No unread emails found${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` and mailbox "${args.mailbox}"` : ""}`,
-										},
-									],
-									isError: false,
-								};
-							}
-
-							case "search": {
-								if (!args.searchTerm) {
-									throw new Error(
-										"Search term is required for search operation",
-									);
-								}
-								const emails = await mailModule.searchMails(
-									args.searchTerm,
-									args.limit,
-								);
-								return {
-									content: [
-										{
-											type: "text",
-											text:
-												emails.length > 0
-													? `Found ${emails.length} email(s) for "${args.searchTerm}"${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` and mailbox "${args.mailbox}"` : ""}:\n\n` +
-														emails
-															.map(
-																(email: any) =>
-																	`[${email.dateSent}] From: ${email.sender}\nMailbox: ${email.mailbox}\nSubject: ${email.subject}\n${email.content.substring(0, 200)}${email.content.length > 200 ? "..." : ""}`,
-															)
-															.join("\n\n")
-													: `No emails found for "${args.searchTerm}"${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` and mailbox "${args.mailbox}"` : ""}`,
-										},
-									],
-									isError: false,
-								};
-							}
-
-							case "send": {
-								if (!args.to || !args.subject || !args.body) {
-									throw new Error(
-										"Recipient (to), subject, and body are required for send operation",
-									);
-								}
-								const result = await mailModule.sendMail(
-									args.to,
-									args.subject,
-									args.body,
-									args.cc,
-									args.bcc,
-								);
-								return {
-									content: [{ type: "text", text: result }],
-									isError: false,
-								};
-							}
-
-							case "mailboxes": {
-								if (args.account) {
-									const mailboxes = await mailModule.getMailboxesForAccount(
-										args.account,
-									);
-									return {
-										content: [
-											{
-												type: "text",
-												text:
-													mailboxes.length > 0
-														? `Found ${mailboxes.length} mailboxes for account "${args.account}":\n\n${mailboxes.join("\n")}`
-														: `No mailboxes found for account "${args.account}". Make sure the account name is correct.`,
-											},
-										],
-										isError: false,
-									};
-								} else {
-									const mailboxes = await mailModule.getMailboxes();
-									return {
-										content: [
-											{
-												type: "text",
-												text:
-													mailboxes.length > 0
-														? `Found ${mailboxes.length} mailboxes:\n\n${mailboxes.join("\n")}`
-														: "No mailboxes found. Make sure Mail app is running and properly configured.",
-											},
-										],
-										isError: false,
-									};
-								}
-							}
-
-							case "accounts": {
-								const accounts = await mailModule.getAccounts();
-								return {
-									content: [
-										{
-											type: "text",
-											text:
-												accounts.length > 0
-													? `Found ${accounts.length} email accounts:\n\n${accounts.join("\n")}`
-													: "No email accounts found. Make sure Mail app is configured with at least one account.",
-										},
-									],
-									isError: false,
-								};
-							}
-
-							case "latest": {
-								let account = args.account;
-								if (!account) {
-									const accounts = await mailModule.getAccounts();
-									if (accounts.length === 0) {
-										throw new Error(
-											"No email accounts found. Make sure Mail app is configured with at least one account.",
-										);
-									}
-									account = accounts[0]; // Use the first account if not provided
-								}
-								const emails = await mailModule.getLatestMails(
-									account,
-									args.limit,
-								);
-								return {
-									content: [
-										{
-											type: "text",
-											text:
-												emails.length > 0
-													? `Found ${emails.length} latest email(s) in account "${account}":\n\n` +
-														emails
-															.map(
-																(email: any) =>
-																	`[${email.dateSent}] From: ${email.sender}\nMailbox: ${email.mailbox}\nSubject: ${email.subject}\n${email.content.substring(0, 500)}${email.content.length > 500 ? "..." : ""}`,
-															)
-															.join("\n\n")
-													: `No latest emails found in account "${account}"`,
-										},
-									],
-									isError: false,
-								};
-							}
-
-							default:
-								throw new Error(`Unknown operation: ${args.operation}`);
-						}
-					} catch (error) {
-						const errorMessage = error instanceof Error ? error.message : String(error);
-						return {
-							content: [
-								{
-									type: "text",
-									text: errorMessage.includes("access") ? errorMessage : `Error with mail operation: ${errorMessage}`,
-								},
-							],
-							isError: true,
-						};
-					}
-				}
-
 				case "reminders": {
 					if (!isRemindersArgs(args)) {
 						throw new Error("Invalid arguments for reminders tool");
@@ -1097,186 +789,6 @@ end tell`;
 					}
 				}
 
-				case "maps": {
-					if (!isMapsArgs(args)) {
-						throw new Error("Invalid arguments for maps tool");
-					}
-
-					try {
-						const mapsModule = await loadModule("maps");
-						const { operation } = args;
-
-						switch (operation) {
-							case "search": {
-								const { query, limit } = args;
-								if (!query) {
-									throw new Error(
-										"Search query is required for search operation",
-									);
-								}
-
-								const result = await mapsModule.searchLocations(query, limit);
-
-								return {
-									content: [
-										{
-											type: "text",
-											text: result.success
-												? `${result.message}\n\n${result.locations
-														.map(
-															(location) =>
-																`Name: ${location.name}\n` +
-																`Address: ${location.address}\n` +
-																`${location.latitude && location.longitude ? `Coordinates: ${location.latitude}, ${location.longitude}\n` : ""}`,
-														)
-														.join("\n\n")}`
-												: `${result.message}`,
-										},
-									],
-									isError: !result.success,
-								};
-							}
-
-							case "save": {
-								const { name, address } = args;
-								if (!name || !address) {
-									throw new Error(
-										"Name and address are required for save operation",
-									);
-								}
-
-								const result = await mapsModule.saveLocation(name, address);
-
-								return {
-									content: [
-										{
-											type: "text",
-											text: result.message,
-										},
-									],
-									isError: !result.success,
-								};
-							}
-
-							case "pin": {
-								const { name, address } = args;
-								if (!name || !address) {
-									throw new Error(
-										"Name and address are required for pin operation",
-									);
-								}
-
-								const result = await mapsModule.dropPin(name, address);
-
-								return {
-									content: [
-										{
-											type: "text",
-											text: result.message,
-										},
-									],
-									isError: !result.success,
-								};
-							}
-
-							case "directions": {
-								const { fromAddress, toAddress, transportType } = args;
-								if (!fromAddress || !toAddress) {
-									throw new Error(
-										"From and to addresses are required for directions operation",
-									);
-								}
-
-								const result = await mapsModule.getDirections(
-									fromAddress,
-									toAddress,
-									transportType as "driving" | "walking" | "transit",
-								);
-
-								return {
-									content: [
-										{
-											type: "text",
-											text: result.message,
-										},
-									],
-									isError: !result.success,
-								};
-							}
-
-							case "listGuides": {
-								const result = await mapsModule.listGuides();
-
-								return {
-									content: [
-										{
-											type: "text",
-											text: result.message,
-										},
-									],
-									isError: !result.success,
-								};
-							}
-
-							case "addToGuide": {
-								const { address, guideName } = args;
-								if (!address || !guideName) {
-									throw new Error(
-										"Address and guideName are required for addToGuide operation",
-									);
-								}
-
-								const result = await mapsModule.addToGuide(address, guideName);
-
-								return {
-									content: [
-										{
-											type: "text",
-											text: result.message,
-										},
-									],
-									isError: !result.success,
-								};
-							}
-
-							case "createGuide": {
-								const { guideName } = args;
-								if (!guideName) {
-									throw new Error(
-										"Guide name is required for createGuide operation",
-									);
-								}
-
-								const result = await mapsModule.createGuide(guideName);
-
-								return {
-									content: [
-										{
-											type: "text",
-											text: result.message,
-										},
-									],
-									isError: !result.success,
-								};
-							}
-
-							default:
-								throw new Error(`Unknown maps operation: ${operation}`);
-						}
-					} catch (error) {
-						const errorMessage = error instanceof Error ? error.message : String(error);
-						return {
-							content: [
-								{
-									type: "text",
-									text: errorMessage.includes("access") ? errorMessage : `Error in maps tool: ${errorMessage}`,
-								},
-							],
-							isError: true,
-						};
-					}
-				}
-
 				default:
 					return {
 						content: [{ type: "text", text: `Unknown tool: ${name}` }],
@@ -1424,76 +936,6 @@ function isMessagesArgs(args: unknown): args is {
 	return true;
 }
 
-function isMailArgs(args: unknown): args is {
-	operation: "unread" | "search" | "send" | "mailboxes" | "accounts" | "latest";
-	account?: string;
-	mailbox?: string;
-	limit?: number;
-	searchTerm?: string;
-	to?: string;
-	subject?: string;
-	body?: string;
-	cc?: string;
-	bcc?: string;
-} {
-	if (typeof args !== "object" || args === null) return false;
-
-	const {
-		operation,
-		account,
-		mailbox,
-		limit,
-		searchTerm,
-		to,
-		subject,
-		body,
-		cc,
-		bcc,
-	} = args as any;
-
-	if (
-		!operation ||
-		!["unread", "search", "send", "mailboxes", "accounts", "latest"].includes(
-			operation,
-		)
-	) {
-		return false;
-	}
-
-	// Validate required fields based on operation
-	switch (operation) {
-		case "search":
-			if (!searchTerm || typeof searchTerm !== "string") return false;
-			break;
-		case "send":
-			if (
-				!to ||
-				typeof to !== "string" ||
-				!subject ||
-				typeof subject !== "string" ||
-				!body ||
-				typeof body !== "string"
-			)
-				return false;
-			break;
-		case "unread":
-		case "mailboxes":
-		case "accounts":
-		case "latest":
-			// No additional required fields
-			break;
-	}
-
-	// Validate field types if present
-	if (account && typeof account !== "string") return false;
-	if (mailbox && typeof mailbox !== "string") return false;
-	if (limit && typeof limit !== "number") return false;
-	if (cc && typeof cc !== "string") return false;
-	if (bcc && typeof bcc !== "string") return false;
-
-	return true;
-}
-
 function isRemindersArgs(args: unknown): args is {
 	operation: "list" | "search" | "open" | "create" | "listById";
 	searchText?: string;
@@ -1608,113 +1050,3 @@ function isCalendarArgs(args: unknown): args is {
 	return true;
 }
 
-function isMapsArgs(args: unknown): args is {
-	operation:
-		| "search"
-		| "save"
-		| "directions"
-		| "pin"
-		| "listGuides"
-		| "addToGuide"
-		| "createGuide";
-	query?: string;
-	limit?: number;
-	name?: string;
-	address?: string;
-	fromAddress?: string;
-	toAddress?: string;
-	transportType?: string;
-	guideName?: string;
-} {
-	if (typeof args !== "object" || args === null) {
-		return false;
-	}
-
-	const { operation } = args as { operation?: unknown };
-	if (typeof operation !== "string") {
-		return false;
-	}
-
-	if (
-		![
-			"search",
-			"save",
-			"directions",
-			"pin",
-			"listGuides",
-			"addToGuide",
-			"createGuide",
-		].includes(operation)
-	) {
-		return false;
-	}
-
-	// Check that required parameters are present for each operation
-	if (operation === "search") {
-		const { query } = args as { query?: unknown };
-		if (typeof query !== "string" || query === "") {
-			return false;
-		}
-	}
-
-	if (operation === "save" || operation === "pin") {
-		const { name, address } = args as { name?: unknown; address?: unknown };
-		if (
-			typeof name !== "string" ||
-			name === "" ||
-			typeof address !== "string" ||
-			address === ""
-		) {
-			return false;
-		}
-	}
-
-	if (operation === "directions") {
-		const { fromAddress, toAddress } = args as {
-			fromAddress?: unknown;
-			toAddress?: unknown;
-		};
-		if (
-			typeof fromAddress !== "string" ||
-			fromAddress === "" ||
-			typeof toAddress !== "string" ||
-			toAddress === ""
-		) {
-			return false;
-		}
-
-		// Check transportType if provided
-		const { transportType } = args as { transportType?: unknown };
-		if (
-			transportType !== undefined &&
-			(typeof transportType !== "string" ||
-				!["driving", "walking", "transit"].includes(transportType))
-		) {
-			return false;
-		}
-	}
-
-	if (operation === "createGuide") {
-		const { guideName } = args as { guideName?: unknown };
-		if (typeof guideName !== "string" || guideName === "") {
-			return false;
-		}
-	}
-
-	if (operation === "addToGuide") {
-		const { address, guideName } = args as {
-			address?: unknown;
-			guideName?: unknown;
-		};
-		if (
-			typeof address !== "string" ||
-			address === "" ||
-			typeof guideName !== "string" ||
-			guideName === ""
-		) {
-			return false;
-		}
-	}
-
-	return true;
-}
