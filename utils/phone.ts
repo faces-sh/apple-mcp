@@ -12,7 +12,7 @@ export function isEmailHandle(handle: string): boolean {
 }
 
 /**
- * Default region (ISO 3166-1 alpha-2) for parsing bare local numbers. Faced passes the user's region
+ * Default region (ISO 3166-1 alpha-2) for parsing bare local numbers. The host application passes the user's region
  * via APPLE_REGION (derived from the system locale); falls back to "US". Only used for numbers that
  * lack a country code — an already-E.164 number ignores it.
  */

@@ -3,7 +3,7 @@
 // Two jobs, defined once and reused by every util module:
 //   1. Honest permission errors. macOS TCC can deny Automation / Contacts / Full Disk Access. A
 //      denial must NEVER be returned as an empty result — that masks a fixable permission problem
-//      as "you have no data" (Faces charter #2: surface errors loudly; denied ≠ empty). We model a
+//      as "you have no data" (surface errors loudly; denied ≠ empty). We model a
 //      denial as a typed `PermissionError` that propagates to the MCP layer.
 //   2. Safe interpolation. Any user-controlled value embedded in an AppleScript source string must
 //      be escaped. Prefer @jxa/run with *passed arguments* (no source interpolation at all); use the

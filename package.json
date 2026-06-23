@@ -1,9 +1,9 @@
 {
 	"name": "apple-mcp",
-	"version": "1.1.0-faces.1",
+	"version": "2.0.0",
 	"type": "module",
-	"description": "Apple MCP server for Contacts, Messages, Notes, Reminders, and Calendar. Faces fork: JXA (real structured returns), honest permission errors, per-app filtering, no script injection.",
-	"author": "Dhravya Shah; Faces fork by faces.sh",
+	"description": "Apple MCP server for Contacts, Messages, Notes, Reminders, and Calendar — a JXA fork with full CRUD, honest permission errors, per-app filtering, and no script injection.",
+	"author": "Dhravya Shah and contributors",
 	"license": "MIT",
 	"repository": {
 		"type": "git",

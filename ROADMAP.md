@@ -1,6 +1,6 @@
 # Roadmap / deferred work
 
-This is Faces' fork of apple-mcp. It ships exactly the five Apple apps Faced supports today:
+This is a JXA-based fork of apple-mcp. It ships exactly the five Apple apps this fork supports today:
 **Contacts, Messages, Notes, Reminders, Calendar** — each rewritten on JXA (`@jxa/run`) for real
 structured returns, honest permission errors, and no script injection, and each independently
 gateable via `APPLE_MCP_ENABLED_APPS`.
@@ -22,5 +22,5 @@ gateable via `APPLE_MCP_ENABLED_APPS`.
   "open in Maps" actuator (search/directions), that can come back as a small, honest JXA module.
 
 - **Web search** — dropped permanently. The upstream `utils/web-search.ts` puppeteered Safari to
-  scrape Google (brittle, intrusive, CAPTCHA-prone) and was already dead code. Faced uses a dedicated
-  web-fetch / websearch capability instead.
+  scrape Google (brittle, intrusive, CAPTCHA-prone) and was already dead code. A host application uses
+  a dedicated web-fetch capability instead.
