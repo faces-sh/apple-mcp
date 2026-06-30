@@ -1,5 +1,5 @@
 import { run } from "@jxa/run";
-import { PermissionError, isPermissionDenial } from "./native";
+import { APP_NAME, PermissionError, isPermissionDenial } from "./native";
 
 // We drive the Reminders app through JXA (@jxa/run) rather than by interpolating user input into an
 // AppleScript source string. JXA returns REAL JS objects/arrays (so there is no string-parsing bug),
@@ -14,7 +14,7 @@ const MAX_REMINDERS = 1000;
 const MAX_LISTS = 1000;
 
 const REMINDERS_DENIED =
-	"Reminders access is not granted. In System Settings ▸ Privacy & Security, grant access " +
+	`Reminders access is not granted. In System Settings ▸ Privacy & Security, grant ${APP_NAME} access ` +
 	"to Reminders (and Automation ▸ Reminders), then try again.";
 
 /** A single reminder, in the exact shape the caller expects. */

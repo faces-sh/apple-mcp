@@ -10,6 +10,13 @@
 //      escape helper only where an AppleScript string literal is unavoidable.
 
 /**
+ * The host app's display name, used in the actionable permission messages (e.g. "grant <APP> access to
+ * Contacts"). The bundling host sets `APPLE_MCP_APP_NAME` to its real name; left unset it stays generic so
+ * the server reads neutrally on its own.
+ */
+export const APP_NAME = process.env.APPLE_MCP_APP_NAME?.trim() || "this app";
+
+/**
  * Raised when macOS TCC denies access (Automation, Contacts, or Full Disk Access). Distinct from a
  * genuinely empty result so the dispatch layer can surface an actionable "grant permission" message
  * with `isError: true`.

@@ -1,5 +1,5 @@
 import { run } from "@jxa/run";
-import { PermissionError, isPermissionDenial } from "./native";
+import { APP_NAME, PermissionError, isPermissionDenial } from "./native";
 
 // We drive Calendar through JXA (@jxa/run) rather than by interpolating user input into an
 // AppleScript source string. JXA returns REAL JS objects/arrays (so there is no "parse the string
@@ -27,7 +27,7 @@ const SEARCH_WINDOW_DAYS = 30;
 const MUTATE_WINDOW_DAYS = 30;
 
 const CALENDAR_DENIED =
-	"Calendar access is not granted. In System Settings ▸ Privacy & Security, grant access to " +
+	`Calendar access is not granted. In System Settings ▸ Privacy & Security, grant ${APP_NAME} access to ` +
 	"Calendars (and Automation ▸ Calendar), then try again.";
 
 /** The shape index.ts consumes. startDate/endDate are ISO-8601 strings. */

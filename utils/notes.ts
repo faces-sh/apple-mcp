@@ -1,5 +1,6 @@
 import { run } from "@jxa/run";
 import {
+	APP_NAME,
 	PermissionError,
 	isPermissionDenial,
 	rethrowIfPermissionDenied,
@@ -31,7 +32,7 @@ const MAX_CONTENT_PREVIEW = 2000;
 const DEFAULT_FOLDER = "Claude";
 
 const NOTES_DENIED =
-	"Notes access is not granted. In System Settings ▸ Privacy & Security ▸ Automation, grant " +
+	`Notes access is not granted. In System Settings ▸ Privacy & Security ▸ Automation, grant ${APP_NAME} ` +
 	"access to Notes, then try again.";
 
 export type NoteFormat = "markdown" | "html" | "plain";

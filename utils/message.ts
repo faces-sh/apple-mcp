@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 import { access } from "node:fs/promises";
 import {
+	APP_NAME,
 	PermissionError,
 	rethrowIfPermissionDenied,
 	escapeAppleScriptString,
@@ -40,10 +41,10 @@ const CHAT_DB = `${process.env.HOME}/Library/Messages/chat.db`;
 
 const MESSAGES_DB_DENIED =
 	"Messages access is not granted. Reading message history needs Full Disk Access: in System " +
-	"Settings ▸ Privacy & Security ▸ Full Disk Access, enable the app running this server, then try again.";
+	`Settings ▸ Privacy & Security ▸ Full Disk Access, enable ${APP_NAME}, then try again.`;
 const MESSAGES_SEND_DENIED =
-	"Messages access is not granted. In System Settings ▸ Privacy & Security ▸ Automation, allow " +
-	"the app running this server to control Messages, then try again.";
+	`Messages access is not granted. In System Settings ▸ Privacy & Security ▸ Automation, allow ${APP_NAME} ` +
+	"to control Messages, then try again.";
 
 // Configuration
 const CONFIG = {

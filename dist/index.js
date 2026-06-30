@@ -8143,10 +8143,11 @@ function phonesMatch(a, b) {
   const [shorter, longer] = da.length <= db.length ? [da, db] : [db, da];
   return shorter.length >= 7 && longer.endsWith(shorter);
 }
-var PermissionError;
+var APP_NAME, PermissionError;
 var init_native = __esm({
   "utils/native.ts"() {
     "use strict";
+    APP_NAME = process.env.APPLE_MCP_APP_NAME?.trim() || "this app";
     PermissionError = class extends Error {
       constructor(message2) {
         super(message2);
@@ -11222,7 +11223,7 @@ var init_contacts = __esm({
     init_native();
     init_phone();
     MAX_CONTACTS = 1e3;
-    CONTACTS_DENIED = "Contacts access is not granted. In System Settings \u25B8 Privacy & Security, grant access to Contacts (and Automation \u25B8 Contacts), then try again.";
+    CONTACTS_DENIED = `Contacts access is not granted. In System Settings \u25B8 Privacy & Security, grant ${APP_NAME} access to Contacts (and Automation \u25B8 Contacts), then try again.`;
     contactsCache = null;
     CONTACTS_TTL_MS = 3e4;
     contacts_default = {
@@ -11896,7 +11897,7 @@ var init_notes = __esm({
     MAX_NOTES = 1e3;
     MAX_CONTENT_PREVIEW = 2e3;
     DEFAULT_FOLDER = "Claude";
-    NOTES_DENIED = "Notes access is not granted. In System Settings \u25B8 Privacy & Security \u25B8 Automation, grant access to Notes, then try again.";
+    NOTES_DENIED = `Notes access is not granted. In System Settings \u25B8 Privacy & Security \u25B8 Automation, grant ${APP_NAME} access to Notes, then try again.`;
     notes_default = {
       requestNotesAccess,
       searchNotes,
@@ -12304,8 +12305,8 @@ var init_message = __esm({
     init_phone();
     execFileAsync2 = promisify2(execFile2);
     CHAT_DB = `${process.env.HOME}/Library/Messages/chat.db`;
-    MESSAGES_DB_DENIED = "Messages access is not granted. Reading message history needs Full Disk Access: in System Settings \u25B8 Privacy & Security \u25B8 Full Disk Access, enable the app running this server, then try again.";
-    MESSAGES_SEND_DENIED = "Messages access is not granted. In System Settings \u25B8 Privacy & Security \u25B8 Automation, allow the app running this server to control Messages, then try again.";
+    MESSAGES_DB_DENIED = `Messages access is not granted. Reading message history needs Full Disk Access: in System Settings \u25B8 Privacy & Security \u25B8 Full Disk Access, enable ${APP_NAME}, then try again.`;
+    MESSAGES_SEND_DENIED = `Messages access is not granted. In System Settings \u25B8 Privacy & Security \u25B8 Automation, allow ${APP_NAME} to control Messages, then try again.`;
     CONFIG = {
       // Hard ceiling on rows pulled from chat.db in any single read (perf guard).
       MAX_MESSAGES: 50,
@@ -12669,7 +12670,7 @@ var init_reminders = __esm({
     init_native();
     MAX_REMINDERS = 1e3;
     MAX_LISTS = 1e3;
-    REMINDERS_DENIED = "Reminders access is not granted. In System Settings \u25B8 Privacy & Security, grant access to Reminders (and Automation \u25B8 Reminders), then try again.";
+    REMINDERS_DENIED = `Reminders access is not granted. In System Settings \u25B8 Privacy & Security, grant ${APP_NAME} access to Reminders (and Automation \u25B8 Reminders), then try again.`;
     reminders_default = {
       getAllLists,
       getAllReminders,
@@ -13245,7 +13246,7 @@ var init_calendar = __esm({
     LIST_WINDOW_DAYS = 7;
     SEARCH_WINDOW_DAYS = 30;
     MUTATE_WINDOW_DAYS = 30;
-    CALENDAR_DENIED = "Calendar access is not granted. In System Settings \u25B8 Privacy & Security, grant access to Calendars (and Automation \u25B8 Calendar), then try again.";
+    CALENDAR_DENIED = `Calendar access is not granted. In System Settings \u25B8 Privacy & Security, grant ${APP_NAME} access to Calendars (and Automation \u25B8 Calendar), then try again.`;
     calendar = {
       searchEvents,
       openEvent,

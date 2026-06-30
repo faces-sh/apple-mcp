@@ -1,5 +1,5 @@
 import { run } from "@jxa/run";
-import { PermissionError, isPermissionDenial, phonesMatch } from "./native";
+import { APP_NAME, PermissionError, isPermissionDenial, phonesMatch } from "./native";
 import { isEmailHandle } from "./phone";
 
 interface ContactEntry {
@@ -12,7 +12,7 @@ interface ContactEntry {
 const MAX_CONTACTS = 1000;
 
 const CONTACTS_DENIED =
-	"Contacts access is not granted. In System Settings ▸ Privacy & Security, grant access " +
+	`Contacts access is not granted. In System Settings ▸ Privacy & Security, grant ${APP_NAME} access ` +
 	"to Contacts (and Automation ▸ Contacts), then try again.";
 
 // We drive Contacts through JXA (@jxa/run) rather than by interpolating user input into an
