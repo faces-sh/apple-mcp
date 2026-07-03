@@ -254,6 +254,10 @@ async function createReminder(
 				dueDate: string | null;
 			}) => {
 				const R = Application("Reminders");
+				// Bring Reminders up first: a detached MCP subprocess can't auto-launch it on write the way
+				// Calendar auto-launches on createEvent, so pushing to a closed Reminders throws a connection
+				// error. activate() launches it (matching how the other apps here come up) before we script it.
+				R.activate();
 
 				// Resolve the destination list: find by name, create it if missing, else the default list.
 				let list: any;

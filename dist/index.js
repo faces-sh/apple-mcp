@@ -11712,6 +11712,7 @@ async function createReminder(name, listName, notes2, dueDate) {
     const created = await (0, import_run3.run)(
       (args) => {
         const R = Application("Reminders");
+        R.activate();
         let list;
         if (args.listName) {
           const all = R.lists();
