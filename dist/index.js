@@ -12404,7 +12404,15 @@ async function scan(opts) {
           try {
             const list = lists[li];
             listName = String(list.name());
-            rems = list.reminders();
+            if (needle) {
+              try {
+                rems = list.reminders.whose({ name: { _contains: search } })();
+              } catch (e) {
+                rems = list.reminders();
+              }
+            } else {
+              rems = list.reminders();
+            }
           } catch (e) {
             continue;
           }

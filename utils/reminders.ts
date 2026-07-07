@@ -129,7 +129,19 @@ async function scan(opts: {
 					try {
 						const list = lists[li];
 						listName = String(list.name());
-						rems = list.reminders();
+						// With a search needle, filter INSIDE the app via whose(): one Apple Event per
+						// list instead of one per reminder property. Full enumeration on a large iCloud
+						// store takes minutes and silently times out upstream, which read as "search
+						// found nothing" (the updateReminder locate path already worked this way).
+						if (needle) {
+							try {
+								rems = list.reminders.whose({ name: { _contains: search } })();
+							} catch (e) {
+								rems = list.reminders(); // whose unsupported → bounded fallback below
+							}
+						} else {
+							rems = list.reminders();
+						}
 					} catch (e) {
 						// Skip an unreadable list; do not abort the whole scan.
 						continue;
