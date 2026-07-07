@@ -272,6 +272,15 @@ const REMINDERS_TOOL: Tool = {
       completed: {
         type: "boolean",
         description: "update only: set true to mark the reminder done, false to un-complete it. (For a one-shot toggle prefer the dedicated 'complete'/'uncomplete' operations.)"
+      },
+      recurrence: {
+        type: "object",
+        description: "Repeat rule (optional for create and update): set when the user says 'every day/week/month/year'. Requires a dueDate (a repeat needs an anchor). E.g. {\"frequency\":\"daily\"} or {\"frequency\":\"weekly\",\"interval\":2} for every 2 weeks.",
+        properties: {
+          frequency: { type: "string", enum: ["daily", "weekly", "monthly", "yearly"] },
+          interval: { type: "number", description: "Repeat every N periods (default 1)." }
+        },
+        required: ["frequency"]
       }
     },
     required: ["operation"]
@@ -374,6 +383,17 @@ const CALENDAR_TOOL: Tool = {
         type: "string",
         description:
           "New notes/description to set on the located event (optional, for 'update'; pass an empty string to clear it).",
+      },
+      recurrence: {
+        type: "object",
+        description:
+          "Repeat rule (optional for 'create' and 'update'): set when the user says 'every day/week/" +
+          "month/year'. E.g. {\"frequency\":\"weekly\"} or {\"frequency\":\"monthly\",\"interval\":3}.",
+        properties: {
+          frequency: { type: "string", enum: ["daily", "weekly", "monthly", "yearly"] },
+          interval: { type: "number", description: "Repeat every N periods (default 1)." },
+        },
+        required: ["frequency"],
       },
     },
     required: ["operation"],

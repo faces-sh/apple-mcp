@@ -6904,6 +6904,106 @@ var require_dist = __commonJS({
   }
 });
 
+// utils/native.ts
+function isPermissionDenial(error2) {
+  const msg = (error2 instanceof Error ? error2.message : String(error2)).toLowerCase();
+  return msg.includes("-1743") || // errAEEventNotPermitted — Automation denied / never prompted
+  msg.includes("-1744") || // user consent required
+  msg.includes("-10004") || // privilege violation
+  msg.includes("not authorized") || msg.includes("not allowed") || msg.includes("not permitted") || msg.includes("doesn't have permission") || msg.includes("does not have permission") || msg.includes("permission to") || msg.includes("access denied");
+}
+function rethrowIfPermissionDenied(error2, deniedMessage) {
+  if (isPermissionDenial(error2)) {
+    throw new PermissionError(deniedMessage);
+  }
+  throw error2 instanceof Error ? error2 : new Error(String(error2));
+}
+function escapeAppleScriptString(value) {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+function escapeSqlString(value) {
+  return value.replace(/'/g, "''");
+}
+function phoneDigits(value) {
+  return value.replace(/\D/g, "");
+}
+function phonesMatch(a, b) {
+  const da = phoneDigits(a);
+  const db = phoneDigits(b);
+  if (!da || !db) return false;
+  if (da === db) return true;
+  const [shorter, longer] = da.length <= db.length ? [da, db] : [db, da];
+  return shorter.length >= 7 && longer.endsWith(shorter);
+}
+var APP_NAME, PermissionError;
+var init_native = __esm({
+  "utils/native.ts"() {
+    "use strict";
+    APP_NAME = process.env.APPLE_MCP_APP_NAME?.trim() || "this app";
+    PermissionError = class extends Error {
+      constructor(message2) {
+        super(message2);
+        this.name = "PermissionError";
+      }
+    };
+  }
+});
+
+// utils/eventkit.ts
+import { execFile } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import * as nodePath from "node:path";
+function isRecurrence(value) {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value;
+  return typeof v.frequency === "string" && ["daily", "weekly", "monthly", "yearly"].includes(v.frequency) && (v.interval === void 0 || typeof v.interval === "number");
+}
+function runEventKit(domain, op, payload) {
+  return new Promise((resolve, reject) => {
+    const argv = [domain, op];
+    if (payload !== void 0) argv.push(JSON.stringify(payload));
+    execFile(
+      HELPER_PATH,
+      argv,
+      { timeout: 9e4, maxBuffer: 16 * 1024 * 1024 },
+      (err, stdout) => {
+        let parsed;
+        try {
+          parsed = JSON.parse(stdout);
+        } catch (_unparseable) {
+          reject(
+            new Error(
+              `eventkit-helper ${domain} ${op} failed: ${err ? err.message : "unparseable output"}`
+            )
+          );
+          return;
+        }
+        if (parsed && typeof parsed === "object" && "error" in parsed) {
+          const failure = parsed;
+          if (failure.denied === true) {
+            reject(new PermissionError(String(failure.error)));
+          } else {
+            reject(new Error(String(failure.error)));
+          }
+          return;
+        }
+        resolve(parsed);
+      }
+    );
+  });
+}
+var HELPER_PATH;
+var init_eventkit = __esm({
+  "utils/eventkit.ts"() {
+    "use strict";
+    init_native();
+    HELPER_PATH = nodePath.join(
+      nodePath.dirname(fileURLToPath(import.meta.url)),
+      "eventkit-helper"
+    );
+  }
+});
+
 // node_modules/semver/semver.js
 var require_semver = __commonJS({
   "node_modules/semver/semver.js"(exports, module) {
@@ -8109,51 +8209,6 @@ var require_run = __commonJS({
         child.stdin.end();
       });
     }
-  }
-});
-
-// utils/native.ts
-function isPermissionDenial(error2) {
-  const msg = (error2 instanceof Error ? error2.message : String(error2)).toLowerCase();
-  return msg.includes("-1743") || // errAEEventNotPermitted — Automation denied / never prompted
-  msg.includes("-1744") || // user consent required
-  msg.includes("-10004") || // privilege violation
-  msg.includes("not authorized") || msg.includes("not allowed") || msg.includes("not permitted") || msg.includes("doesn't have permission") || msg.includes("does not have permission") || msg.includes("permission to") || msg.includes("access denied");
-}
-function rethrowIfPermissionDenied(error2, deniedMessage) {
-  if (isPermissionDenial(error2)) {
-    throw new PermissionError(deniedMessage);
-  }
-  throw error2 instanceof Error ? error2 : new Error(String(error2));
-}
-function escapeAppleScriptString(value) {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-function escapeSqlString(value) {
-  return value.replace(/'/g, "''");
-}
-function phoneDigits(value) {
-  return value.replace(/\D/g, "");
-}
-function phonesMatch(a, b) {
-  const da = phoneDigits(a);
-  const db = phoneDigits(b);
-  if (!da || !db) return false;
-  if (da === db) return true;
-  const [shorter, longer] = da.length <= db.length ? [da, db] : [db, da];
-  return shorter.length >= 7 && longer.endsWith(shorter);
-}
-var APP_NAME, PermissionError;
-var init_native = __esm({
-  "utils/native.ts"() {
-    "use strict";
-    APP_NAME = process.env.APPLE_MCP_APP_NAME?.trim() || "this app";
-    PermissionError = class extends Error {
-      constructor(message2) {
-        super(message2);
-        this.name = "PermissionError";
-      }
-    };
   }
 });
 
@@ -11915,7 +11970,7 @@ var init_notes = __esm({
 // node_modules/run-applescript/index.js
 import process3 from "node:process";
 import { promisify } from "node:util";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile as execFile2, execFileSync } from "node:child_process";
 async function runAppleScript(script, { humanReadableOutput = true, signal } = {}) {
   if (process3.platform !== "darwin") {
     throw new Error("macOS only");
@@ -11931,7 +11986,7 @@ async function runAppleScript(script, { humanReadableOutput = true, signal } = {
 var execFileAsync;
 var init_run_applescript = __esm({
   "node_modules/run-applescript/index.js"() {
-    execFileAsync = promisify(execFile);
+    execFileAsync = promisify(execFile2);
   }
 });
 
@@ -11941,7 +11996,7 @@ __export(message_exports, {
   default: () => message_default
 });
 import { promisify as promisify2 } from "node:util";
-import { execFile as execFile2 } from "node:child_process";
+import { execFile as execFile3 } from "node:child_process";
 import { access } from "node:fs/promises";
 async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -12303,7 +12358,7 @@ var init_message = __esm({
     init_run_applescript();
     init_native();
     init_phone();
-    execFileAsync2 = promisify2(execFile2);
+    execFileAsync2 = promisify2(execFile3);
     CHAT_DB = `${process.env.HOME}/Library/Messages/chat.db`;
     MESSAGES_DB_DENIED = `Messages access is not granted. Reading message history needs Full Disk Access: in System Settings \u25B8 Privacy & Security \u25B8 Full Disk Access, enable ${APP_NAME}, then try again.`;
     MESSAGES_SEND_DENIED = `Messages access is not granted. In System Settings \u25B8 Privacy & Security \u25B8 Automation, allow ${APP_NAME} to control Messages, then try again.`;
@@ -12332,228 +12387,26 @@ var reminders_exports = {};
 __export(reminders_exports, {
   default: () => reminders_default
 });
-import { execFile as execFile3 } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import * as nodePath from "node:path";
-function runHelper(args) {
-  return new Promise((resolve, reject) => {
-    execFile3(HELPER_PATH, args, { timeout: 4e4, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
-      if (err && !stdout) {
-        reject(new Error(`reminders-helper failed: ${err.message}`));
-        return;
-      }
-      try {
-        const parsed = JSON.parse(stdout);
-        if (parsed && typeof parsed === "object" && "error" in parsed) {
-          reject(new Error(String(parsed.error)));
-          return;
-        }
-        resolve(parsed);
-      } catch (e) {
-        reject(new Error(`reminders-helper returned unparseable output: ${String(e)}`));
-      }
-    });
-  });
-}
 async function requestRemindersAccess() {
   try {
-    await (0, import_run3.run)(() => {
-      return Application("Reminders").name();
-    });
+    await runEventKit("reminders", "lists");
     return { hasAccess: true, message: "Reminders access is granted." };
   } catch (error2) {
-    if (isPermissionDenial(error2)) {
-      return { hasAccess: false, message: REMINDERS_DENIED };
+    if (error2 instanceof PermissionError) {
+      return { hasAccess: false, message: error2.message };
     }
     throw error2 instanceof Error ? error2 : new Error(String(error2));
   }
 }
-async function scan(opts) {
-  try {
-    const result2 = await (0, import_run3.run)(
-      (args) => {
-        const { search, listId, max, maxLists } = args;
-        const R = Application("Reminders");
-        const needle = search ? String(search).toLowerCase() : null;
-        const read = (r, listName) => {
-          const name = String(r.name());
-          let body = "";
-          try {
-            const b = r.body();
-            body = b ? String(b) : "";
-          } catch (e) {
-          }
-          let completed = false;
-          try {
-            completed = !!r.completed();
-          } catch (e) {
-          }
-          let dueDate = null;
-          try {
-            const d = r.dueDate();
-            if (d) dueDate = d.toISOString();
-          } catch (e) {
-          }
-          let id;
-          try {
-            id = String(r.id());
-          } catch (e) {
-          }
-          return { name, id, body, completed, dueDate, listName };
-        };
-        let lists;
-        if (listId) {
-          const all = R.lists();
-          let target = null;
-          for (let i = 0; i < all.length; i++) {
-            try {
-              if (String(all[i].id()) === String(listId)) {
-                target = all[i];
-                break;
-              }
-            } catch (e) {
-            }
-          }
-          if (!target) return { items: [], listNotFound: true };
-          lists = [target];
-        } else {
-          lists = R.lists();
-        }
-        const items = [];
-        const readMatches = (list, listName) => {
-          let rems;
-          try {
-            rems = needle ? list.reminders.whose({ name: { _contains: search } })() : list.reminders();
-          } catch (e) {
-            try {
-              rems = list.reminders();
-            } catch (e2) {
-              return;
-            }
-          }
-          for (let ri = 0; ri < rems.length; ri++) {
-            if (items.length >= max) return;
-            try {
-              const rec = read(rems[ri], listName);
-              if (needle) {
-                const hay = (rec.name + " " + (rec.body || "")).toLowerCase();
-                if (hay.indexOf(needle) === -1) continue;
-              }
-              items.push(rec);
-            } catch (e) {
-            }
-          }
-        };
-        let defaultListName = null;
-        if (needle && !listId) {
-          try {
-            const dl = R.defaultList();
-            defaultListName = String(dl.name());
-            readMatches(dl, defaultListName);
-            if (items.length > 0) {
-              return {
-                items,
-                listNotFound: false,
-                truncated: false,
-                scannedLists: 1,
-                totalLists: lists.length
-              };
-            }
-          } catch (e) {
-          }
-        }
-        const budgetMs = needle ? 25e3 : 6e4;
-        const t0 = Date.now();
-        let scanned = defaultListName ? 1 : 0;
-        let truncated = false;
-        const listCap = Math.min(lists.length, maxLists);
-        for (let li = 0; li < listCap; li++) {
-          if (Date.now() - t0 > budgetMs) {
-            truncated = true;
-            break;
-          }
-          let listName;
-          let list;
-          try {
-            list = lists[li];
-            listName = String(list.name());
-          } catch (e) {
-            continue;
-          }
-          if (defaultListName && listName === defaultListName) continue;
-          scanned++;
-          readMatches(list, listName);
-          if (items.length >= max) break;
-        }
-        return {
-          items,
-          listNotFound: false,
-          truncated,
-          scannedLists: scanned,
-          totalLists: lists.length
-        };
-      },
-      {
-        search: opts.search ?? null,
-        listId: opts.listId ?? null,
-        max: MAX_REMINDERS,
-        maxLists: MAX_LISTS
-      }
-    );
-    return result2;
-  } catch (error2) {
-    if (isPermissionDenial(error2)) throw new PermissionError(REMINDERS_DENIED);
-    throw error2 instanceof Error ? error2 : new Error(String(error2));
-  }
-}
 async function getAllLists() {
-  try {
-    const lists = await (0, import_run3.run)((max) => {
-      const R = Application("Reminders");
-      const all = R.lists();
-      const out = [];
-      const count = Math.min(all.length, max);
-      for (let i = 0; i < count; i++) {
-        try {
-          out.push({ id: String(all[i].id()), name: String(all[i].name()) });
-        } catch (e) {
-        }
-      }
-      return out;
-    }, MAX_LISTS);
-    return lists;
-  } catch (error2) {
-    if (isPermissionDenial(error2)) throw new PermissionError(REMINDERS_DENIED);
-    throw error2 instanceof Error ? error2 : new Error(String(error2));
-  }
+  return runEventKit("reminders", "lists");
 }
 async function getAllReminders() {
-  return (await scan({})).items;
+  return runEventKit("reminders", "list");
 }
 async function searchReminders(searchText) {
   if (!searchText || searchText.trim() === "") return [];
-  try {
-    return await runHelper(["search", searchText.trim()]);
-  } catch (_e) {
-    return (await scan({ search: searchText })).items;
-  }
-}
-async function searchRemindersDetailed(searchText) {
-  if (!searchText || searchText.trim() === "") {
-    return { items: [], truncated: false, scannedLists: 0, totalLists: 0 };
-  }
-  try {
-    const items = await runHelper(["search", searchText.trim()]);
-    return { items, truncated: false, scannedLists: -1, totalLists: -1 };
-  } catch (_e) {
-  }
-  const r = await scan({ search: searchText });
-  return {
-    items: r.items,
-    truncated: r.truncated ?? false,
-    scannedLists: r.scannedLists ?? 0,
-    totalLists: r.totalLists ?? 0
-  };
+  return runEventKit("reminders", "search", { text: searchText.trim() });
 }
 async function getReminderByName(name) {
   if (!name || name.trim() === "") return null;
@@ -12571,7 +12424,11 @@ async function openReminder(searchText) {
       return true;
     });
   } catch (error2) {
-    if (isPermissionDenial(error2)) throw new PermissionError(REMINDERS_DENIED);
+    if (isPermissionDenial(error2)) {
+      throw new PermissionError(
+        "Automation access to Reminders is not granted, so the app cannot be brought forward."
+      );
+    }
     throw error2 instanceof Error ? error2 : new Error(String(error2));
   }
   return {
@@ -12580,125 +12437,47 @@ async function openReminder(searchText) {
     reminder: { name: matches[0].name }
   };
 }
-async function createReminder(name, listName, notes2, dueDate) {
+function dueMs(dueDate) {
+  if (dueDate === void 0) return void 0;
+  const ms = new Date(dueDate).getTime();
+  if (Number.isNaN(ms)) {
+    throw new Error(`Invalid dueDate "${dueDate}". Use ISO-8601 (e.g. 2026-07-08T08:30:00).`);
+  }
+  return ms;
+}
+async function createReminder(name, listName, notes2, dueDate, recurrence) {
   if (!name || name.trim() === "") {
     throw new Error("Reminder name cannot be empty.");
   }
-  try {
-    const created = await (0, import_run3.run)(
-      (args) => {
-        const R = Application("Reminders");
-        let list;
-        let resolvedListName;
-        if (args.listName) {
-          try {
-            list = R.lists.byName(args.listName);
-            resolvedListName = String(list.name());
-          } catch (e) {
-            list = R.List({ name: args.listName });
-            R.lists.push(list);
-            resolvedListName = args.listName;
-          }
-        } else {
-          list = R.defaultList();
-          resolvedListName = String(list.name());
-        }
-        const props = {
-          name: args.name
-        };
-        if (args.notes) props.body = args.notes;
-        if (args.dueDate) props.dueDate = new Date(args.dueDate);
-        const rem = R.Reminder(props);
-        list.reminders.push(rem);
-        return { listName: resolvedListName };
-      },
-      {
-        name,
-        listName: listName ?? null,
-        notes: notes2 ?? null,
-        dueDate: dueDate ?? null
-      }
-    );
-    return {
-      name,
-      body: notes2 ?? "",
-      completed: false,
-      dueDate: dueDate ?? null,
-      listName: created.listName
-    };
-  } catch (error2) {
-    if (isPermissionDenial(error2)) throw new PermissionError(REMINDERS_DENIED);
-    throw error2 instanceof Error ? error2 : new Error(`Failed to create reminder: ${String(error2)}`);
-  }
-}
-async function getRemindersFromListById(listId, props) {
-  if (!listId || listId.trim() === "") {
-    throw new Error("A reminder list id is required.");
-  }
-  const result2 = await scan({ listId });
-  if (result2.listNotFound) {
-    throw new Error(`No reminder list found with id "${listId}".`);
-  }
-  return result2.items;
+  return runEventKit("reminders", "create", {
+    name: name.trim(),
+    listName,
+    notes: notes2,
+    dueMs: dueMs(dueDate),
+    recurrence
+  });
 }
 async function updateReminder(opts) {
   if (!opts.searchText || opts.searchText.trim() === "") {
     throw new Error("searchText is required to find the reminder to update.");
   }
-  try {
-    return await (0, import_run3.run)(
-      (a) => {
-        const R = Application("Reminders");
-        const needle = a.searchText.toLowerCase();
-        const lists = R.lists();
-        let target = null;
-        let targetName = "";
-        for (let li = 0; li < lists.length && !target; li++) {
-          let matches = [];
-          try {
-            matches = lists[li].reminders.whose({ name: { _contains: a.searchText } })();
-          } catch (e) {
-            try {
-              const rems = lists[li].reminders();
-              for (let ri = 0; ri < rems.length; ri++) {
-                try {
-                  if (String(rems[ri].name()).toLowerCase().indexOf(needle) !== -1) {
-                    matches = [rems[ri]];
-                    break;
-                  }
-                } catch (e2) {
-                }
-              }
-            } catch (e2) {
-            }
-          }
-          if (matches && matches.length > 0) {
-            target = matches[0];
-            try {
-              targetName = String(target.name());
-            } catch (e) {
-            }
-          }
-        }
-        if (!target) return { updated: false };
-        if (a.name != null) target.name = a.name;
-        if (a.notes != null) target.body = a.notes;
-        if (a.dueDate != null) target.dueDate = new Date(a.dueDate);
-        if (a.completed != null) target.completed = a.completed;
-        return { updated: true, name: a.name != null ? a.name : targetName };
-      },
-      {
-        searchText: opts.searchText,
-        name: opts.name ?? null,
-        notes: opts.notes ?? null,
-        dueDate: opts.dueDate ?? null,
-        completed: opts.completed ?? null
-      }
-    );
-  } catch (error2) {
-    if (isPermissionDenial(error2)) throw new PermissionError(REMINDERS_DENIED);
-    throw error2 instanceof Error ? error2 : new Error(String(error2));
-  }
+  const result2 = await runEventKit(
+    "reminders",
+    "update",
+    {
+      search: opts.searchText.trim(),
+      name: opts.name,
+      notes: opts.notes,
+      dueMs: dueMs(opts.dueDate),
+      completed: opts.completed,
+      recurrence: opts.recurrence
+    }
+  );
+  return {
+    updated: result2.updated,
+    name: result2.reminder?.name,
+    recurrence: result2.reminder?.recurrence
+  };
 }
 async function setReminderCompleted(searchText, completed) {
   return updateReminder({ searchText, completed });
@@ -12707,64 +12486,24 @@ async function deleteReminder(searchText) {
   if (!searchText || searchText.trim() === "") {
     throw new Error("searchText is required to find the reminder to delete.");
   }
-  try {
-    return await (0, import_run3.run)(
-      (a) => {
-        const R = Application("Reminders");
-        const needle = a.searchText.toLowerCase();
-        const lists = R.lists();
-        let target = null;
-        let targetName = "";
-        for (let li = 0; li < lists.length && !target; li++) {
-          let matches = [];
-          try {
-            matches = lists[li].reminders.whose({ name: { _contains: a.searchText } })();
-          } catch (e) {
-            try {
-              const rems = lists[li].reminders();
-              for (let ri = 0; ri < rems.length; ri++) {
-                try {
-                  if (String(rems[ri].name()).toLowerCase().indexOf(needle) !== -1) {
-                    matches = [rems[ri]];
-                    break;
-                  }
-                } catch (e2) {
-                }
-              }
-            } catch (e2) {
-            }
-          }
-          if (matches && matches.length > 0) {
-            target = matches[0];
-            try {
-              targetName = String(target.name());
-            } catch (e) {
-            }
-          }
-        }
-        if (!target) return { deleted: false };
-        R.delete(target);
-        return { deleted: true, name: targetName };
-      },
-      { searchText }
-    );
-  } catch (error2) {
-    if (isPermissionDenial(error2)) throw new PermissionError(REMINDERS_DENIED);
-    throw error2 instanceof Error ? error2 : new Error(String(error2));
-  }
+  return runEventKit("reminders", "delete", {
+    search: searchText.trim()
+  });
 }
-var import_run3, MAX_REMINDERS, HELPER_PATH, MAX_LISTS, REMINDERS_DENIED, reminders_default;
+async function getRemindersFromListById(listId, props) {
+  if (!listId || listId.trim() === "") {
+    throw new Error("A reminder list id is required.");
+  }
+  return runEventKit("reminders", "list", { listId: listId.trim() });
+}
+var import_run3, reminders_default;
 var init_reminders = __esm({
   "utils/reminders.ts"() {
     "use strict";
     import_run3 = __toESM(require_run(), 1);
     init_native();
-    MAX_REMINDERS = 1e3;
-    HELPER_PATH = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), "reminders-helper");
-    MAX_LISTS = 1e3;
-    REMINDERS_DENIED = `Reminders access is not granted. In System Settings \u25B8 Privacy & Security, grant ${APP_NAME} access to Reminders (and Automation \u25B8 Reminders), then try again.`;
+    init_eventkit();
     reminders_default = {
-      searchRemindersDetailed,
       getAllLists,
       getAllReminders,
       searchReminders,
@@ -12811,160 +12550,72 @@ function resolveWindow(fromDate, toDate, defaultDays) {
 }
 async function requestCalendarAccess() {
   try {
-    await (0, import_run4.run)(() => Application("Calendar").name());
+    const now = Date.now();
+    await runEventKit("calendar", "list", {
+      fromMs: now,
+      toMs: now + 1,
+      limit: 1
+    });
     return { hasAccess: true, message: "Calendar access is granted." };
   } catch (error2) {
-    if (isPermissionDenial(error2)) {
-      return { hasAccess: false, message: CALENDAR_DENIED };
+    if (error2 instanceof PermissionError) {
+      return { hasAccess: false, message: error2.message };
     }
     throw error2 instanceof Error ? error2 : new Error(String(error2));
   }
 }
-async function scanWindow(fromMs, toMs, limit, search) {
-  const events = await (0, import_run4.run)(
-    (args) => {
-      const C = Application("Calendar");
-      const from = new Date(args.fromMs);
-      const to = new Date(args.toMs);
-      const out = [];
-      let scanned = 0;
-      const cals = C.calendars();
-      for (let ci = 0; ci < cals.length && out.length < args.limit; ci++) {
-        try {
-          const cal = cals[ci];
-          const calName = cal.name();
-          let evs;
-          try {
-            evs = cal.events.whose({
-              _and: [
-                { startDate: { _greaterThanEquals: from } },
-                { startDate: { _lessThanEquals: to } }
-              ]
-            })();
-          } catch (_predicateUnsupported) {
-            evs = cal.events();
-          }
-          for (let ei = 0; ei < evs.length && out.length < args.limit && scanned < args.cap; ei++) {
-            scanned++;
-            try {
-              const ev = evs[ei];
-              const start = ev.startDate();
-              const end = ev.endDate();
-              const startMs = start ? start.getTime() : NaN;
-              if (!Number.isNaN(startMs) && (startMs < args.fromMs || startMs > args.toMs)) {
-                continue;
-              }
-              const title = ev.summary() || "";
-              const location = ev.location() || null;
-              const notes2 = ev.description() || null;
-              if (args.search) {
-                const hay = (title + " " + (location || "") + " " + (notes2 || "")).toLowerCase();
-                if (hay.indexOf(args.search) === -1) continue;
-              }
-              out.push({
-                id: ev.uid(),
-                title,
-                startDate: start ? start.toISOString() : "",
-                endDate: end ? end.toISOString() : "",
-                location,
-                calendarName: calName,
-                notes: notes2
-              });
-            } catch (_badEvent) {
-            }
-          }
-        } catch (_badCalendar) {
-        }
-      }
-      return out;
-    },
-    { fromMs, toMs, limit, search, cap: MAX_SCAN }
-  );
-  return events;
-}
 async function getEvents(limit = 10, fromDate, toDate) {
   const { fromMs, toMs } = resolveWindow(fromDate, toDate, LIST_WINDOW_DAYS);
-  try {
-    return await scanWindow(fromMs, toMs, Math.max(1, limit), "");
-  } catch (error2) {
-    if (isPermissionDenial(error2)) throw new PermissionError(CALENDAR_DENIED);
-    throw error2 instanceof Error ? error2 : new Error(String(error2));
-  }
+  return runEventKit("calendar", "list", {
+    fromMs,
+    toMs,
+    limit: Math.max(1, limit)
+  });
 }
 async function searchEvents(searchText, limit = 10, fromDate, toDate) {
-  const needle = (searchText ?? "").trim().toLowerCase();
+  const needle = (searchText ?? "").trim();
   if (needle === "") return [];
   const { fromMs, toMs } = resolveWindow(fromDate, toDate, SEARCH_WINDOW_DAYS);
-  try {
-    return await scanWindow(fromMs, toMs, Math.max(1, limit), needle);
-  } catch (error2) {
-    if (isPermissionDenial(error2)) throw new PermissionError(CALENDAR_DENIED);
-    throw error2 instanceof Error ? error2 : new Error(String(error2));
-  }
+  return runEventKit("calendar", "search", {
+    text: needle,
+    fromMs,
+    toMs,
+    limit: Math.max(1, limit)
+  });
 }
 async function openEvent(eventId) {
   const id = (eventId ?? "").trim();
   if (id === "") {
     return { success: false, message: "An event ID is required to open an event." };
   }
+  const found = await runEventKit(
+    "calendar",
+    "get",
+    { eventId: id }
+  );
+  if ("ok" in found && found.ok === false) {
+    return { success: false, message: `No event found with ID "${id}".` };
+  }
+  const event = found;
   try {
-    const found = await (0, import_run4.run)(
-      (args) => {
-        const C = Application("Calendar");
-        const cals = C.calendars();
-        let scanned = 0;
-        for (let ci = 0; ci < cals.length; ci++) {
-          try {
-            const cal = cals[ci];
-            let matches;
-            try {
-              matches = cal.events.whose({ uid: { _equals: args.id } })();
-            } catch (_predicateUnsupported) {
-              matches = [];
-            }
-            if (matches.length === 0) {
-              const evs = cal.events();
-              for (let ei = 0; ei < evs.length && scanned < args.cap; ei++) {
-                scanned++;
-                try {
-                  if (evs[ei].uid() === args.id) {
-                    matches = [evs[ei]];
-                    break;
-                  }
-                } catch (_badEvent) {
-                }
-              }
-            }
-            if (matches.length > 0) {
-              const ev = matches[0];
-              let title = "";
-              try {
-                title = ev.summary() || "";
-              } catch (_noTitle) {
-              }
-              C.activate();
-              return { found: true, title };
-            }
-          } catch (_badCalendar) {
-          }
-        }
-        return { found: false, title: "" };
-      },
-      { id, cap: MAX_SCAN }
-    );
-    if (!found.found) {
-      return { success: false, message: `No event found with ID "${id}".` };
-    }
-    return {
-      success: true,
-      message: found.title ? `Opened Calendar at "${found.title}".` : "Opened Calendar at the event."
-    };
+    await (0, import_run4.run)(() => {
+      Application("Calendar").activate();
+      return true;
+    });
   } catch (error2) {
-    if (isPermissionDenial(error2)) throw new PermissionError(CALENDAR_DENIED);
+    if (isPermissionDenial(error2)) {
+      throw new PermissionError(
+        "Automation access to Calendar is not granted, so the app cannot be brought forward."
+      );
+    }
     throw error2 instanceof Error ? error2 : new Error(String(error2));
   }
+  return {
+    success: true,
+    message: event.title ? `Opened Calendar at "${event.title}".` : "Opened Calendar at the event."
+  };
 }
-async function createEvent(title, startDate, endDate, location, notes2, isAllDay = false, calendarName) {
+async function createEvent(title, startDate, endDate, location, notes2, isAllDay = false, calendarName, recurrence) {
   if (!title || title.trim() === "") {
     return { success: false, message: "Event title cannot be empty." };
   }
@@ -12986,216 +12637,29 @@ async function createEvent(title, startDate, endDate, location, notes2, isAllDay
     return { success: false, message: "End date must be after start date." };
   }
   try {
-    const result2 = await (0, import_run4.run)(
-      (args) => {
-        const C = Application("Calendar");
-        let cal = null;
-        if (args.calendarName) {
-          try {
-            const named = C.calendars.byName(args.calendarName);
-            named.name();
-            cal = named;
-          } catch (_notFound) {
-            cal = null;
-          }
-          if (!cal) return { error: "calendar_not_found" };
-        } else {
-          const all = C.calendars();
-          if (all.length === 0) return { error: "no_calendars" };
-          cal = all[0];
-        }
-        const props = {
-          summary: args.title,
-          startDate: new Date(args.startMs),
-          endDate: new Date(args.endMs),
-          alldayEvent: args.isAllDay
-        };
-        if (args.location) props.location = args.location;
-        if (args.notes) props.description = args.notes;
-        const ev = C.Event(props);
-        cal.events.push(ev);
-        return { calendarName: cal.name() };
-      },
-      {
-        title: title.trim(),
-        startMs: start.getTime(),
-        endMs: end.getTime(),
-        location: location ?? "",
-        notes: notes2 ?? "",
-        isAllDay: !!isAllDay,
-        calendarName: calendarName ?? ""
-      }
-    );
-    if ("error" in result2) {
-      if (result2.error === "calendar_not_found") {
-        return {
-          success: false,
-          message: `Calendar "${calendarName}" was not found.`
-        };
-      }
-      return {
-        success: false,
-        message: "No calendars are available to create the event in."
-      };
-    }
+    const event = await runEventKit("calendar", "create", {
+      title: title.trim(),
+      startMs: start.getTime(),
+      endMs: end.getTime(),
+      isAllDay: !!isAllDay,
+      calendarName,
+      location,
+      notes: notes2,
+      recurrence
+    });
+    const repeats = event.recurrence ? `, repeating ${event.recurrence}` : "";
     return {
       success: true,
-      message: `Event "${title.trim()}" created in "${result2.calendarName}".`
+      message: `Event "${event.title}" created in "${event.calendarName}"${repeats}.`,
+      eventId: event.id
     };
   } catch (error2) {
-    if (isPermissionDenial(error2)) throw new PermissionError(CALENDAR_DENIED);
-    throw error2 instanceof Error ? error2 : new Error(String(error2));
-  }
-}
-async function locateAndApply(args) {
-  return await (0, import_run4.run)((a) => {
-    const C = Application("Calendar");
-    const byUid = a.eventId !== "";
-    let target = null;
-    let matchedCalName = "";
-    let matchedId = "";
-    let matchedTitle = "";
-    const matched = [];
-    let scanned = 0;
-    const cals = C.calendars();
-    for (let ci = 0; ci < cals.length && (!byUid || !target) && scanned < a.cap; ci++) {
-      try {
-        const cal = cals[ci];
-        const calName = cal.name();
-        if (byUid) {
-          let m;
-          try {
-            m = cal.events.whose({ uid: { _equals: a.eventId } })();
-          } catch (_predicateUnsupported) {
-            m = [];
-          }
-          if (m.length === 0) {
-            const evs = cal.events();
-            for (let ei = 0; ei < evs.length && scanned < a.cap; ei++) {
-              scanned++;
-              try {
-                if (evs[ei].uid() === a.eventId) {
-                  m = [evs[ei]];
-                  break;
-                }
-              } catch (_badEvent) {
-              }
-            }
-          }
-          if (m.length > 0) {
-            target = m[0];
-            matchedCalName = calName;
-            matchedId = a.eventId;
-            try {
-              matchedTitle = target.summary() || "";
-            } catch (_noTitle) {
-              matchedTitle = "";
-            }
-            break;
-          }
-        } else {
-          const from = new Date(a.fromMs);
-          const to = new Date(a.toMs);
-          let evs;
-          try {
-            evs = cal.events.whose({
-              _and: [
-                { summary: { _contains: a.title } },
-                { startDate: { _greaterThanEquals: from } },
-                { startDate: { _lessThanEquals: to } }
-              ]
-            })();
-          } catch (_predicateUnsupported) {
-            try {
-              evs = cal.events();
-            } catch (_badEnum) {
-              evs = [];
-            }
-          }
-          for (let ei = 0; ei < evs.length && scanned < a.cap; ei++) {
-            scanned++;
-            try {
-              const ev = evs[ei];
-              const start = ev.startDate();
-              const startMs = start ? start.getTime() : NaN;
-              if (!Number.isNaN(startMs) && (startMs < a.fromMs || startMs > a.toMs)) {
-                continue;
-              }
-              const summary = ev.summary() || "";
-              if (summary.toLowerCase().indexOf(a.titleLower) === -1) continue;
-              matched.push({
-                ev,
-                id: ev.uid(),
-                title: summary,
-                startMs: Number.isNaN(startMs) ? 0 : startMs,
-                calName
-              });
-            } catch (_badEvent) {
-            }
-          }
-        }
-      } catch (_badCalendar) {
-      }
-    }
-    if (byUid) {
-      if (!target) return { error: "not_found" };
-    } else {
-      if (matched.length === 0) return { error: "not_found" };
-      if (matched.length > 1) {
-        return {
-          error: "ambiguous",
-          candidates: matched.slice(0, 10).map((mm) => ({
-            id: mm.id,
-            title: mm.title,
-            start: mm.startMs ? new Date(mm.startMs).toISOString() : ""
-          }))
-        };
-      }
-      target = matched[0].ev;
-      matchedCalName = matched[0].calName;
-      matchedId = matched[0].id;
-      matchedTitle = matched[0].title;
-    }
-    if (a.mode === "delete") {
-      C.delete(target);
-      return {
-        ok: true,
-        id: matchedId,
-        title: matchedTitle,
-        calendarName: matchedCalName,
-        changed: []
-      };
-    }
-    const changed = [];
-    if (a.newSummary !== null) {
-      target.summary = a.newSummary;
-      changed.push("title");
-    }
-    if (a.newLocation !== null) {
-      target.location = a.newLocation;
-      changed.push("location");
-    }
-    if (a.newDescription !== null) {
-      target.description = a.newDescription;
-      changed.push("notes");
-    }
-    if (a.newStartMs !== null) {
-      target.startDate = new Date(a.newStartMs);
-      changed.push("start");
-    }
-    if (a.newEndMs !== null) {
-      target.endDate = new Date(a.newEndMs);
-      changed.push("end");
-    }
+    if (error2 instanceof PermissionError) throw error2;
     return {
-      ok: true,
-      id: matchedId,
-      // Report the new title if we set one, else the pre-mutation title (no read-back).
-      title: a.newSummary !== null ? a.newSummary : matchedTitle,
-      calendarName: matchedCalName,
-      changed
+      success: false,
+      message: error2 instanceof Error ? error2.message : String(error2)
     };
-  }, args);
+  }
 }
 function describeLocate(locator) {
   if (locator.eventId && locator.eventId.trim() !== "") {
@@ -13203,28 +12667,46 @@ function describeLocate(locator) {
   }
   return `titled "${(locator.title ?? "").trim()}" in the given window`;
 }
-async function updateEvent(locator, changes) {
+function locatorPayload(locator) {
   const hasId = !!locator.eventId && locator.eventId.trim() !== "";
   const hasTitle = !!locator.title && locator.title.trim() !== "";
-  if (!hasId && !hasTitle) {
+  if (!hasId && !hasTitle) return null;
+  if (hasId) {
+    return { eventId: locator.eventId.trim() };
+  }
+  const { fromMs, toMs } = resolveWindow(locator.fromDate, locator.toDate, MUTATE_WINDOW_DAYS);
+  return { title: locator.title.trim(), fromMs, toMs };
+}
+function mutationFailure(result2, locator, verb) {
+  if (result2.reason === "not_found") {
+    return { success: false, message: `No event found ${describeLocate(locator)}.` };
+  }
+  return {
+    success: false,
+    message: `Multiple events match the title "${(locator.title ?? "").trim()}". Re-issue ${verb} with a specific eventId.`,
+    candidates: result2.candidates
+  };
+}
+async function updateEvent(locator, changes) {
+  const locate = locatorPayload(locator);
+  if (!locate) {
     return {
       success: false,
       message: "Provide an eventId or a title to identify the event to update."
     };
   }
-  const newSummaryRaw = changes.newTitle;
-  if (newSummaryRaw !== void 0 && newSummaryRaw.trim() === "") {
+  if (changes.newTitle !== void 0 && changes.newTitle.trim() === "") {
     return { success: false, message: "newTitle cannot be empty." };
   }
-  const anyChange = changes.newTitle !== void 0 || changes.newStartDate !== void 0 || changes.newEndDate !== void 0 || changes.newLocation !== void 0 || changes.newNotes !== void 0;
+  const anyChange = changes.newTitle !== void 0 || changes.newStartDate !== void 0 || changes.newEndDate !== void 0 || changes.newLocation !== void 0 || changes.newNotes !== void 0 || changes.recurrence !== void 0;
   if (!anyChange) {
     return {
       success: false,
-      message: "Nothing to update. Provide at least one of newTitle, newStartDate, newEndDate, newLocation, or newNotes."
+      message: "Nothing to update. Provide at least one of newTitle, newStartDate, newEndDate, newLocation, newNotes, or recurrence."
     };
   }
-  let newStartMs = null;
-  let newEndMs = null;
+  let newStartMs;
+  let newEndMs;
   try {
     if (changes.newStartDate !== void 0) {
       newStartMs = parseDate(changes.newStartDate, "newStartDate").getTime();
@@ -13238,108 +12720,52 @@ async function updateEvent(locator, changes) {
       message: error2 instanceof Error ? error2.message : String(error2)
     };
   }
-  if (newStartMs !== null && newEndMs !== null && newEndMs <= newStartMs) {
+  if (newStartMs !== void 0 && newEndMs !== void 0 && newEndMs <= newStartMs) {
     return { success: false, message: "newEndDate must be after newStartDate." };
   }
-  const { fromMs, toMs } = hasId ? { fromMs: 0, toMs: 0 } : resolveWindow(locator.fromDate, locator.toDate, MUTATE_WINDOW_DAYS);
-  try {
-    const result2 = await locateAndApply({
-      mode: "update",
-      eventId: hasId ? locator.eventId.trim() : "",
-      title: hasTitle ? locator.title.trim() : "",
-      titleLower: hasTitle ? locator.title.trim().toLowerCase() : "",
-      fromMs,
-      toMs,
-      cap: MAX_SCAN,
-      newSummary: changes.newTitle !== void 0 ? changes.newTitle.trim() : null,
-      newLocation: changes.newLocation !== void 0 ? changes.newLocation : null,
-      newDescription: changes.newNotes !== void 0 ? changes.newNotes : null,
-      newStartMs,
-      newEndMs
-    });
-    if ("error" in result2) {
-      if (result2.error === "not_found") {
-        return {
-          success: false,
-          message: `No event found ${describeLocate(locator)}.`
-        };
-      }
-      return {
-        success: false,
-        message: `Multiple events match the title "${(locator.title ?? "").trim()}". Re-issue update with a specific eventId.`,
-        candidates: result2.candidates
-      };
-    }
-    const fields = result2.changed.length ? result2.changed.join(", ") : "nothing";
-    return {
-      success: true,
-      message: `Updated "${result2.title}" in "${result2.calendarName}" (${fields}).`,
-      eventId: result2.id
-    };
-  } catch (error2) {
-    if (isPermissionDenial(error2)) throw new PermissionError(CALENDAR_DENIED);
-    throw error2 instanceof Error ? error2 : new Error(String(error2));
-  }
+  const result2 = await runEventKit("calendar", "update", {
+    ...locate,
+    newTitle: changes.newTitle?.trim(),
+    newStartMs,
+    newEndMs,
+    newLocation: changes.newLocation,
+    newNotes: changes.newNotes,
+    recurrence: changes.recurrence
+  });
+  if (!result2.ok) return mutationFailure(result2, locator, "update");
+  const fields = result2.changed?.length ? result2.changed.join(", ") : "nothing";
+  return {
+    success: true,
+    message: `Updated "${result2.event.title}" in "${result2.event.calendarName}" (${fields}).`,
+    eventId: result2.event.id
+  };
 }
 async function deleteEvent(locator) {
-  const hasId = !!locator.eventId && locator.eventId.trim() !== "";
-  const hasTitle = !!locator.title && locator.title.trim() !== "";
-  if (!hasId && !hasTitle) {
+  const locate = locatorPayload(locator);
+  if (!locate) {
     return {
       success: false,
       message: "Provide an eventId or a title to identify the event to delete."
     };
   }
-  const { fromMs, toMs } = hasId ? { fromMs: 0, toMs: 0 } : resolveWindow(locator.fromDate, locator.toDate, MUTATE_WINDOW_DAYS);
-  try {
-    const result2 = await locateAndApply({
-      mode: "delete",
-      eventId: hasId ? locator.eventId.trim() : "",
-      title: hasTitle ? locator.title.trim() : "",
-      titleLower: hasTitle ? locator.title.trim().toLowerCase() : "",
-      fromMs,
-      toMs,
-      cap: MAX_SCAN,
-      newSummary: null,
-      newLocation: null,
-      newDescription: null,
-      newStartMs: null,
-      newEndMs: null
-    });
-    if ("error" in result2) {
-      if (result2.error === "not_found") {
-        return {
-          success: false,
-          message: `No event found ${describeLocate(locator)}.`
-        };
-      }
-      return {
-        success: false,
-        message: `Multiple events match the title "${(locator.title ?? "").trim()}". Re-issue delete with a specific eventId.`,
-        candidates: result2.candidates
-      };
-    }
-    return {
-      success: true,
-      message: result2.title ? `Deleted "${result2.title}" from "${result2.calendarName}".` : `Deleted the event from "${result2.calendarName}".`,
-      eventId: result2.id
-    };
-  } catch (error2) {
-    if (isPermissionDenial(error2)) throw new PermissionError(CALENDAR_DENIED);
-    throw error2 instanceof Error ? error2 : new Error(String(error2));
-  }
+  const result2 = await runEventKit("calendar", "delete", locate);
+  if (!result2.ok) return mutationFailure(result2, locator, "delete");
+  return {
+    success: true,
+    message: result2.event.title ? `Deleted "${result2.event.title}" from "${result2.event.calendarName}".` : `Deleted the event from "${result2.event.calendarName}".`,
+    eventId: result2.event.id
+  };
 }
-var import_run4, MAX_SCAN, LIST_WINDOW_DAYS, SEARCH_WINDOW_DAYS, MUTATE_WINDOW_DAYS, CALENDAR_DENIED, calendar, calendar_default;
+var import_run4, LIST_WINDOW_DAYS, SEARCH_WINDOW_DAYS, MUTATE_WINDOW_DAYS, calendar, calendar_default;
 var init_calendar = __esm({
   "utils/calendar.ts"() {
     "use strict";
     import_run4 = __toESM(require_run(), 1);
     init_native();
-    MAX_SCAN = 1e3;
+    init_eventkit();
     LIST_WINDOW_DAYS = 7;
     SEARCH_WINDOW_DAYS = 30;
     MUTATE_WINDOW_DAYS = 30;
-    CALENDAR_DENIED = `Calendar access is not granted. In System Settings \u25B8 Privacy & Security, grant ${APP_NAME} access to Calendars (and Automation \u25B8 Calendar), then try again.`;
     calendar = {
       searchEvents,
       openEvent,
@@ -20658,6 +20084,15 @@ var REMINDERS_TOOL = {
       completed: {
         type: "boolean",
         description: "update only: set true to mark the reminder done, false to un-complete it. (For a one-shot toggle prefer the dedicated 'complete'/'uncomplete' operations.)"
+      },
+      recurrence: {
+        type: "object",
+        description: `Repeat rule (optional for create and update): set when the user says 'every day/week/month/year'. Requires a dueDate (a repeat needs an anchor). E.g. {"frequency":"daily"} or {"frequency":"weekly","interval":2} for every 2 weeks.`,
+        properties: {
+          frequency: { type: "string", enum: ["daily", "weekly", "monthly", "yearly"] },
+          interval: { type: "number", description: "Repeat every N periods (default 1)." }
+        },
+        required: ["frequency"]
       }
     },
     required: ["operation"]
@@ -20741,6 +20176,15 @@ var CALENDAR_TOOL = {
       newNotes: {
         type: "string",
         description: "New notes/description to set on the located event (optional, for 'update'; pass an empty string to clear it)."
+      },
+      recurrence: {
+        type: "object",
+        description: `Repeat rule (optional for 'create' and 'update'): set when the user says 'every day/week/month/year'. E.g. {"frequency":"weekly"} or {"frequency":"monthly","interval":3}.`,
+        properties: {
+          frequency: { type: "string", enum: ["daily", "weekly", "monthly", "yearly"] },
+          interval: { type: "number", description: "Repeat every N periods (default 1)." }
+        },
+        required: ["frequency"]
       }
     },
     required: ["operation"]
@@ -20750,6 +20194,7 @@ var tools = [CONTACTS_TOOL, NOTES_TOOL, MESSAGES_TOOL, REMINDERS_TOOL, CALENDAR_
 var tools_default = tools;
 
 // index.ts
+init_eventkit();
 var ENABLED_APPS = (() => {
   const raw = process.env.APPLE_MCP_ENABLED_APPS;
   if (raw === void 0) return null;
@@ -21335,18 +20780,16 @@ ${note.content}` }],
               };
             } else if (operation === "search") {
               const { searchText } = args;
-              const det = await remindersModule.searchRemindersDetailed(searchText);
-              const results = det.items;
+              const results = await remindersModule.searchReminders(searchText);
               const lines = results.map(
-                (r) => `- ${r.name}${r.dueDate ? ` (due ${r.dueDate})` : ""}${r.completed ? " [completed]" : ""} [list: ${r.listName}]${r.id ? ` [id: ${r.id}]` : ""}`
+                (r) => `- ${r.name}${r.dueDate ? ` (due ${r.dueDate})` : ""}${r.recurrence ? ` (repeats ${r.recurrence})` : ""}${r.completed ? " [completed]" : ""} [list: ${r.listName}]${r.id ? ` [id: ${r.id}]` : ""}`
               );
-              const coverage = det.truncated ? ` Searched ${det.scannedLists} of ${det.totalLists} lists before the time budget ran out; name a list to search further.` : "";
               return {
                 content: [
                   {
                     type: "text",
                     text: results.length > 0 ? `Found ${results.length} reminders matching "${searchText}":
-${lines.join("\n")}${coverage}` : `No reminders found matching "${searchText}".${coverage}`
+${lines.join("\n")}` : `No reminders found matching "${searchText}".`
                   }
                 ],
                 reminders: results,
@@ -21379,18 +20822,19 @@ ${lines.join("\n")}${coverage}` : `No reminders found matching "${searchText}".$
                 isError: !result2.success
               };
             } else if (operation === "create") {
-              const { name: name2, listName, notes: notes2, dueDate } = args;
+              const { name: name2, listName, notes: notes2, dueDate, recurrence } = args;
               const result2 = await remindersModule.createReminder(
                 name2,
                 listName,
                 notes2,
-                dueDate
+                dueDate,
+                recurrence
               );
               return {
                 content: [
                   {
                     type: "text",
-                    text: `Created reminder "${result2.name}"${listName ? ` in list "${listName}"` : ""}.`
+                    text: `Created reminder "${result2.name}"${listName ? ` in list "${listName}"` : ""}${result2.recurrence ? `, repeating ${result2.recurrence}` : ""}.`
                   }
                 ],
                 success: true,
@@ -21398,19 +20842,20 @@ ${lines.join("\n")}${coverage}` : `No reminders found matching "${searchText}".$
                 isError: false
               };
             } else if (operation === "update") {
-              const { searchText, name: name2, notes: notes2, dueDate, completed } = args;
+              const { searchText, name: name2, notes: notes2, dueDate, completed, recurrence } = args;
               const result2 = await remindersModule.updateReminder({
                 searchText,
                 name: name2,
                 notes: notes2,
                 dueDate,
-                completed
+                completed,
+                recurrence
               });
               return {
                 content: [
                   {
                     type: "text",
-                    text: result2.updated ? `Updated reminder "${result2.name}".` : `No reminder found matching "${searchText}" to update.`
+                    text: result2.updated ? `Updated reminder "${result2.name}"${result2.recurrence ? `, repeating ${result2.recurrence}` : ""}.` : `No reminder found matching "${searchText}" to update.`
                   }
                 ],
                 success: result2.updated,
@@ -21559,7 +21004,8 @@ ID: ${event.id}`
                   location,
                   notes: notes2,
                   isAllDay,
-                  calendarName
+                  calendarName,
+                  recurrence
                 } = args;
                 const result2 = await calendarModule.createEvent(
                   title,
@@ -21568,7 +21014,8 @@ ID: ${event.id}`
                   location,
                   notes2,
                   isAllDay,
-                  calendarName
+                  calendarName,
+                  recurrence
                 );
                 return {
                   content: [
@@ -21591,11 +21038,12 @@ Event ID: ${result2.eventId}` : ""}` : `Error creating event: ${result2.message}
                   newStartDate,
                   newEndDate,
                   newLocation,
-                  newNotes
+                  newNotes,
+                  recurrence
                 } = args;
                 const result2 = await calendarModule.updateEvent(
                   { eventId, title, fromDate, toDate },
-                  { newTitle, newStartDate, newEndDate, newLocation, newNotes }
+                  { newTitle, newStartDate, newEndDate, newLocation, newNotes, recurrence }
                 );
                 let text;
                 if (result2.success) {
@@ -21831,6 +21279,9 @@ function isRemindersArgs(args) {
   if (operation === "listById" && (typeof a.listId !== "string" || a.listId === "")) {
     return false;
   }
+  if (a.recurrence !== void 0 && !isRecurrence(a.recurrence)) {
+    return false;
+  }
   return true;
 }
 function isCalendarArgs(args) {
@@ -21869,6 +21320,10 @@ function isCalendarArgs(args) {
     if (!hasId && !hasTitle) {
       return false;
     }
+  }
+  const { recurrence } = args;
+  if (recurrence !== void 0 && !isRecurrence(recurrence)) {
+    return false;
   }
   return true;
 }

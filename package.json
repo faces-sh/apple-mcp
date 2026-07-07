@@ -33,7 +33,7 @@
 		"ROADMAP.md"
 	],
 	"scripts": {
-		"build": "esbuild index.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/index.js --banner:js=\"import{createRequire}from'module';const require=createRequire(import.meta.url);\"",
+		"build": "esbuild index.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/index.js --banner:js=\"import{createRequire}from'module';const require=createRequire(import.meta.url);\" && swiftc -O -framework EventKit -o dist/eventkit-helper helpers/EventKitHelper.swift",
 		"start": "node dist/index.js",
 		"typecheck": "tsc --noEmit",
 		"prepare": "npm run build"

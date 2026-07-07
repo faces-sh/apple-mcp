@@ -6,6 +6,7 @@ import {
 	ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import tools from "./tools";
+import { isRecurrence, type Recurrence } from "./utils/eventkit";
 
 // Per-app filtering. A host application exposes only the Apple apps the user has toggled
 // on by passing APPLE_MCP_ENABLED_APPS as a comma-separated list of tool names. Tool names map 1:1
@@ -736,26 +737,22 @@ function initServer() {
 							};
 						} else if (operation === "search") {
 							const { searchText } = args;
-							const det = await remindersModule.searchRemindersDetailed(searchText!);
-							const results = det.items;
+							const results = await remindersModule.searchReminders(searchText!);
 							// The ITEMS go in the text: MCP clients show content text only, and a bare
-							// "Found 4" left the caller knowing nothing it could act on. Coverage is
-							// reported honestly when the time budget stopped the sweep early.
+							// "Found 4" left the caller knowing nothing it could act on. The native
+							// search covers every list, so there is no partial-coverage caveat.
 							const lines = results.map(
 								(r) =>
-									`- ${r.name}${r.dueDate ? ` (due ${r.dueDate})` : ""}${r.completed ? " [completed]" : ""} [list: ${r.listName}]${r.id ? ` [id: ${r.id}]` : ""}`,
+									`- ${r.name}${r.dueDate ? ` (due ${r.dueDate})` : ""}${r.recurrence ? ` (repeats ${r.recurrence})` : ""}${r.completed ? " [completed]" : ""} [list: ${r.listName}]${r.id ? ` [id: ${r.id}]` : ""}`,
 							);
-							const coverage = det.truncated
-								? ` Searched ${det.scannedLists} of ${det.totalLists} lists before the time budget ran out; name a list to search further.`
-								: "";
 							return {
 								content: [
 									{
 										type: "text",
 										text:
 											results.length > 0
-												? `Found ${results.length} reminders matching "${searchText}":\n${lines.join("\n")}${coverage}`
-												: `No reminders found matching "${searchText}".${coverage}`,
+												? `Found ${results.length} reminders matching "${searchText}":\n${lines.join("\n")}`
+												: `No reminders found matching "${searchText}".`,
 									},
 								],
 								reminders: results,
@@ -792,18 +789,19 @@ function initServer() {
 								isError: !result.success,
 							};
 						} else if (operation === "create") {
-							const { name, listName, notes, dueDate } = args;
+							const { name, listName, notes, dueDate, recurrence } = args;
 							const result = await remindersModule.createReminder(
 								name!,
 								listName,
 								notes,
 								dueDate,
+								recurrence,
 							);
 							return {
 								content: [
 									{
 										type: "text",
-										text: `Created reminder "${result.name}"${listName ? ` in list "${listName}"` : ""}.`,
+										text: `Created reminder "${result.name}"${listName ? ` in list "${listName}"` : ""}${result.recurrence ? `, repeating ${result.recurrence}` : ""}.`,
 									},
 								],
 								success: true,
@@ -811,20 +809,21 @@ function initServer() {
 								isError: false,
 							};
 						} else if (operation === "update") {
-							const { searchText, name, notes, dueDate, completed } = args;
+							const { searchText, name, notes, dueDate, completed, recurrence } = args;
 							const result = await remindersModule.updateReminder({
 								searchText: searchText!,
 								name,
 								notes,
 								dueDate,
 								completed,
+								recurrence,
 							});
 							return {
 								content: [
 									{
 										type: "text",
 										text: result.updated
-											? `Updated reminder "${result.name}".`
+											? `Updated reminder "${result.name}"${result.recurrence ? `, repeating ${result.recurrence}` : ""}.`
 											: `No reminder found matching "${searchText}" to update.`,
 									},
 								],
@@ -1008,6 +1007,7 @@ function initServer() {
 									notes,
 									isAllDay,
 									calendarName,
+									recurrence,
 								} = args;
 								const result = await calendarModule.createEvent(
 									title!,
@@ -1017,6 +1017,7 @@ function initServer() {
 									notes,
 									isAllDay,
 									calendarName,
+									recurrence,
 								);
 								return {
 									content: [
@@ -1042,10 +1043,11 @@ function initServer() {
 									newEndDate,
 									newLocation,
 									newNotes,
+									recurrence,
 								} = args;
 								const result = await calendarModule.updateEvent(
 									{ eventId, title, fromDate, toDate },
-									{ newTitle, newStartDate, newEndDate, newLocation, newNotes },
+									{ newTitle, newStartDate, newEndDate, newLocation, newNotes, recurrence },
 								);
 
 								let text: string;
@@ -1359,6 +1361,7 @@ function isRemindersArgs(args: unknown): args is {
 	notes?: string;
 	dueDate?: string;
 	completed?: boolean;
+	recurrence?: Recurrence;
 } {
 	if (typeof args !== "object" || args === null) {
 		return false;
@@ -1419,6 +1422,11 @@ function isRemindersArgs(args: unknown): args is {
 		return false;
 	}
 
+	// A recurrence, when given, must be well-formed (a malformed repeat must never silently drop).
+	if (a.recurrence !== undefined && !isRecurrence(a.recurrence)) {
+		return false;
+	}
+
 	return true;
 }
 
@@ -1441,6 +1449,7 @@ function isCalendarArgs(args: unknown): args is {
 	newEndDate?: string;
 	newLocation?: string;
 	newNotes?: string;
+	recurrence?: Recurrence;
 } {
 	if (typeof args !== "object" || args === null) {
 		return false;
@@ -1495,6 +1504,12 @@ function isCalendarArgs(args: unknown): args is {
 		if (!hasId && !hasTitle) {
 			return false;
 		}
+	}
+
+	// A recurrence, when given, must be well-formed (a malformed repeat must never silently drop).
+	const { recurrence } = args as { recurrence?: unknown };
+	if (recurrence !== undefined && !isRecurrence(recurrence)) {
+		return false;
 	}
 
 	return true;
