@@ -1,4 +1,4 @@
-# apple-mcp (Faces fork)
+# apple-mcp
 
 An MCP server that lets an agent work with five native macOS apps:
 
@@ -10,8 +10,8 @@ An MCP server that lets an agent work with five native macOS apps:
 | `reminders` | list, search, open, create, list-by-id |
 | `calendar`  | list, search, open, create |
 
-This is **Faces'** fork of the (now-archived) [`supermemoryai/apple-mcp`](https://github.com/supermemoryai/apple-mcp).
-Faced bundles it and runs it under its own Node runtime. It is a substantial rewrite — not a config tweak:
+A maintained, JXA-based fork of the (now-archived) [`supermemoryai/apple-mcp`](https://github.com/supermemoryai/apple-mcp).
+A host application bundles and runs this server under its own Node runtime. It is a substantial rewrite — not a config tweak:
 
 - **JXA, not AppleScript-string-building.** Every app is driven through `@jxa/run`, which returns real
   JS objects (the upstream modules treated AppleScript's *string* return as an array, so list/search

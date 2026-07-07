@@ -8064,7 +8064,7 @@ var require_run = __commonJS({
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.run = exports.runJXACode = void 0;
-    var execFile3 = __require("child_process").execFile;
+    var execFile4 = __require("child_process").execFile;
     var macosVersion = require_macos_version();
     function runJXACode(jxaCode) {
       return executeInOsa(jxaCode, []);
@@ -8083,7 +8083,7 @@ var require_run = __commonJS({
     function executeInOsa(code, args) {
       return new Promise(function(resolve, reject) {
         macosVersion.assertGreaterThanOrEqualTo("10.10");
-        var child = execFile3("/usr/bin/osascript", ["-l", "JavaScript"], {
+        var child = execFile4("/usr/bin/osascript", ["-l", "JavaScript"], {
           env: {
             OSA_ARGS: JSON.stringify(args)
           },
@@ -8143,10 +8143,11 @@ function phonesMatch(a, b) {
   const [shorter, longer] = da.length <= db.length ? [da, db] : [db, da];
   return shorter.length >= 7 && longer.endsWith(shorter);
 }
-var PermissionError;
+var APP_NAME, PermissionError;
 var init_native = __esm({
   "utils/native.ts"() {
     "use strict";
+    APP_NAME = process.env.APPLE_MCP_APP_NAME?.trim() || "this app";
     PermissionError = class extends Error {
       constructor(message2) {
         super(message2);
@@ -10819,7 +10820,10 @@ async function requestContactsAccess() {
     throw error2 instanceof Error ? error2 : new Error(String(error2));
   }
 }
-async function getAllContacts() {
+function invalidateCache() {
+  contactsCache = null;
+}
+async function scanAllContacts() {
   try {
     return await (0, import_run.run)((max) => {
       const app = Application("Contacts");
@@ -10844,6 +10848,18 @@ async function getAllContacts() {
     throw error2 instanceof Error ? error2 : new Error(String(error2));
   }
 }
+async function getAllContacts() {
+  const now = Date.now();
+  if (contactsCache && now - contactsCache.at < CONTACTS_TTL_MS) {
+    return contactsCache.promise;
+  }
+  const promise = scanAllContacts();
+  contactsCache = { at: now, promise };
+  promise.catch(() => {
+    if (contactsCache?.promise === promise) contactsCache = null;
+  });
+  return promise;
+}
 async function getAllNumbers() {
   const contacts2 = await getAllContacts();
   const result2 = {};
@@ -10859,12 +10875,32 @@ function cleanName(name) {
     ""
   ).replace(/[☀-➿⬀-⯿️]/g, "").replace(/\s+/g, " ").trim();
 }
-async function findNumber(name) {
-  if (!name || name.trim() === "") return [];
-  const allNumbers = await getAllNumbers();
-  const names = Object.keys(allNumbers);
-  if (names.length === 0) return [];
-  const search = cleanName(name);
+async function findBestContact(name) {
+  const trimmed = name.trim();
+  if (!trimmed) return null;
+  try {
+    const hit = await (0, import_run.run)((needle) => {
+      const app = Application("Contacts");
+      let people = [];
+      try {
+        people = app.people.whose({ name: { _contains: needle } })();
+      } catch {
+        people = [];
+      }
+      if (!people || people.length === 0) return null;
+      const p = people[0];
+      const phones = p.phones().map((x) => x.value()).filter((v) => typeof v === "string" && v.length > 0);
+      const emails = p.emails().map((x) => x.value()).filter((v) => typeof v === "string" && v.length > 0);
+      return { name: p.name(), phones, emails };
+    }, trimmed);
+    if (hit && (hit.phones.length > 0 || hit.emails.length > 0)) return hit;
+  } catch (error2) {
+    if (isPermissionDenial(error2)) throw new PermissionError(CONTACTS_DENIED);
+    throw error2 instanceof Error ? error2 : new Error(String(error2));
+  }
+  const all = await getAllContacts();
+  if (all.length === 0) return null;
+  const search = cleanName(trimmed);
   const strategies = [
     (c) => cleanName(c) === search,
     (c) => cleanName(c).startsWith(search),
@@ -10878,10 +10914,17 @@ async function findNumber(name) {
     (c) => cleanName(c).split(" ").some((w) => w === search || w.startsWith(search))
   ];
   for (const matches of strategies) {
-    const hit = names.find(matches);
-    if (hit) return allNumbers[hit];
+    const hit = all.find((c) => matches(c.name));
+    if (hit) return hit;
   }
-  return [];
+  return null;
+}
+async function findNumber(name) {
+  return (await findBestContact(name))?.phones ?? [];
+}
+async function findHandles(name) {
+  const hit = await findBestContact(name);
+  return hit ? [...hit.phones, ...hit.emails] : [];
 }
 async function findContactByPhone(handle) {
   if (!handle || handle.trim() === "") return null;
@@ -10899,7 +10942,280 @@ async function findContactByPhone(handle) {
   }
   return null;
 }
-var import_run, MAX_CONTACTS, CONTACTS_DENIED, contacts_default;
+async function searchContacts(name) {
+  const trimmed = name.trim();
+  if (!trimmed) return [];
+  try {
+    const hits = await (0, import_run.run)(
+      (args) => {
+        const app = Application("Contacts");
+        let people = [];
+        try {
+          people = app.people.whose({ name: { _contains: args.needle } })();
+        } catch {
+          return null;
+        }
+        const out = [];
+        const count = Math.min(people.length, args.max);
+        for (let i = 0; i < count; i++) {
+          try {
+            const p = people[i];
+            const phones = p.phones().map((x) => x.value()).filter((v) => typeof v === "string" && v.length > 0);
+            const emails = p.emails().map((x) => x.value()).filter((v) => typeof v === "string" && v.length > 0);
+            out.push({ name: p.name(), phones, emails });
+          } catch {
+          }
+        }
+        return out;
+      },
+      { needle: trimmed, max: MAX_CONTACTS }
+    );
+    if (hits !== null) return hits;
+  } catch (error2) {
+    if (isPermissionDenial(error2)) throw new PermissionError(CONTACTS_DENIED);
+    throw error2 instanceof Error ? error2 : new Error(String(error2));
+  }
+  const all = await getAllContacts();
+  const search = cleanName(trimmed);
+  return all.filter((c) => cleanName(c.name).includes(search));
+}
+function composeName(opts) {
+  const parts = [opts.firstName, opts.lastName].map((p) => (p ?? "").trim()).filter((p) => p.length > 0);
+  if (parts.length > 0) return parts.join(" ");
+  return (opts.organization ?? "").trim();
+}
+async function createContact(opts) {
+  const firstName = (opts.firstName ?? "").trim();
+  const lastName = (opts.lastName ?? "").trim();
+  const organization = (opts.organization ?? "").trim();
+  if (!firstName && !lastName && !organization) {
+    throw new Error(
+      "A new contact needs at least a first name, last name, or organization."
+    );
+  }
+  const phones = (opts.phones ?? []).map((p) => p.trim()).filter((p) => p.length > 0);
+  const emails = (opts.emails ?? []).map((e) => e.trim()).filter((e) => e.length > 0);
+  const phoneLabel = (opts.phoneLabel ?? "mobile").trim() || "mobile";
+  const emailLabel = (opts.emailLabel ?? "home").trim() || "home";
+  try {
+    await (0, import_run.run)(
+      (a) => {
+        const app = Application("Contacts");
+        const props = {};
+        if (a.firstName) props.firstName = a.firstName;
+        if (a.lastName) props.lastName = a.lastName;
+        if (a.organization) props.organization = a.organization;
+        const person = app.Person(props);
+        app.people.push(person);
+        for (let i = 0; i < a.phones.length; i++) {
+          person.phones.push(app.Phone({ label: a.phoneLabel, value: a.phones[i] }));
+        }
+        for (let i = 0; i < a.emails.length; i++) {
+          person.emails.push(app.Email({ label: a.emailLabel, value: a.emails[i] }));
+        }
+        app.save();
+        return true;
+      },
+      { firstName, lastName, organization, phones, emails, phoneLabel, emailLabel }
+    );
+  } catch (error2) {
+    invalidateCache();
+    if (isPermissionDenial(error2)) throw new PermissionError(CONTACTS_DENIED);
+    throw error2 instanceof Error ? error2 : new Error(`Failed to create contact: ${String(error2)}`);
+  }
+  invalidateCache();
+  return {
+    name: composeName({ firstName, lastName, organization }),
+    phones,
+    emails
+  };
+}
+async function updateContact(opts) {
+  const target = opts.name.trim();
+  if (!target) {
+    throw new Error("A contact name is required to identify which contact to update.");
+  }
+  const addPhones = (opts.addPhones ?? []).map((p) => p.trim()).filter(Boolean);
+  const addEmails = (opts.addEmails ?? []).map((e) => e.trim()).filter(Boolean);
+  const removePhones = (opts.removePhones ?? []).map((p) => p.trim()).filter(Boolean);
+  const removeEmails = (opts.removeEmails ?? []).map((e) => e.trim()).filter(Boolean);
+  const hasRename = opts.firstName != null || opts.lastName != null || opts.organization != null;
+  if (!hasRename && addPhones.length === 0 && addEmails.length === 0 && removePhones.length === 0 && removeEmails.length === 0) {
+    throw new Error("Nothing to update: provide a rename and/or phones/emails to add or remove.");
+  }
+  const phoneLabel = (opts.phoneLabel ?? "mobile").trim() || "mobile";
+  const emailLabel = (opts.emailLabel ?? "home").trim() || "home";
+  let result2;
+  try {
+    result2 = await (0, import_run.run)(
+      (a) => {
+        const app = Application("Contacts");
+        let person = null;
+        try {
+          const hits = app.people.whose({ name: { _contains: a.needle } })();
+          if (hits && hits.length > 0) person = hits[0];
+        } catch (e) {
+          person = null;
+        }
+        if (!person) {
+          const people = app.people();
+          const lower = a.needle.toLowerCase();
+          const count = Math.min(people.length, a.max);
+          for (let i = 0; i < count; i++) {
+            try {
+              if (String(people[i].name()).toLowerCase().indexOf(lower) !== -1) {
+                person = people[i];
+                break;
+              }
+            } catch (e2) {
+            }
+          }
+        }
+        if (!person) return { updated: false };
+        let existingName = "";
+        try {
+          existingName = String(person.name());
+        } catch (e) {
+        }
+        if (a.firstName != null) person.firstName = a.firstName;
+        if (a.lastName != null) person.lastName = a.lastName;
+        if (a.organization != null) person.organization = a.organization;
+        const digits = (s) => s.replace(/[^0-9]/g, "");
+        const phonesMatchLoose = (x, y) => {
+          const dx = digits(x);
+          const dy = digits(y);
+          if (!dx || !dy) return false;
+          if (dx === dy) return true;
+          const shorter = dx.length <= dy.length ? dx : dy;
+          const longer = dx.length <= dy.length ? dy : dx;
+          return shorter.length >= 7 && longer.lastIndexOf(shorter) === longer.length - shorter.length;
+        };
+        if (a.removePhones.length > 0) {
+          const ph = person.phones();
+          for (let i = 0; i < ph.length; i++) {
+            let val = "";
+            try {
+              val = String(ph[i].value());
+            } catch (e) {
+              continue;
+            }
+            if (a.removePhones.some((r) => phonesMatchLoose(r, val))) {
+              try {
+                app.delete(ph[i]);
+              } catch (e) {
+              }
+            }
+          }
+        }
+        if (a.removeEmails.length > 0) {
+          const targets = a.removeEmails.map((e) => e.toLowerCase());
+          const em = person.emails();
+          for (let i = 0; i < em.length; i++) {
+            let val = "";
+            try {
+              val = String(em[i].value()).toLowerCase();
+            } catch (e) {
+              continue;
+            }
+            if (targets.indexOf(val) !== -1) {
+              try {
+                app.delete(em[i]);
+              } catch (e) {
+              }
+            }
+          }
+        }
+        for (let i = 0; i < a.addPhones.length; i++) {
+          person.phones.push(app.Phone({ label: a.phoneLabel, value: a.addPhones[i] }));
+        }
+        for (let i = 0; i < a.addEmails.length; i++) {
+          person.emails.push(app.Email({ label: a.emailLabel, value: a.addEmails[i] }));
+        }
+        app.save();
+        return { updated: true, name: existingName };
+      },
+      {
+        needle: target,
+        firstName: opts.firstName ?? null,
+        lastName: opts.lastName ?? null,
+        organization: opts.organization ?? null,
+        addPhones,
+        addEmails,
+        removePhones,
+        removeEmails,
+        phoneLabel,
+        emailLabel,
+        max: MAX_CONTACTS
+      }
+    );
+  } catch (error2) {
+    invalidateCache();
+    if (isPermissionDenial(error2)) throw new PermissionError(CONTACTS_DENIED);
+    throw error2 instanceof Error ? error2 : new Error(String(error2));
+  }
+  if (result2.updated) {
+    invalidateCache();
+    const renamed = composeName({
+      firstName: opts.firstName,
+      lastName: opts.lastName,
+      organization: opts.organization
+    });
+    return { updated: true, name: hasRename && renamed ? renamed : result2.name };
+  }
+  return { updated: false };
+}
+async function deleteContact(name) {
+  const target = name.trim();
+  if (!target) {
+    throw new Error("A contact name is required to identify which contact to delete.");
+  }
+  let result2;
+  try {
+    result2 = await (0, import_run.run)(
+      (a) => {
+        const app = Application("Contacts");
+        let person = null;
+        try {
+          const hits = app.people.whose({ name: { _contains: a.needle } })();
+          if (hits && hits.length > 0) person = hits[0];
+        } catch (e) {
+          person = null;
+        }
+        if (!person) {
+          const people = app.people();
+          const lower = a.needle.toLowerCase();
+          const count = Math.min(people.length, a.max);
+          for (let i = 0; i < count; i++) {
+            try {
+              if (String(people[i].name()).toLowerCase().indexOf(lower) !== -1) {
+                person = people[i];
+                break;
+              }
+            } catch (e2) {
+            }
+          }
+        }
+        if (!person) return { deleted: false };
+        let existingName = "";
+        try {
+          existingName = String(person.name());
+        } catch (e) {
+        }
+        app.delete(person);
+        app.save();
+        return { deleted: true, name: existingName };
+      },
+      { needle: target, max: MAX_CONTACTS }
+    );
+  } catch (error2) {
+    invalidateCache();
+    if (isPermissionDenial(error2)) throw new PermissionError(CONTACTS_DENIED);
+    throw error2 instanceof Error ? error2 : new Error(String(error2));
+  }
+  if (result2.deleted) invalidateCache();
+  return result2;
+}
+var import_run, MAX_CONTACTS, CONTACTS_DENIED, contactsCache, CONTACTS_TTL_MS, contacts_default;
 var init_contacts = __esm({
   "utils/contacts.ts"() {
     "use strict";
@@ -10907,11 +11223,18 @@ var init_contacts = __esm({
     init_native();
     init_phone();
     MAX_CONTACTS = 1e3;
-    CONTACTS_DENIED = "Contacts access is not granted. In System Settings \u25B8 Privacy & Security, grant Faced access to Contacts (and Automation \u25B8 Contacts), then try again.";
+    CONTACTS_DENIED = `Contacts access is not granted. In System Settings \u25B8 Privacy & Security, grant ${APP_NAME} access to Contacts (and Automation \u25B8 Contacts), then try again.`;
+    contactsCache = null;
+    CONTACTS_TTL_MS = 3e4;
     contacts_default = {
       getAllNumbers,
       findNumber,
+      findHandles,
       findContactByPhone,
+      searchContacts,
+      createContact,
+      updateContact,
+      deleteContact,
       requestContactsAccess
     };
   }
@@ -10922,6 +11245,108 @@ var notes_exports = {};
 __export(notes_exports, {
   default: () => notes_default
 });
+function escapeHtml(text) {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function inlineMarkdown(text) {
+  let t = escapeHtml(text);
+  t = t.replace(
+    /\[([^\]]+)\]\(([^)\s]+)\)/g,
+    (_m, label, url) => `<a href="${url}">${label}</a>`
+  );
+  t = t.replace(/`([^`]+)`/g, (_m, code) => `<code>${code}</code>`);
+  t = t.replace(/(\*\*|__)(.+?)\1/g, (_m, _mark, inner) => `<b>${inner}</b>`);
+  t = t.replace(/(\*|_)(?!\s)(.+?)(?<!\s)\1/g, (_m, _mark, inner) => `<i>${inner}</i>`);
+  return t;
+}
+function markdownToHtml(md) {
+  const lines = md.replace(/\r\n?/g, "\n").split("\n");
+  const html = [];
+  let listType = null;
+  const closeList = () => {
+    if (listType) {
+      html.push(`</${listType}>`);
+      listType = null;
+    }
+  };
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (/^\s*([-*_])\1{2,}\s*$/.test(line)) {
+      closeList();
+      html.push("<hr>");
+      i++;
+      continue;
+    }
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      closeList();
+      const level = heading[1].length;
+      html.push(`<h${level}>${inlineMarkdown(heading[2])}</h${level}>`);
+      i++;
+      continue;
+    }
+    const quote = line.match(/^>\s?(.*)$/);
+    if (quote) {
+      closeList();
+      html.push(`<blockquote>${inlineMarkdown(quote[1])}</blockquote>`);
+      i++;
+      continue;
+    }
+    const ul = line.match(/^\s*[-*+]\s+(.*)$/);
+    if (ul) {
+      if (listType !== "ul") {
+        closeList();
+        html.push("<ul>");
+        listType = "ul";
+      }
+      html.push(`<li>${inlineMarkdown(ul[1])}</li>`);
+      i++;
+      continue;
+    }
+    const ol = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (ol) {
+      if (listType !== "ol") {
+        closeList();
+        html.push("<ol>");
+        listType = "ol";
+      }
+      html.push(`<li>${inlineMarkdown(ol[1])}</li>`);
+      i++;
+      continue;
+    }
+    if (line.trim() === "") {
+      closeList();
+      i++;
+      continue;
+    }
+    closeList();
+    const para = [line];
+    i++;
+    const blockStart = /^(#{1,6}\s|>\s?|\s*[-*+]\s|\s*\d+[.)]\s)/;
+    const hr = /^\s*([-*_])\1{2,}\s*$/;
+    while (i < lines.length && lines[i].trim() !== "" && !blockStart.test(lines[i]) && !hr.test(lines[i])) {
+      para.push(lines[i]);
+      i++;
+    }
+    html.push(`<div>${para.map(inlineMarkdown).join("<br>")}</div>`);
+  }
+  closeList();
+  return html.join("");
+}
+function plainToHtml(text) {
+  return text.replace(/\r\n?/g, "\n").split("\n").map((l) => l.length ? `<div>${escapeHtml(l)}</div>` : "<div><br></div>").join("");
+}
+function bodyToHtml(body, format) {
+  switch (format) {
+    case "html":
+      return body;
+    case "plain":
+      return plainToHtml(body);
+    case "markdown":
+      return markdownToHtml(body);
+  }
+}
 async function requestNotesAccess() {
   try {
     await (0, import_run2.run)(() => {
@@ -10935,82 +11360,276 @@ async function requestNotesAccess() {
     throw error2 instanceof Error ? error2 : new Error(String(error2));
   }
 }
-async function getAllNotes() {
+async function searchNotes(searchText) {
+  if (!searchText || searchText.trim() === "") return [];
+  const needle = searchText.trim();
   try {
-    const notes2 = await (0, import_run2.run)(
+    const hits = await (0, import_run2.run)(
       (opts) => {
         const Notes = Application("Notes");
-        const all = Notes.notes();
         const out = [];
+        let matches = [];
+        let whoseWorked = true;
+        try {
+          matches = Notes.notes.whose({
+            _or: [
+              { name: { _contains: opts.search } },
+              { plaintext: { _contains: opts.search } }
+            ]
+          })();
+        } catch (_e) {
+          whoseWorked = false;
+        }
+        if (whoseWorked) {
+          const count2 = Math.min(matches.length, opts.max);
+          for (let i = 0; i < count2; i++) {
+            try {
+              out.push({ name: matches[i].name() || "Untitled Note", id: matches[i].id() });
+            } catch (_e) {
+            }
+          }
+          return out;
+        }
+        const all = Notes.notes();
+        const needleLc = opts.search.toLowerCase();
         const count = Math.min(all.length, opts.max);
         for (let i = 0; i < count; i++) {
           try {
             const note = all[i];
+            const name = note.name();
+            let plain = "";
+            try {
+              plain = note.plaintext();
+            } catch (_e) {
+              plain = "";
+            }
+            const haystack = ((typeof name === "string" ? name : "") + "\n" + (typeof plain === "string" ? plain : "")).toLowerCase();
+            if (haystack.indexOf(needleLc) !== -1) {
+              out.push({ name: name || "Untitled Note", id: note.id() });
+            }
+          } catch (_e) {
+          }
+        }
+        return out;
+      },
+      { search: needle, max: MAX_NOTES }
+    );
+    return hits.map((h) => ({ name: h.name, id: h.id }));
+  } catch (error2) {
+    rethrowIfPermissionDenied(error2, NOTES_DENIED);
+  }
+}
+async function scanNotes(folderName) {
+  try {
+    const raw = await (0, import_run2.run)(
+      (opts) => {
+        const Notes = Application("Notes");
+        let collection;
+        if (opts.folderName) {
+          let folder = null;
+          const folders = Notes.folders();
+          for (let i = 0; i < folders.length; i++) {
+            try {
+              if (folders[i].name() === opts.folderName) {
+                folder = folders[i];
+                break;
+              }
+            } catch (_e) {
+            }
+          }
+          if (!folder) return { found: false, notes: [] };
+          collection = folder.notes();
+        } else {
+          collection = Notes.notes();
+        }
+        const out = [];
+        const count = Math.min(collection.length, opts.max);
+        for (let i = 0; i < count; i++) {
+          try {
+            const note = collection[i];
             const rawName = note.name();
             let content = note.plaintext();
             content = typeof content === "string" ? content : "";
             if (content.length > opts.maxLen) {
               content = content.slice(0, opts.maxLen) + "\u2026";
             }
+            let id = null;
+            try {
+              id = note.id();
+            } catch (_e) {
+            }
+            let created = null;
+            let modified = null;
+            try {
+              const d = note.creationDate();
+              created = d ? d.getTime() : null;
+            } catch (_e) {
+            }
+            try {
+              const d = note.modificationDate();
+              modified = d ? d.getTime() : null;
+            } catch (_e) {
+            }
             out.push({
               name: typeof rawName === "string" && rawName ? rawName : "Untitled Note",
-              content
+              content,
+              id,
+              creationDate: created,
+              modificationDate: modified
             });
           } catch (_e) {
           }
         }
-        return out;
+        return { found: true, notes: out };
       },
-      { max: MAX_NOTES, maxLen: MAX_CONTENT_PREVIEW }
+      { folderName: folderName ?? null, max: MAX_NOTES, maxLen: MAX_CONTENT_PREVIEW }
     );
-    return notes2.map((n) => ({ name: n.name, content: n.content }));
+    return {
+      folderFound: raw.found,
+      notes: raw.notes.map((n) => ({
+        name: n.name,
+        content: n.content,
+        id: n.id ?? void 0,
+        creationDate: n.creationDate != null ? new Date(n.creationDate) : void 0,
+        modificationDate: n.modificationDate != null ? new Date(n.modificationDate) : void 0
+      }))
+    };
   } catch (error2) {
     rethrowIfPermissionDenied(error2, NOTES_DENIED);
   }
 }
-async function findNote(searchText) {
-  if (!searchText || searchText.trim() === "") return [];
+async function listNotes(opts) {
+  const { folderFound, notes: notes2 } = await scanNotes(opts.folderName);
+  if (opts.folderName && !folderFound) {
+    return { success: false, message: `Folder "${opts.folderName}" not found.` };
+  }
+  const from = opts.fromDate ? Date.parse(opts.fromDate) : NaN;
+  const to = opts.toDate ? Date.parse(opts.toDate) : NaN;
+  let result2 = notes2;
+  if (!Number.isNaN(from) || !Number.isNaN(to)) {
+    result2 = result2.filter((n) => {
+      const t = n.modificationDate ? n.modificationDate.getTime() : null;
+      if (t === null) return false;
+      if (!Number.isNaN(from) && t < from) return false;
+      if (!Number.isNaN(to) && t > to) return false;
+      return true;
+    });
+  }
+  result2 = [...result2].sort((a, b) => {
+    const ta = a.modificationDate ? a.modificationDate.getTime() : 0;
+    const tb = b.modificationDate ? b.modificationDate.getTime() : 0;
+    return tb - ta;
+  });
+  if (typeof opts.limit === "number" && opts.limit >= 0) {
+    result2 = result2.slice(0, opts.limit);
+  }
+  return { success: true, notes: result2 };
+}
+async function getNote(locate) {
+  if (!locate.noteId && !(locate.title && locate.title.trim())) return null;
   try {
-    const notes2 = await (0, import_run2.run)(
+    const raw = await (0, import_run2.run)(
       (opts) => {
         const Notes = Application("Notes");
-        const all = Notes.notes();
-        const out = [];
-        const needle = opts.search.toLowerCase();
-        const count = Math.min(all.length, opts.max);
-        for (let i = 0; i < count; i++) {
+        let note = null;
+        if (opts.noteId) {
           try {
-            const note = all[i];
-            const rawName = note.name();
-            const rawPlain = note.plaintext();
-            const name = typeof rawName === "string" ? rawName : "";
-            const plain = typeof rawPlain === "string" ? rawPlain : "";
-            const haystack = (name + "\n" + plain).toLowerCase();
-            if (haystack.indexOf(needle) === -1) continue;
-            let content = plain;
-            if (content.length > opts.maxLen) {
-              content = content.slice(0, opts.maxLen) + "\u2026";
-            }
-            out.push({ name: name || "Untitled Note", content });
+            const candidate = Notes.notes.byId(opts.noteId);
+            candidate.name();
+            note = candidate;
           } catch (_e) {
+            note = null;
           }
         }
-        return out;
+        if (!note && opts.title) {
+          let matches = [];
+          try {
+            matches = Notes.notes.whose({ name: { _contains: opts.title } })();
+          } catch (_e) {
+            matches = [];
+          }
+          for (let i = 0; i < matches.length; i++) {
+            try {
+              if (matches[i].name() === opts.title) {
+                note = matches[i];
+                break;
+              }
+            } catch (_e) {
+            }
+          }
+          if (!note && matches.length > 0) note = matches[0];
+        }
+        if (!note) {
+          return {
+            found: false,
+            name: "",
+            content: "",
+            body: "",
+            id: null,
+            folderName: null,
+            creationDate: null,
+            modificationDate: null
+          };
+        }
+        let folderName = null;
+        try {
+          folderName = note.container().name();
+        } catch (_e) {
+        }
+        let created = null;
+        let modified = null;
+        try {
+          const d = note.creationDate();
+          created = d ? d.getTime() : null;
+        } catch (_e) {
+        }
+        try {
+          const d = note.modificationDate();
+          modified = d ? d.getTime() : null;
+        } catch (_e) {
+        }
+        const plain = note.plaintext();
+        const html = note.body();
+        let id = null;
+        try {
+          id = note.id();
+        } catch (_e) {
+        }
+        return {
+          found: true,
+          name: note.name() || "Untitled Note",
+          content: typeof plain === "string" ? plain : "",
+          body: typeof html === "string" ? html : "",
+          id,
+          folderName,
+          creationDate: created,
+          modificationDate: modified
+        };
       },
-      { search: searchText, max: MAX_NOTES, maxLen: MAX_CONTENT_PREVIEW }
+      { title: locate.title?.trim() ?? null, noteId: locate.noteId ?? null }
     );
-    return notes2.map((n) => ({ name: n.name, content: n.content }));
+    if (!raw.found) return null;
+    return {
+      name: raw.name,
+      content: raw.content,
+      body: raw.body,
+      id: raw.id ?? void 0,
+      folderName: raw.folderName ?? void 0,
+      creationDate: raw.creationDate != null ? new Date(raw.creationDate) : void 0,
+      modificationDate: raw.modificationDate != null ? new Date(raw.modificationDate) : void 0
+    };
   } catch (error2) {
     rethrowIfPermissionDenied(error2, NOTES_DENIED);
   }
 }
-async function createNote(title, body, folderName = DEFAULT_FOLDER) {
-  if (!title || title.trim() === "") {
+async function createNote(input) {
+  if (!input.title || input.title.trim() === "") {
     return { success: false, message: "Note title cannot be empty." };
   }
-  const targetFolder = folderName && folderName.trim() !== "" ? folderName : DEFAULT_FOLDER;
-  const noteBody = `${title}
-${body ?? ""}`;
+  const targetFolder = input.folderName && input.folderName.trim() !== "" ? input.folderName.trim() : DEFAULT_FOLDER;
+  const format = input.format ?? "markdown";
+  const bodyHtml = input.body ? bodyToHtml(input.body, format) : "";
+  const fullHtml = `<div><b>${escapeHtml(input.title)}</b></div>${bodyHtml}`;
   try {
     const result2 = await (0, import_run2.run)(
       (opts) => {
@@ -11039,15 +11658,15 @@ ${body ?? ""}`;
           at: folder,
           withProperties: { body: opts.body }
         });
-        return { folderName: opts.folderName, usedDefaultFolder: createdFolder };
+        return { folderName: opts.folderName, createdFolder };
       },
-      { folderName: targetFolder, body: noteBody }
+      { folderName: targetFolder, body: fullHtml }
     );
     return {
       success: true,
-      note: { name: title, content: body ?? "" },
+      note: { name: input.title, content: input.body ?? "", body: fullHtml },
       folderName: result2.folderName,
-      usedDefaultFolder: result2.usedDefaultFolder
+      createdFolder: result2.createdFolder
     };
   } catch (error2) {
     if (isPermissionDenial(error2)) throw new PermissionError(NOTES_DENIED);
@@ -11057,112 +11676,217 @@ ${body ?? ""}`;
     };
   }
 }
-async function scanFolder(folderName) {
+async function updateNote(input) {
+  if (!input.noteId && !(input.title && input.title.trim())) {
+    return { success: false, message: "An id or title is required to locate the note." };
+  }
+  const format = input.format ?? "markdown";
+  const newHtml = bodyToHtml(input.body ?? "", format);
+  const mode = input.mode ?? "replace";
   try {
-    const raw = await (0, import_run2.run)(
+    const result2 = await (0, import_run2.run)(
       (opts) => {
         const Notes = Application("Notes");
-        let folder = null;
-        const folders = Notes.folders();
-        for (let i = 0; i < folders.length; i++) {
+        let note = null;
+        if (opts.noteId) {
           try {
-            if (folders[i].name() === opts.folderName) {
-              folder = folders[i];
-              break;
-            }
+            const candidate = Notes.notes.byId(opts.noteId);
+            candidate.name();
+            note = candidate;
           } catch (_e) {
+            note = null;
           }
         }
-        if (!folder) return { found: false, notes: [] };
-        const folderNotes = folder.notes();
-        const out = [];
-        const count = Math.min(folderNotes.length, opts.max);
-        for (let i = 0; i < count; i++) {
+        if (!note && opts.title) {
+          let matches = [];
           try {
-            const note = folderNotes[i];
-            const rawName = note.name();
-            let content = note.plaintext();
-            content = typeof content === "string" ? content : "";
-            if (content.length > opts.maxLen) {
-              content = content.slice(0, opts.maxLen) + "\u2026";
-            }
-            let created = null;
-            let modified = null;
-            try {
-              const d = note.creationDate();
-              created = d ? d.getTime() : null;
-            } catch (_e) {
-            }
-            try {
-              const d = note.modificationDate();
-              modified = d ? d.getTime() : null;
-            } catch (_e) {
-            }
-            out.push({
-              name: typeof rawName === "string" && rawName ? rawName : "Untitled Note",
-              content,
-              creationDate: created,
-              modificationDate: modified
-            });
+            matches = Notes.notes.whose({ name: { _contains: opts.title } })();
           } catch (_e) {
+            matches = [];
           }
+          for (let i = 0; i < matches.length; i++) {
+            try {
+              if (matches[i].name() === opts.title) {
+                note = matches[i];
+                break;
+              }
+            } catch (_e) {
+            }
+          }
+          if (!note && matches.length > 0) note = matches[0];
         }
-        return { found: true, notes: out };
+        if (!note) return { found: false, id: null, name: "" };
+        let id = null;
+        let name = "";
+        try {
+          id = note.id();
+        } catch (_e) {
+        }
+        try {
+          name = note.name();
+        } catch (_e) {
+        }
+        const n = note;
+        if (opts.append) {
+          let existing = "";
+          try {
+            existing = note.body();
+          } catch (_e) {
+            existing = "";
+          }
+          n.body = (typeof existing === "string" ? existing : "") + opts.html;
+        } else {
+          n.body = opts.html;
+        }
+        return { found: true, id, name };
       },
-      { folderName, max: MAX_NOTES, maxLen: MAX_CONTENT_PREVIEW }
+      {
+        title: input.title?.trim() ?? null,
+        noteId: input.noteId ?? null,
+        html: newHtml,
+        append: mode === "append"
+      }
     );
+    if (!result2.found) {
+      return {
+        success: false,
+        message: input.noteId ? `No note with id "${input.noteId}".` : `No note titled "${input.title}".`
+      };
+    }
+    return { success: true, id: result2.id ?? void 0, name: result2.name || void 0 };
+  } catch (error2) {
+    if (isPermissionDenial(error2)) throw new PermissionError(NOTES_DENIED);
     return {
-      found: raw.found,
-      notes: raw.notes.map((n) => ({
-        name: n.name,
-        content: n.content,
-        creationDate: n.creationDate != null ? new Date(n.creationDate) : void 0,
-        modificationDate: n.modificationDate != null ? new Date(n.modificationDate) : void 0
-      }))
+      success: false,
+      message: `Failed to update note: ${error2 instanceof Error ? error2.message : String(error2)}`
     };
+  }
+}
+async function deleteNote(locate) {
+  if (!locate.noteId && !(locate.title && locate.title.trim())) {
+    return { success: false, message: "An id or title is required to locate the note." };
+  }
+  try {
+    const result2 = await (0, import_run2.run)(
+      (opts) => {
+        const Notes = Application("Notes");
+        let note = null;
+        if (opts.noteId) {
+          try {
+            const candidate = Notes.notes.byId(opts.noteId);
+            candidate.name();
+            note = candidate;
+          } catch (_e) {
+            note = null;
+          }
+        }
+        if (!note && opts.title) {
+          let matches = [];
+          try {
+            matches = Notes.notes.whose({ name: { _contains: opts.title } })();
+          } catch (_e) {
+            matches = [];
+          }
+          for (let i = 0; i < matches.length; i++) {
+            try {
+              if (matches[i].name() === opts.title) {
+                note = matches[i];
+                break;
+              }
+            } catch (_e) {
+            }
+          }
+          if (!note && matches.length > 0) note = matches[0];
+        }
+        if (!note) return { found: false, id: null, name: "" };
+        let id = null;
+        let name = "";
+        try {
+          id = note.id();
+        } catch (_e) {
+        }
+        try {
+          name = note.name();
+        } catch (_e) {
+        }
+        Notes.delete(note);
+        return { found: true, id, name };
+      },
+      { title: locate.title?.trim() ?? null, noteId: locate.noteId ?? null }
+    );
+    if (!result2.found) {
+      return {
+        success: false,
+        message: locate.noteId ? `No note with id "${locate.noteId}".` : `No note titled "${locate.title}".`
+      };
+    }
+    return { success: true, id: result2.id ?? void 0, name: result2.name || void 0 };
+  } catch (error2) {
+    if (isPermissionDenial(error2)) throw new PermissionError(NOTES_DENIED);
+    return {
+      success: false,
+      message: `Failed to delete note: ${error2 instanceof Error ? error2.message : String(error2)}`
+    };
+  }
+}
+async function listFolders() {
+  try {
+    const folders = await (0, import_run2.run)(() => {
+      const Notes = Application("Notes");
+      const fs = Notes.folders();
+      const out = [];
+      for (let i = 0; i < fs.length; i++) {
+        try {
+          const name = fs[i].name();
+          let count = null;
+          try {
+            count = fs[i].notes().length;
+          } catch (_e) {
+          }
+          out.push({ name: typeof name === "string" ? name : "Untitled Folder", count });
+        } catch (_e) {
+        }
+      }
+      return out;
+    });
+    return folders;
   } catch (error2) {
     rethrowIfPermissionDenied(error2, NOTES_DENIED);
   }
 }
-async function getNotesFromFolder(folderName) {
-  const { found, notes: notes2 } = await scanFolder(folderName);
-  if (!found) {
-    return { success: false, message: `Folder "${folderName}" not found.` };
+async function createFolder(name) {
+  if (!name || name.trim() === "") {
+    return { success: false, name: "", created: false, message: "Folder name cannot be empty." };
   }
-  return { success: true, notes: notes2 };
-}
-async function getRecentNotesFromFolder(folderName, limit = 5) {
-  const { found, notes: notes2 } = await scanFolder(folderName);
-  if (!found) {
-    return { success: false, message: `Folder "${folderName}" not found.` };
+  const folderName = name.trim();
+  try {
+    const result2 = await (0, import_run2.run)(
+      (opts) => {
+        const Notes = Application("Notes");
+        const folders = Notes.folders();
+        for (let i = 0; i < folders.length; i++) {
+          try {
+            if (folders[i].name() === opts.name) {
+              return { created: false };
+            }
+          } catch (_e) {
+          }
+        }
+        Notes.make({ new: "folder", withProperties: { name: opts.name } });
+        return { created: true };
+      },
+      { name: folderName }
+    );
+    return { success: true, name: folderName, created: result2.created };
+  } catch (error2) {
+    if (isPermissionDenial(error2)) throw new PermissionError(NOTES_DENIED);
+    return {
+      success: false,
+      name: folderName,
+      created: false,
+      message: `Failed to create folder: ${error2 instanceof Error ? error2.message : String(error2)}`
+    };
   }
-  const sorted = [...notes2].sort((a, b) => {
-    const ta = a.modificationDate ? a.modificationDate.getTime() : 0;
-    const tb = b.modificationDate ? b.modificationDate.getTime() : 0;
-    return tb - ta;
-  });
-  return { success: true, notes: sorted.slice(0, Math.max(0, limit)) };
-}
-async function getNotesByDateRange(folderName, fromDate, toDate, limit = 20) {
-  const { found, notes: notes2 } = await scanFolder(folderName);
-  if (!found) {
-    return { success: false, message: `Folder "${folderName}" not found.` };
-  }
-  const from = fromDate ? Date.parse(fromDate) : NaN;
-  const to = toDate ? Date.parse(toDate) : NaN;
-  const filtered = notes2.filter((n) => {
-    const t = n.modificationDate ? n.modificationDate.getTime() : null;
-    if (t === null) return false;
-    if (!Number.isNaN(from) && t < from) return false;
-    if (!Number.isNaN(to) && t > to) return false;
-    return true;
-  });
-  filtered.sort((a, b) => {
-    const ta = a.modificationDate ? a.modificationDate.getTime() : 0;
-    const tb = b.modificationDate ? b.modificationDate.getTime() : 0;
-    return tb - ta;
-  });
-  return { success: true, notes: filtered.slice(0, Math.max(0, limit)) };
 }
 var import_run2, MAX_NOTES, MAX_CONTENT_PREVIEW, DEFAULT_FOLDER, NOTES_DENIED, notes_default;
 var init_notes = __esm({
@@ -11173,15 +11897,17 @@ var init_notes = __esm({
     MAX_NOTES = 1e3;
     MAX_CONTENT_PREVIEW = 2e3;
     DEFAULT_FOLDER = "Claude";
-    NOTES_DENIED = "Notes access is not granted. In System Settings \u25B8 Privacy & Security \u25B8 Automation, grant Faced access to Notes, then try again.";
+    NOTES_DENIED = `Notes access is not granted. In System Settings \u25B8 Privacy & Security \u25B8 Automation, grant ${APP_NAME} access to Notes, then try again.`;
     notes_default = {
-      getAllNotes,
-      findNote,
+      requestNotesAccess,
+      searchNotes,
+      listNotes,
+      getNote,
       createNote,
-      getNotesFromFolder,
-      getRecentNotesFromFolder,
-      getNotesByDateRange,
-      requestNotesAccess
+      updateNote,
+      deleteNote,
+      listFolders,
+      createFolder
     };
   }
 });
@@ -11234,31 +11960,82 @@ async function retryOperation(operation, retries = MAX_RETRIES, delay = RETRY_DE
     throw error2;
   }
 }
-function clampLimit(limit) {
-  const n = Math.floor(Number(limit));
-  if (!Number.isFinite(n) || n <= 0) return 10;
-  return Math.min(n, CONFIG.MAX_MESSAGES);
+async function queryChatDB(sql) {
+  const { stdout } = await retryOperation(
+    () => execFileAsync2("sqlite3", ["-json", "-readonly", CHAT_DB, sql], {
+      timeout: CONFIG.SQLITE_TIMEOUT_MS,
+      maxBuffer: 1024 * 1024 * 16
+    })
+  );
+  if (!stdout.trim()) return [];
+  return JSON.parse(stdout);
 }
-async function sendMessage(phoneNumber, message2) {
-  const buddy = escapeAppleScriptString(phoneNumber);
+function clampLimit(limit, max, fallback = 10) {
+  const n = Math.floor(Number(limit));
+  if (!Number.isFinite(n) || n <= 0) return Math.min(fallback, max);
+  return Math.min(n, max);
+}
+async function sendMessage(handle, message2) {
+  const to = (handle ?? "").trim();
+  if (!to) throw new Error("A recipient handle (phone number or email) is required to send.");
+  if (typeof message2 !== "string" || message2.length === 0) {
+    throw new Error("A non-empty message body is required to send.");
+  }
+  const buddy = escapeAppleScriptString(to);
   const body = escapeAppleScriptString(message2);
   try {
-    return await runAppleScript(`
+    await runAppleScript(`
 tell application "Messages"
     set targetService to 1st service whose service type = iMessage
-    set targetBuddy to buddy "${buddy}"
+    set targetBuddy to buddy "${buddy}" of targetService
     send "${body}" to targetBuddy
 end tell`);
+    return { handle: to, message: message2 };
   } catch (error2) {
     rethrowIfPermissionDenied(error2, MESSAGES_SEND_DENIED);
   }
 }
+async function scheduleMessage(handle, message2, scheduledTime) {
+  const to = (handle ?? "").trim();
+  if (!to) throw new Error("A recipient handle (phone number or email) is required to schedule.");
+  if (typeof message2 !== "string" || message2.length === 0) {
+    throw new Error("A non-empty message body is required to schedule.");
+  }
+  if (!(scheduledTime instanceof Date) || Number.isNaN(scheduledTime.getTime())) {
+    throw new Error("A valid scheduledTime (ISO timestamp) is required to schedule.");
+  }
+  const delay = scheduledTime.getTime() - Date.now();
+  if (delay < 0) {
+    throw new Error("Cannot schedule message in the past");
+  }
+  if (delay > MAX_TIMEOUT_MS) {
+    throw new Error(
+      "Cannot schedule a message more than ~24 days out (local deferred sends are not persisted)."
+    );
+  }
+  const timeoutId = setTimeout(async () => {
+    try {
+      await sendMessage(to, message2);
+    } catch (error2) {
+      console.error("Failed to send scheduled message:", error2);
+    }
+  }, delay);
+  return { id: timeoutId, scheduledTime, message: message2, handle: to };
+}
 async function checkMessagesDBAccess() {
   try {
     await access(CHAT_DB);
-    await execFileAsync2("sqlite3", [CHAT_DB, "SELECT 1;"]);
+    await execFileAsync2("sqlite3", ["-readonly", CHAT_DB, "SELECT 1;"], {
+      timeout: CONFIG.SQLITE_TIMEOUT_MS
+    });
     return true;
   } catch (error2) {
+    const code = error2?.code;
+    if (code === "ENOENT" && /sqlite3/.test(String(error2?.message))) {
+      throw new Error(
+        "The `sqlite3` binary was not found; cannot read the Messages database."
+      );
+    }
     console.error(
       `Cannot read the Messages database (${CHAT_DB}): ${error2 instanceof Error ? error2.message : String(error2)}`
     );
@@ -11344,180 +12121,182 @@ async function getAttachmentPaths(messageId) {
             ON attachment.ROWID = message_attachment_join.attachment_id
             WHERE message_attachment_join.message_id = ${messageId}
         `;
-    const { stdout } = await execFileAsync2("sqlite3", ["-json", CHAT_DB, query]);
-    if (!stdout.trim()) {
-      return [];
-    }
-    const attachments = JSON.parse(stdout);
-    return attachments.map((a) => a.filename).filter(Boolean);
+    const rows = await queryChatDB(query);
+    return rows.map((a) => a.filename).filter(Boolean);
   } catch (error2) {
     console.error("Error getting attachments:", error2);
     return [];
   }
 }
-async function readMessages(phoneNumber, limit = 10) {
-  try {
-    const maxLimit = clampLimit(limit);
-    await ensureMessagesDBAccess();
-    const phoneFormats = handleCandidates(phoneNumber);
-    if (phoneFormats.length === 0) return [];
-    console.error("Trying handle formats:", phoneFormats);
-    const phoneList = phoneFormats.map((p) => `'${escapeSqlString(p)}'`).join(",");
-    const query = `
-            SELECT
-                m.ROWID as message_id,
+function messageColumns(mAlias = "m", hAlias = "h") {
+  return `
+                ${mAlias}.ROWID as message_id,
                 CASE
-                    WHEN m.text IS NOT NULL AND m.text != '' THEN m.text
-                    WHEN m.attributedBody IS NOT NULL THEN hex(m.attributedBody)
+                    WHEN ${mAlias}.text IS NOT NULL AND ${mAlias}.text != '' THEN ${mAlias}.text
+                    WHEN ${mAlias}.attributedBody IS NOT NULL THEN hex(${mAlias}.attributedBody)
                     ELSE NULL
                 END as content,
-                datetime(m.date/1000000000 + strftime('%s', '2001-01-01'), 'unixepoch', 'localtime') as date,
-                h.id as sender,
-                m.is_from_me,
-                m.is_audio_message,
-                m.cache_has_attachments,
-                m.subject,
+                datetime(${mAlias}.date/1000000000 + strftime('%s', '2001-01-01'), 'unixepoch', 'localtime') as date,
+                ${hAlias}.id as sender,
+                ${mAlias}.is_from_me,
+                ${mAlias}.is_read,
+                ${mAlias}.cache_has_attachments,
+                ${mAlias}.subject,
                 CASE
-                    WHEN m.text IS NOT NULL AND m.text != '' THEN 0
-                    WHEN m.attributedBody IS NOT NULL THEN 1
+                    WHEN ${mAlias}.text IS NOT NULL AND ${mAlias}.text != '' THEN 0
+                    WHEN ${mAlias}.attributedBody IS NOT NULL THEN 1
                     ELSE 2
-                END as content_type
+                END as content_type`;
+}
+async function fetchMessages(opts) {
+  try {
+    const maxLimit = clampLimit(opts.limit, CONFIG.MAX_MESSAGES);
+    await ensureMessagesDBAccess();
+    const where = [
+      "(m.text IS NOT NULL OR m.attributedBody IS NOT NULL OR m.cache_has_attachments = 1)",
+      "m.item_type = 0",
+      "m.is_audio_message = 0"
+    ];
+    if (opts.handles && opts.handles.length > 0) {
+      const candidates = Array.from(new Set(opts.handles.flatMap(handleCandidates)));
+      if (candidates.length === 0) return [];
+      const list = candidates.map((p) => `'${escapeSqlString(p)}'`).join(",");
+      where.push(`m.ROWID IN (
+                SELECT cmj.message_id
+                FROM chat_message_join cmj
+                WHERE cmj.chat_id IN (
+                    SELECT chj.chat_id
+                    FROM chat_handle_join chj
+                    INNER JOIN handle ph ON ph.ROWID = chj.handle_id
+                    WHERE ph.id IN (${list})
+                )
+            )`);
+    }
+    if (opts.from === "them") where.push("m.is_from_me = 0");
+    else if (opts.from === "me") where.push("m.is_from_me = 1");
+    if (opts.status === "unread") where.push("m.is_from_me = 0 AND m.is_read = 0");
+    else if (opts.status === "read") where.push("m.is_from_me = 0 AND m.is_read = 1");
+    const query = `
+            SELECT ${messageColumns("m", "h")}
             FROM message m
-            INNER JOIN handle h ON h.ROWID = m.handle_id
-            WHERE h.id IN (${phoneList})
-                AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL OR m.cache_has_attachments = 1)
-                AND m.is_from_me IS NOT NULL  -- Ensure it's a real message
-                AND m.item_type = 0  -- Regular messages only
-                AND m.is_audio_message = 0  -- Skip audio messages
+            LEFT JOIN handle h ON h.ROWID = m.handle_id
+            WHERE ${where.join("\n                AND ")}
             ORDER BY m.date DESC
             LIMIT ${maxLimit}
         `;
-    const { stdout } = await retryOperation(
-      () => execFileAsync2("sqlite3", ["-json", CHAT_DB, query])
-    );
-    if (!stdout.trim()) {
-      console.error("No messages found in database for the given phone number");
-      return [];
-    }
-    const messages = JSON.parse(stdout);
-    return await formatMessages(messages);
+    const rows = await queryChatDB(query);
+    return await formatMessages(rows);
   } catch (error2) {
     if (error2 instanceof PermissionError) throw error2;
-    console.error("Error reading messages:", error2);
+    console.error("Error fetching messages:", error2);
     rethrowIfPermissionDenied(error2, MESSAGES_DB_DENIED);
   }
 }
-async function getUnreadMessages(limit = 10) {
+async function fetchConversations(opts) {
   try {
-    const maxLimit = clampLimit(limit);
+    const maxLimit = clampLimit(opts.limit, CONFIG.MAX_CONVERSATIONS);
     await ensureMessagesDBAccess();
     const query = `
-            SELECT
-                m.ROWID as message_id,
-                CASE
-                    WHEN m.text IS NOT NULL AND m.text != '' THEN m.text
-                    WHEN m.attributedBody IS NOT NULL THEN hex(m.attributedBody)
-                    ELSE NULL
-                END as content,
-                datetime(m.date/1000000000 + strftime('%s', '2001-01-01'), 'unixepoch', 'localtime') as date,
-                h.id as sender,
-                m.is_from_me,
-                m.is_audio_message,
-                m.cache_has_attachments,
-                m.subject,
-                CASE
-                    WHEN m.text IS NOT NULL AND m.text != '' THEN 0
-                    WHEN m.attributedBody IS NOT NULL THEN 1
-                    ELSE 2
-                END as content_type
-            FROM message m
-            INNER JOIN handle h ON h.ROWID = m.handle_id
-            WHERE m.is_from_me = 0  -- Only messages from others
-                AND m.is_read = 0   -- Only unread messages
-                AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL OR m.cache_has_attachments = 1)
-                AND m.is_audio_message = 0  -- Skip audio messages
-                AND m.item_type = 0  -- Regular messages only
-            ORDER BY m.date DESC
+            WITH ranked AS (
+                SELECT
+                    c.ROWID as chat_id,
+                    c.chat_identifier as chat_identifier,
+                    c.display_name as display_name,
+                    c.style as style,
+                    m.date as raw_date,
+                    ${messageColumns("m", "h")},
+                    ROW_NUMBER() OVER (PARTITION BY c.ROWID ORDER BY m.date DESC, m.ROWID DESC) as rn
+                FROM chat c
+                INNER JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
+                INNER JOIN message m ON m.ROWID = cmj.message_id
+                LEFT JOIN handle h ON h.ROWID = m.handle_id
+                WHERE m.item_type = 0
+                    AND m.is_audio_message = 0
+                    AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL OR m.cache_has_attachments = 1)
+            )
+            SELECT *
+            FROM ranked
+            WHERE rn = 1
+            ORDER BY raw_date DESC
             LIMIT ${maxLimit}
         `;
-    const { stdout } = await retryOperation(
-      () => execFileAsync2("sqlite3", ["-json", CHAT_DB, query])
+    const rows = await queryChatDB(query);
+    return await Promise.all(
+      rows.map(async (row) => {
+        const last = await formatOneMessage({
+          ...row,
+          // For a message I sent in a 1:1, the handle row is absent — fall back to the thread id.
+          sender: row.sender ?? row.chat_identifier
+        });
+        return {
+          chat_identifier: row.chat_identifier,
+          display_name: row.display_name,
+          is_group: row.style === 43,
+          last_message: last
+        };
+      })
     );
-    if (!stdout.trim()) {
-      console.error("No unread messages found");
-      return [];
-    }
-    const messages = JSON.parse(stdout);
-    return await formatMessages(messages);
   } catch (error2) {
     if (error2 instanceof PermissionError) throw error2;
-    console.error("Error reading unread messages:", error2);
+    console.error("Error fetching conversations:", error2);
     rethrowIfPermissionDenied(error2, MESSAGES_DB_DENIED);
+  }
+}
+async function formatOneMessage(msg) {
+  try {
+    let content = msg.content || "";
+    let url;
+    if (msg.content_type === 1) {
+      const decoded = decodeAttributedBody(content);
+      content = decoded.text;
+      url = decoded.url;
+    } else {
+      const urlMatch = content.match(/(https?:\/\/[^\s]+)/);
+      if (urlMatch) url = urlMatch[1];
+    }
+    let attachments = [];
+    if (msg.cache_has_attachments) {
+      attachments = await getAttachmentPaths(msg.message_id);
+    }
+    if (msg.subject) {
+      content = `Subject: ${msg.subject}
+${content}`;
+    }
+    const formatted = {
+      content: content || "[No text content]",
+      date: new Date(msg.date).toISOString(),
+      sender: msg.sender ?? "(me)",
+      is_from_me: Boolean(msg.is_from_me),
+      is_read: Boolean(msg.is_read)
+    };
+    if (attachments.length > 0) {
+      formatted.attachments = attachments;
+      formatted.content += `
+[Attachments: ${attachments.length}]`;
+    }
+    if (url) {
+      formatted.url = url;
+      formatted.content += `
+[URL: ${url}]`;
+    }
+    return formatted;
+  } catch (error2) {
+    console.error("Error formatting a message row:", error2);
+    return {
+      content: "[Message content not readable]",
+      date: new Date(msg.date || Date.now()).toISOString(),
+      sender: msg.sender ?? "(me)",
+      is_from_me: Boolean(msg.is_from_me),
+      is_read: Boolean(msg.is_read)
+    };
   }
 }
 async function formatMessages(messages) {
   return Promise.all(
-    messages.filter((msg) => msg.content !== null || msg.cache_has_attachments === 1).map(async (msg) => {
-      let content = msg.content || "";
-      let url;
-      if (msg.content_type === 1) {
-        const decoded = decodeAttributedBody(content);
-        content = decoded.text;
-        url = decoded.url;
-      } else {
-        const urlMatch = content.match(/(https?:\/\/[^\s]+)/);
-        if (urlMatch) {
-          url = urlMatch[1];
-        }
-      }
-      let attachments = [];
-      if (msg.cache_has_attachments) {
-        attachments = await getAttachmentPaths(msg.message_id);
-      }
-      if (msg.subject) {
-        content = `Subject: ${msg.subject}
-${content}`;
-      }
-      const formattedMsg = {
-        content: content || "[No text content]",
-        date: new Date(msg.date).toISOString(),
-        sender: msg.sender,
-        is_from_me: Boolean(msg.is_from_me)
-      };
-      if (attachments.length > 0) {
-        formattedMsg.attachments = attachments;
-        formattedMsg.content += `
-[Attachments: ${attachments.length}]`;
-      }
-      if (url) {
-        formattedMsg.url = url;
-        formattedMsg.content += `
-[URL: ${url}]`;
-      }
-      return formattedMsg;
-    })
+    messages.filter((msg) => msg.content !== null || msg.cache_has_attachments === 1).map((msg) => formatOneMessage(msg))
   );
 }
-async function scheduleMessage(phoneNumber, message2, scheduledTime) {
-  const delay = scheduledTime.getTime() - Date.now();
-  if (delay < 0) {
-    throw new Error("Cannot schedule message in the past");
-  }
-  const timeoutId = setTimeout(async () => {
-    try {
-      await sendMessage(phoneNumber, message2);
-    } catch (error2) {
-      console.error("Failed to send scheduled message:", error2);
-    }
-  }, delay);
-  return {
-    id: timeoutId,
-    scheduledTime,
-    message: message2,
-    phoneNumber
-  };
-}
-var execFileAsync2, CHAT_DB, MESSAGES_DB_DENIED, MESSAGES_SEND_DENIED, CONFIG, MAX_RETRIES, RETRY_DELAY, message_default;
+var execFileAsync2, CHAT_DB, MESSAGES_DB_DENIED, MESSAGES_SEND_DENIED, CONFIG, MAX_TIMEOUT_MS, MAX_RETRIES, RETRY_DELAY, message_default;
 var init_message = __esm({
   "utils/message.ts"() {
     "use strict";
@@ -11526,23 +12305,24 @@ var init_message = __esm({
     init_phone();
     execFileAsync2 = promisify2(execFile2);
     CHAT_DB = `${process.env.HOME}/Library/Messages/chat.db`;
-    MESSAGES_DB_DENIED = "Messages access is not granted. Reading message history needs Full Disk Access: in System Settings \u25B8 Privacy & Security \u25B8 Full Disk Access, enable Faced, then try again.";
-    MESSAGES_SEND_DENIED = "Messages access is not granted. In System Settings \u25B8 Privacy & Security \u25B8 Automation, allow Faced to control Messages, then try again.";
+    MESSAGES_DB_DENIED = `Messages access is not granted. Reading message history needs Full Disk Access: in System Settings \u25B8 Privacy & Security \u25B8 Full Disk Access, enable ${APP_NAME}, then try again.`;
+    MESSAGES_SEND_DENIED = `Messages access is not granted. In System Settings \u25B8 Privacy & Security \u25B8 Automation, allow ${APP_NAME} to control Messages, then try again.`;
     CONFIG = {
-      // Maximum messages to process (to avoid performance issues)
+      // Hard ceiling on rows pulled from chat.db in any single read (perf guard).
       MAX_MESSAGES: 50,
-      // Maximum content length for previews
-      MAX_CONTENT_PREVIEW: 300,
-      // Timeout for operations
-      TIMEOUT_MS: 8e3
+      // Hard ceiling on distinct threads returned by `fetchConversations`.
+      MAX_CONVERSATIONS: 50,
+      // Timeout (ms) for each sqlite3 invocation — a hung store fails fast instead of blocking forever.
+      SQLITE_TIMEOUT_MS: 8e3
     };
+    MAX_TIMEOUT_MS = 2147483647;
     MAX_RETRIES = 3;
     RETRY_DELAY = 1e3;
     message_default = {
       sendMessage,
-      readMessages,
       scheduleMessage,
-      getUnreadMessages
+      fetchMessages,
+      fetchConversations
     };
   }
 });
@@ -11552,6 +12332,29 @@ var reminders_exports = {};
 __export(reminders_exports, {
   default: () => reminders_default
 });
+import { execFile as execFile3 } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import * as nodePath from "node:path";
+function runHelper(args) {
+  return new Promise((resolve, reject) => {
+    execFile3(HELPER_PATH, args, { timeout: 4e4, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+      if (err && !stdout) {
+        reject(new Error(`reminders-helper failed: ${err.message}`));
+        return;
+      }
+      try {
+        const parsed = JSON.parse(stdout);
+        if (parsed && typeof parsed === "object" && "error" in parsed) {
+          reject(new Error(String(parsed.error)));
+          return;
+        }
+        resolve(parsed);
+      } catch (e) {
+        reject(new Error(`reminders-helper returned unparseable output: ${String(e)}`));
+      }
+    });
+  });
+}
 async function requestRemindersAccess() {
   try {
     await (0, import_run3.run)(() => {
@@ -11617,19 +12420,19 @@ async function scan(opts) {
           lists = R.lists();
         }
         const items = [];
-        const listCap = Math.min(lists.length, maxLists);
-        for (let li = 0; li < listCap; li++) {
-          let listName;
+        const readMatches = (list, listName) => {
           let rems;
           try {
-            const list = lists[li];
-            listName = String(list.name());
-            rems = list.reminders();
+            rems = needle ? list.reminders.whose({ name: { _contains: search } })() : list.reminders();
           } catch (e) {
-            continue;
+            try {
+              rems = list.reminders();
+            } catch (e2) {
+              return;
+            }
           }
           for (let ri = 0; ri < rems.length; ri++) {
-            if (items.length >= max) return { items, listNotFound: false };
+            if (items.length >= max) return;
             try {
               const rec = read(rems[ri], listName);
               if (needle) {
@@ -11640,8 +12443,55 @@ async function scan(opts) {
             } catch (e) {
             }
           }
+        };
+        let defaultListName = null;
+        if (needle && !listId) {
+          try {
+            const dl = R.defaultList();
+            defaultListName = String(dl.name());
+            readMatches(dl, defaultListName);
+            if (items.length > 0) {
+              return {
+                items,
+                listNotFound: false,
+                truncated: false,
+                scannedLists: 1,
+                totalLists: lists.length
+              };
+            }
+          } catch (e) {
+          }
         }
-        return { items, listNotFound: false };
+        const budgetMs = needle ? 25e3 : 6e4;
+        const t0 = Date.now();
+        let scanned = defaultListName ? 1 : 0;
+        let truncated = false;
+        const listCap = Math.min(lists.length, maxLists);
+        for (let li = 0; li < listCap; li++) {
+          if (Date.now() - t0 > budgetMs) {
+            truncated = true;
+            break;
+          }
+          let listName;
+          let list;
+          try {
+            list = lists[li];
+            listName = String(list.name());
+          } catch (e) {
+            continue;
+          }
+          if (defaultListName && listName === defaultListName) continue;
+          scanned++;
+          readMatches(list, listName);
+          if (items.length >= max) break;
+        }
+        return {
+          items,
+          listNotFound: false,
+          truncated,
+          scannedLists: scanned,
+          totalLists: lists.length
+        };
       },
       {
         search: opts.search ?? null,
@@ -11682,7 +12532,33 @@ async function getAllReminders() {
 }
 async function searchReminders(searchText) {
   if (!searchText || searchText.trim() === "") return [];
-  return (await scan({ search: searchText })).items;
+  try {
+    return await runHelper(["search", searchText.trim()]);
+  } catch (_e) {
+    return (await scan({ search: searchText })).items;
+  }
+}
+async function searchRemindersDetailed(searchText) {
+  if (!searchText || searchText.trim() === "") {
+    return { items: [], truncated: false, scannedLists: 0, totalLists: 0 };
+  }
+  try {
+    const items = await runHelper(["search", searchText.trim()]);
+    return { items, truncated: false, scannedLists: -1, totalLists: -1 };
+  } catch (_e) {
+  }
+  const r = await scan({ search: searchText });
+  return {
+    items: r.items,
+    truncated: r.truncated ?? false,
+    scannedLists: r.scannedLists ?? 0,
+    totalLists: r.totalLists ?? 0
+  };
+}
+async function getReminderByName(name) {
+  if (!name || name.trim() === "") return null;
+  const matches = await searchReminders(name);
+  return matches.length > 0 ? matches[0] : null;
 }
 async function openReminder(searchText) {
   const matches = await searchReminders(searchText);
@@ -11714,23 +12590,19 @@ async function createReminder(name, listName, notes2, dueDate) {
         const R = Application("Reminders");
         R.activate();
         let list;
+        let resolvedListName;
         if (args.listName) {
-          const all = R.lists();
-          for (let i = 0; i < all.length; i++) {
-            try {
-              if (String(all[i].name()) === args.listName) {
-                list = all[i];
-                break;
-              }
-            } catch (e) {
-            }
-          }
-          if (!list) {
+          try {
+            list = R.lists.byName(args.listName);
+            resolvedListName = String(list.name());
+          } catch (e) {
             list = R.List({ name: args.listName });
             R.lists.push(list);
+            resolvedListName = args.listName;
           }
         } else {
           list = R.defaultList();
+          resolvedListName = String(list.name());
         }
         const props = {
           name: args.name
@@ -11739,36 +12611,7 @@ async function createReminder(name, listName, notes2, dueDate) {
         if (args.dueDate) props.dueDate = new Date(args.dueDate);
         const rem = R.Reminder(props);
         list.reminders.push(rem);
-        let id;
-        try {
-          id = String(rem.id());
-        } catch (e) {
-        }
-        let body = "";
-        try {
-          const b = rem.body();
-          body = b ? String(b) : "";
-        } catch (e) {
-        }
-        let completed = false;
-        try {
-          completed = !!rem.completed();
-        } catch (e) {
-        }
-        let due = null;
-        try {
-          const d = rem.dueDate();
-          if (d) due = d.toISOString();
-        } catch (e) {
-        }
-        return {
-          name: String(rem.name()),
-          id,
-          body,
-          completed,
-          dueDate: due,
-          listName: String(list.name())
-        };
+        return { listName: resolvedListName };
       },
       {
         name,
@@ -11777,7 +12620,13 @@ async function createReminder(name, listName, notes2, dueDate) {
         dueDate: dueDate ?? null
       }
     );
-    return created;
+    return {
+      name,
+      body: notes2 ?? "",
+      completed: false,
+      dueDate: dueDate ?? null,
+      listName: created.listName
+    };
   } catch (error2) {
     if (isPermissionDenial(error2)) throw new PermissionError(REMINDERS_DENIED);
     throw error2 instanceof Error ? error2 : new Error(`Failed to create reminder: ${String(error2)}`);
@@ -11793,20 +12642,138 @@ async function getRemindersFromListById(listId, props) {
   }
   return result2.items;
 }
-var import_run3, MAX_REMINDERS, MAX_LISTS, REMINDERS_DENIED, reminders_default;
+async function updateReminder(opts) {
+  if (!opts.searchText || opts.searchText.trim() === "") {
+    throw new Error("searchText is required to find the reminder to update.");
+  }
+  try {
+    return await (0, import_run3.run)(
+      (a) => {
+        const R = Application("Reminders");
+        const needle = a.searchText.toLowerCase();
+        const lists = R.lists();
+        let target = null;
+        let targetName = "";
+        for (let li = 0; li < lists.length && !target; li++) {
+          let matches = [];
+          try {
+            matches = lists[li].reminders.whose({ name: { _contains: a.searchText } })();
+          } catch (e) {
+            try {
+              const rems = lists[li].reminders();
+              for (let ri = 0; ri < rems.length; ri++) {
+                try {
+                  if (String(rems[ri].name()).toLowerCase().indexOf(needle) !== -1) {
+                    matches = [rems[ri]];
+                    break;
+                  }
+                } catch (e2) {
+                }
+              }
+            } catch (e2) {
+            }
+          }
+          if (matches && matches.length > 0) {
+            target = matches[0];
+            try {
+              targetName = String(target.name());
+            } catch (e) {
+            }
+          }
+        }
+        if (!target) return { updated: false };
+        if (a.name != null) target.name = a.name;
+        if (a.notes != null) target.body = a.notes;
+        if (a.dueDate != null) target.dueDate = new Date(a.dueDate);
+        if (a.completed != null) target.completed = a.completed;
+        return { updated: true, name: a.name != null ? a.name : targetName };
+      },
+      {
+        searchText: opts.searchText,
+        name: opts.name ?? null,
+        notes: opts.notes ?? null,
+        dueDate: opts.dueDate ?? null,
+        completed: opts.completed ?? null
+      }
+    );
+  } catch (error2) {
+    if (isPermissionDenial(error2)) throw new PermissionError(REMINDERS_DENIED);
+    throw error2 instanceof Error ? error2 : new Error(String(error2));
+  }
+}
+async function setReminderCompleted(searchText, completed) {
+  return updateReminder({ searchText, completed });
+}
+async function deleteReminder(searchText) {
+  if (!searchText || searchText.trim() === "") {
+    throw new Error("searchText is required to find the reminder to delete.");
+  }
+  try {
+    return await (0, import_run3.run)(
+      (a) => {
+        const R = Application("Reminders");
+        const needle = a.searchText.toLowerCase();
+        const lists = R.lists();
+        let target = null;
+        let targetName = "";
+        for (let li = 0; li < lists.length && !target; li++) {
+          let matches = [];
+          try {
+            matches = lists[li].reminders.whose({ name: { _contains: a.searchText } })();
+          } catch (e) {
+            try {
+              const rems = lists[li].reminders();
+              for (let ri = 0; ri < rems.length; ri++) {
+                try {
+                  if (String(rems[ri].name()).toLowerCase().indexOf(needle) !== -1) {
+                    matches = [rems[ri]];
+                    break;
+                  }
+                } catch (e2) {
+                }
+              }
+            } catch (e2) {
+            }
+          }
+          if (matches && matches.length > 0) {
+            target = matches[0];
+            try {
+              targetName = String(target.name());
+            } catch (e) {
+            }
+          }
+        }
+        if (!target) return { deleted: false };
+        R.delete(target);
+        return { deleted: true, name: targetName };
+      },
+      { searchText }
+    );
+  } catch (error2) {
+    if (isPermissionDenial(error2)) throw new PermissionError(REMINDERS_DENIED);
+    throw error2 instanceof Error ? error2 : new Error(String(error2));
+  }
+}
+var import_run3, MAX_REMINDERS, HELPER_PATH, MAX_LISTS, REMINDERS_DENIED, reminders_default;
 var init_reminders = __esm({
   "utils/reminders.ts"() {
     "use strict";
     import_run3 = __toESM(require_run(), 1);
     init_native();
     MAX_REMINDERS = 1e3;
+    HELPER_PATH = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), "reminders-helper");
     MAX_LISTS = 1e3;
-    REMINDERS_DENIED = "Reminders access is not granted. In System Settings \u25B8 Privacy & Security, grant Faced access to Reminders (and Automation \u25B8 Reminders), then try again.";
+    REMINDERS_DENIED = `Reminders access is not granted. In System Settings \u25B8 Privacy & Security, grant ${APP_NAME} access to Reminders (and Automation \u25B8 Reminders), then try again.`;
     reminders_default = {
+      searchRemindersDetailed,
       getAllLists,
       getAllReminders,
       searchReminders,
+      getReminderByName,
       createReminder,
+      updateReminder,
+      setReminderCompleted,
+      deleteReminder,
       openReminder,
       getRemindersFromListById,
       requestRemindersAccess
@@ -12048,7 +13015,7 @@ async function createEvent(title, startDate, endDate, location, notes2, isAllDay
         if (args.notes) props.description = args.notes;
         const ev = C.Event(props);
         cal.events.push(ev);
-        return { uid: ev.uid(), calendarName: cal.name() };
+        return { calendarName: cal.name() };
       },
       {
         title: title.trim(),
@@ -12074,15 +13041,296 @@ async function createEvent(title, startDate, endDate, location, notes2, isAllDay
     }
     return {
       success: true,
-      message: `Event "${title.trim()}" created in "${result2.calendarName}".`,
-      eventId: result2.uid
+      message: `Event "${title.trim()}" created in "${result2.calendarName}".`
     };
   } catch (error2) {
     if (isPermissionDenial(error2)) throw new PermissionError(CALENDAR_DENIED);
     throw error2 instanceof Error ? error2 : new Error(String(error2));
   }
 }
-var import_run4, MAX_SCAN, LIST_WINDOW_DAYS, SEARCH_WINDOW_DAYS, CALENDAR_DENIED, calendar, calendar_default;
+async function locateAndApply(args) {
+  return await (0, import_run4.run)((a) => {
+    const C = Application("Calendar");
+    const byUid = a.eventId !== "";
+    let target = null;
+    let matchedCalName = "";
+    let matchedId = "";
+    let matchedTitle = "";
+    const matched = [];
+    let scanned = 0;
+    const cals = C.calendars();
+    for (let ci = 0; ci < cals.length && (!byUid || !target) && scanned < a.cap; ci++) {
+      try {
+        const cal = cals[ci];
+        const calName = cal.name();
+        if (byUid) {
+          let m;
+          try {
+            m = cal.events.whose({ uid: { _equals: a.eventId } })();
+          } catch (_predicateUnsupported) {
+            m = [];
+          }
+          if (m.length === 0) {
+            const evs = cal.events();
+            for (let ei = 0; ei < evs.length && scanned < a.cap; ei++) {
+              scanned++;
+              try {
+                if (evs[ei].uid() === a.eventId) {
+                  m = [evs[ei]];
+                  break;
+                }
+              } catch (_badEvent) {
+              }
+            }
+          }
+          if (m.length > 0) {
+            target = m[0];
+            matchedCalName = calName;
+            matchedId = a.eventId;
+            try {
+              matchedTitle = target.summary() || "";
+            } catch (_noTitle) {
+              matchedTitle = "";
+            }
+            break;
+          }
+        } else {
+          const from = new Date(a.fromMs);
+          const to = new Date(a.toMs);
+          let evs;
+          try {
+            evs = cal.events.whose({
+              _and: [
+                { summary: { _contains: a.title } },
+                { startDate: { _greaterThanEquals: from } },
+                { startDate: { _lessThanEquals: to } }
+              ]
+            })();
+          } catch (_predicateUnsupported) {
+            try {
+              evs = cal.events();
+            } catch (_badEnum) {
+              evs = [];
+            }
+          }
+          for (let ei = 0; ei < evs.length && scanned < a.cap; ei++) {
+            scanned++;
+            try {
+              const ev = evs[ei];
+              const start = ev.startDate();
+              const startMs = start ? start.getTime() : NaN;
+              if (!Number.isNaN(startMs) && (startMs < a.fromMs || startMs > a.toMs)) {
+                continue;
+              }
+              const summary = ev.summary() || "";
+              if (summary.toLowerCase().indexOf(a.titleLower) === -1) continue;
+              matched.push({
+                ev,
+                id: ev.uid(),
+                title: summary,
+                startMs: Number.isNaN(startMs) ? 0 : startMs,
+                calName
+              });
+            } catch (_badEvent) {
+            }
+          }
+        }
+      } catch (_badCalendar) {
+      }
+    }
+    if (byUid) {
+      if (!target) return { error: "not_found" };
+    } else {
+      if (matched.length === 0) return { error: "not_found" };
+      if (matched.length > 1) {
+        return {
+          error: "ambiguous",
+          candidates: matched.slice(0, 10).map((mm) => ({
+            id: mm.id,
+            title: mm.title,
+            start: mm.startMs ? new Date(mm.startMs).toISOString() : ""
+          }))
+        };
+      }
+      target = matched[0].ev;
+      matchedCalName = matched[0].calName;
+      matchedId = matched[0].id;
+      matchedTitle = matched[0].title;
+    }
+    if (a.mode === "delete") {
+      C.delete(target);
+      return {
+        ok: true,
+        id: matchedId,
+        title: matchedTitle,
+        calendarName: matchedCalName,
+        changed: []
+      };
+    }
+    const changed = [];
+    if (a.newSummary !== null) {
+      target.summary = a.newSummary;
+      changed.push("title");
+    }
+    if (a.newLocation !== null) {
+      target.location = a.newLocation;
+      changed.push("location");
+    }
+    if (a.newDescription !== null) {
+      target.description = a.newDescription;
+      changed.push("notes");
+    }
+    if (a.newStartMs !== null) {
+      target.startDate = new Date(a.newStartMs);
+      changed.push("start");
+    }
+    if (a.newEndMs !== null) {
+      target.endDate = new Date(a.newEndMs);
+      changed.push("end");
+    }
+    return {
+      ok: true,
+      id: matchedId,
+      // Report the new title if we set one, else the pre-mutation title (no read-back).
+      title: a.newSummary !== null ? a.newSummary : matchedTitle,
+      calendarName: matchedCalName,
+      changed
+    };
+  }, args);
+}
+function describeLocate(locator) {
+  if (locator.eventId && locator.eventId.trim() !== "") {
+    return `with ID "${locator.eventId.trim()}"`;
+  }
+  return `titled "${(locator.title ?? "").trim()}" in the given window`;
+}
+async function updateEvent(locator, changes) {
+  const hasId = !!locator.eventId && locator.eventId.trim() !== "";
+  const hasTitle = !!locator.title && locator.title.trim() !== "";
+  if (!hasId && !hasTitle) {
+    return {
+      success: false,
+      message: "Provide an eventId or a title to identify the event to update."
+    };
+  }
+  const newSummaryRaw = changes.newTitle;
+  if (newSummaryRaw !== void 0 && newSummaryRaw.trim() === "") {
+    return { success: false, message: "newTitle cannot be empty." };
+  }
+  const anyChange = changes.newTitle !== void 0 || changes.newStartDate !== void 0 || changes.newEndDate !== void 0 || changes.newLocation !== void 0 || changes.newNotes !== void 0;
+  if (!anyChange) {
+    return {
+      success: false,
+      message: "Nothing to update. Provide at least one of newTitle, newStartDate, newEndDate, newLocation, or newNotes."
+    };
+  }
+  let newStartMs = null;
+  let newEndMs = null;
+  try {
+    if (changes.newStartDate !== void 0) {
+      newStartMs = parseDate(changes.newStartDate, "newStartDate").getTime();
+    }
+    if (changes.newEndDate !== void 0) {
+      newEndMs = parseDate(changes.newEndDate, "newEndDate").getTime();
+    }
+  } catch (error2) {
+    return {
+      success: false,
+      message: error2 instanceof Error ? error2.message : String(error2)
+    };
+  }
+  if (newStartMs !== null && newEndMs !== null && newEndMs <= newStartMs) {
+    return { success: false, message: "newEndDate must be after newStartDate." };
+  }
+  const { fromMs, toMs } = hasId ? { fromMs: 0, toMs: 0 } : resolveWindow(locator.fromDate, locator.toDate, MUTATE_WINDOW_DAYS);
+  try {
+    const result2 = await locateAndApply({
+      mode: "update",
+      eventId: hasId ? locator.eventId.trim() : "",
+      title: hasTitle ? locator.title.trim() : "",
+      titleLower: hasTitle ? locator.title.trim().toLowerCase() : "",
+      fromMs,
+      toMs,
+      cap: MAX_SCAN,
+      newSummary: changes.newTitle !== void 0 ? changes.newTitle.trim() : null,
+      newLocation: changes.newLocation !== void 0 ? changes.newLocation : null,
+      newDescription: changes.newNotes !== void 0 ? changes.newNotes : null,
+      newStartMs,
+      newEndMs
+    });
+    if ("error" in result2) {
+      if (result2.error === "not_found") {
+        return {
+          success: false,
+          message: `No event found ${describeLocate(locator)}.`
+        };
+      }
+      return {
+        success: false,
+        message: `Multiple events match the title "${(locator.title ?? "").trim()}". Re-issue update with a specific eventId.`,
+        candidates: result2.candidates
+      };
+    }
+    const fields = result2.changed.length ? result2.changed.join(", ") : "nothing";
+    return {
+      success: true,
+      message: `Updated "${result2.title}" in "${result2.calendarName}" (${fields}).`,
+      eventId: result2.id
+    };
+  } catch (error2) {
+    if (isPermissionDenial(error2)) throw new PermissionError(CALENDAR_DENIED);
+    throw error2 instanceof Error ? error2 : new Error(String(error2));
+  }
+}
+async function deleteEvent(locator) {
+  const hasId = !!locator.eventId && locator.eventId.trim() !== "";
+  const hasTitle = !!locator.title && locator.title.trim() !== "";
+  if (!hasId && !hasTitle) {
+    return {
+      success: false,
+      message: "Provide an eventId or a title to identify the event to delete."
+    };
+  }
+  const { fromMs, toMs } = hasId ? { fromMs: 0, toMs: 0 } : resolveWindow(locator.fromDate, locator.toDate, MUTATE_WINDOW_DAYS);
+  try {
+    const result2 = await locateAndApply({
+      mode: "delete",
+      eventId: hasId ? locator.eventId.trim() : "",
+      title: hasTitle ? locator.title.trim() : "",
+      titleLower: hasTitle ? locator.title.trim().toLowerCase() : "",
+      fromMs,
+      toMs,
+      cap: MAX_SCAN,
+      newSummary: null,
+      newLocation: null,
+      newDescription: null,
+      newStartMs: null,
+      newEndMs: null
+    });
+    if ("error" in result2) {
+      if (result2.error === "not_found") {
+        return {
+          success: false,
+          message: `No event found ${describeLocate(locator)}.`
+        };
+      }
+      return {
+        success: false,
+        message: `Multiple events match the title "${(locator.title ?? "").trim()}". Re-issue delete with a specific eventId.`,
+        candidates: result2.candidates
+      };
+    }
+    return {
+      success: true,
+      message: result2.title ? `Deleted "${result2.title}" from "${result2.calendarName}".` : `Deleted the event from "${result2.calendarName}".`,
+      eventId: result2.id
+    };
+  } catch (error2) {
+    if (isPermissionDenial(error2)) throw new PermissionError(CALENDAR_DENIED);
+    throw error2 instanceof Error ? error2 : new Error(String(error2));
+  }
+}
+var import_run4, MAX_SCAN, LIST_WINDOW_DAYS, SEARCH_WINDOW_DAYS, MUTATE_WINDOW_DAYS, CALENDAR_DENIED, calendar, calendar_default;
 var init_calendar = __esm({
   "utils/calendar.ts"() {
     "use strict";
@@ -12091,12 +13339,15 @@ var init_calendar = __esm({
     MAX_SCAN = 1e3;
     LIST_WINDOW_DAYS = 7;
     SEARCH_WINDOW_DAYS = 30;
-    CALENDAR_DENIED = "Calendar access is not granted. In System Settings \u25B8 Privacy & Security, grant Faced access to Calendars (and Automation \u25B8 Calendar), then try again.";
+    MUTATE_WINDOW_DAYS = 30;
+    CALENDAR_DENIED = `Calendar access is not granted. In System Settings \u25B8 Privacy & Security, grant ${APP_NAME} access to Calendars (and Automation \u25B8 Calendar), then try again.`;
     calendar = {
       searchEvents,
       openEvent,
       getEvents,
       createEvent,
+      updateEvent,
+      deleteEvent,
       requestCalendarAccess
     };
     calendar_default = calendar;
@@ -19188,43 +20439,133 @@ var StdioServerTransport = class {
 // tools.ts
 var CONTACTS_TOOL = {
   name: "contacts",
-  description: "Search and retrieve contacts from Apple Contacts app",
+  description: "Read and manage Apple Contacts (the macOS address book). Operations: 'list' (all contacts with phone numbers), 'search' (contacts whose name matches \u2014 returns names, phones, emails), 'create' (a new person from first/last name, organization, phones, emails), 'update' (find a person by name, then rename and/or add/remove phones & emails), 'delete' (find a person by name and remove them). Writes are persisted to the address book (and synced via iCloud if enabled). When omitted, 'operation' defaults to 'search' if a name is given, otherwise 'list'.",
   inputSchema: {
     type: "object",
     properties: {
+      operation: {
+        type: "string",
+        description: "What to do. Defaults to 'search' when a name is given, else 'list'.",
+        enum: ["list", "search", "create", "update", "delete"]
+      },
       name: {
         type: "string",
-        description: "Name to search for (optional - if not provided, returns all contacts). Can be partial name to search."
+        description: "For 'search': the (partial) name to match. For 'update'/'delete': the name that identifies WHICH existing contact to change (first match wins). Not used by 'create' (use firstName/lastName there)."
+      },
+      firstName: {
+        type: "string",
+        description: "First name. On 'create' it names the new person; on 'update' it RENAMES the matched contact's first name."
+      },
+      lastName: {
+        type: "string",
+        description: "Last name. On 'create' it names the new person; on 'update' it RENAMES the matched contact's last name."
+      },
+      organization: {
+        type: "string",
+        description: "Company/organization. Settable on 'create' and 'update'. For a company-only contact, provide this with no first/last name."
+      },
+      phones: {
+        type: "array",
+        items: { type: "string" },
+        description: "Phone numbers to attach when creating a contact (create only). For changing an existing contact's numbers use addPhones / removePhones."
+      },
+      emails: {
+        type: "array",
+        items: { type: "string" },
+        description: "Email addresses to attach when creating a contact (create only). For changing an existing contact's emails use addEmails / removeEmails."
+      },
+      addPhones: {
+        type: "array",
+        items: { type: "string" },
+        description: "Phone numbers to ADD to the matched contact (update only)."
+      },
+      addEmails: {
+        type: "array",
+        items: { type: "string" },
+        description: "Email addresses to ADD to the matched contact (update only)."
+      },
+      removePhones: {
+        type: "array",
+        items: { type: "string" },
+        description: "Phone numbers to REMOVE from the matched contact (update only). Matched loosely by digits, so country-code/formatting differences are tolerated."
+      },
+      removeEmails: {
+        type: "array",
+        items: { type: "string" },
+        description: "Email addresses to REMOVE from the matched contact (update only). Matched case-insensitively. To CHANGE a value, remove the old one and add the new one in the same call."
+      },
+      phoneLabel: {
+        type: "string",
+        description: "Label for phones added by create/update (e.g. 'mobile', 'home', 'work'). Defaults to 'mobile'."
+      },
+      emailLabel: {
+        type: "string",
+        description: "Label for emails added by create/update (e.g. 'home', 'work'). Defaults to 'home'."
       }
     }
   }
 };
 var NOTES_TOOL = {
   name: "notes",
-  description: "Search, retrieve and create notes in Apple Notes app",
+  description: "Full CRUD for Apple Notes. Operations: 'search' (FAST \u2014 finds notes by TITLE only, server-side; use this to locate a note, then 'get' it by id), 'list' (heavier full scan of all notes or one folder, newest first, with optional date range), 'get' (one note's full plaintext + HTML body by noteId or title), 'create', 'update' (replace the whole body OR append to it), 'delete', 'listFolders', and 'createFolder'. RICH FORMATTING: a note's body is HTML. Pass the body as Markdown (the default) and it is converted to HTML for you \u2014 use '#'/'##' headings, **bold**, *italic*, `code`, '- ' / '1. ' lists, '> ' quotes, '---' rules, and [links](https://\u2026) to produce nicely formatted notes. Set format:'html' to supply raw HTML, or format:'plain' for literal text. Prefer 'search' over 'list' when you know the title; prefer the noteId returned by search/get/list over title for 'get'/'update'/'delete' (it targets one exact note).",
   inputSchema: {
     type: "object",
     properties: {
       operation: {
         type: "string",
-        description: "Operation to perform: 'search', 'list', or 'create'",
-        enum: ["search", "list", "create"]
+        description: "What to do: 'search' (fast title lookup), 'list' (all notes / a folder), 'get' (one note's full content), 'create', 'update' (replace or append body), 'delete', 'listFolders', 'createFolder'.",
+        enum: [
+          "search",
+          "list",
+          "get",
+          "create",
+          "update",
+          "delete",
+          "listFolders",
+          "createFolder"
+        ]
       },
       searchText: {
         type: "string",
-        description: "Text to search for in notes (required for search operation)"
+        description: "search: case-insensitive text to match against note TITLES (required for search)."
       },
       title: {
         type: "string",
-        description: "Title of the note to create (required for create operation)"
+        description: "create: the new note's title (required). get/update/delete: locate the note by title (exact match preferred) when you don't have its noteId."
+      },
+      noteId: {
+        type: "string",
+        description: "get/update/delete: the exact note id (as returned by search/list/get). Preferred over title \u2014 it targets one specific note unambiguously."
       },
       body: {
         type: "string",
-        description: "Content of the note to create (required for create operation)"
+        description: "create/update: the note body. Interpreted per 'format' (Markdown by default \u2192 converted to HTML). Required for update."
+      },
+      format: {
+        type: "string",
+        description: "How to interpret 'body': 'markdown' (default \u2014 converts headings/bold/italic/lists/links/quotes/rules to HTML), 'html' (raw HTML passed through), or 'plain' (literal text).",
+        enum: ["markdown", "html", "plain"]
+      },
+      mode: {
+        type: "string",
+        description: "update only: 'replace' (default \u2014 overwrite the whole body) or 'append' (add the new content to the end of the existing note).",
+        enum: ["replace", "append"]
       },
       folderName: {
         type: "string",
-        description: "Name of the folder to create the note in (optional for create operation, defaults to 'Claude')"
+        description: "create: the destination folder (created if missing; defaults to 'Claude'). list: scope the listing to this folder. createFolder: the name of the folder to create (required)."
+      },
+      fromDate: {
+        type: "string",
+        description: "list: only notes modified on/after this ISO 8601 date/time (optional)."
+      },
+      toDate: {
+        type: "string",
+        description: "list: only notes modified on/before this ISO 8601 date/time (optional)."
+      },
+      limit: {
+        type: "number",
+        description: "list: max number of notes to return, newest-modified first (optional)."
       }
     },
     required: ["operation"]
@@ -19232,30 +20573,44 @@ var NOTES_TOOL = {
 };
 var MESSAGES_TOOL = {
   name: "messages",
-  description: "Interact with Apple Messages app - send, read, schedule messages and check unread messages",
+  description: "Apple Messages (iMessage). READ: 'fetch' returns recent messages newest-first in ONE query, each tagged read/unread and who it's from \u2014 to read someone's conversation, fetch with their contactName (it covers all their numbers/emails at once) and a small limit; do NOT list everything and filter. 'conversations' lists your most recently active distinct threads (one preview line each) \u2014 use it to answer 'who messaged me recently' without reading any single thread. WRITE: 'send' sends now; 'schedule' sends later. iMessage has NO programmatic edit, unsend, delete, or mark-as-read \u2014 those are not exposed by any scripting API, so this tool does not offer them.",
   inputSchema: {
     type: "object",
     properties: {
       operation: {
         type: "string",
-        description: "Operation to perform: 'send', 'read', 'schedule', or 'unread'",
-        enum: ["send", "read", "schedule", "unread"]
+        description: "'fetch' = read recent messages (optionally scoped to one person via contactName/phoneNumber). 'conversations' = list recently active threads, newest first. 'send' = send now. 'schedule' = send at a future time.",
+        enum: ["fetch", "conversations", "send", "schedule"]
+      },
+      contactName: {
+        type: "string",
+        description: "fetch: the person whose conversation to read (e.g. 'Marco Ferrari'). Resolves ALL their numbers/emails, so one fetch covers the whole thread \u2014 prefer this over phoneNumber when you have a name."
       },
       phoneNumber: {
         type: "string",
-        description: "Phone number to send message to (required for send, read, and schedule operations)"
-      },
-      message: {
-        type: "string",
-        description: "Message to send (required for send and schedule operations)"
+        description: "A specific handle \u2014 phone number (E.164 like +391234567) or iMessage email. Required for send/schedule. For fetch, an alternative to contactName when you have an exact handle."
       },
       limit: {
         type: "number",
-        description: "Number of messages to read (optional, for read and unread operations)"
+        description: "fetch: max messages to return, newest first (default 10, max 50). conversations: max threads to return (default 10, max 50). For 'their latest message' use a small value like 1\u20133."
+      },
+      status: {
+        type: "string",
+        description: "fetch filter (optional): 'unread' = only unread incoming; 'read' = only read incoming. Omit for all.",
+        enum: ["read", "unread"]
+      },
+      from: {
+        type: "string",
+        description: "fetch filter (optional): 'them' = only messages they sent you; 'me' = only messages you sent. Omit for both.",
+        enum: ["them", "me"]
+      },
+      message: {
+        type: "string",
+        description: "Message body (required for send and schedule)."
       },
       scheduledTime: {
         type: "string",
-        description: "ISO string of when to send the message (required for schedule operation)"
+        description: "ISO timestamp of when to send (required for schedule). Must be in the future."
       }
     },
     required: ["operation"]
@@ -19263,45 +20618,47 @@ var MESSAGES_TOOL = {
 };
 var REMINDERS_TOOL = {
   name: "reminders",
-  description: "Search, create, and open reminders in Apple Reminders app",
+  description: "List, search, get, open, create, update, complete/uncomplete, and delete reminders in Apple Reminders.",
   inputSchema: {
     type: "object",
     properties: {
       operation: {
         type: "string",
-        description: "Operation to perform: 'list', 'search', 'open', 'create', or 'listById'",
-        enum: ["list", "search", "open", "create", "listById"]
+        description: "'create' a NEW reminder. 'update' to CHANGE AN EXISTING reminder in place \u2014 its time, name, notes, or completion (find it via searchText); use 'update' whenever the user asks to change / move / reschedule / rename an existing reminder, and do NOT 'create' a duplicate. 'complete' marks the matched reminder done; 'uncomplete' marks it not-done. 'delete' permanently removes the first reminder matching searchText. 'get' returns the single best name/body match. Also 'list' (all lists + reminders), 'search' (by name/body), 'open' (reveal in the Reminders app), and 'listById' (reminders in one list by id).",
+        enum: ["list", "search", "get", "open", "create", "update", "complete", "uncomplete", "delete", "listById"]
       },
       searchText: {
         type: "string",
-        description: "Text to search for in reminders (required for search and open operations)"
+        description: "Text to match a reminder's name (and, for search/get, its body). Required for search, get, open, update, complete, uncomplete, and delete (to find which reminder to act on)."
       },
       name: {
         type: "string",
-        description: "Name of the reminder to create (required for create operation)"
+        description: "create: the new reminder's name (required). update: a new name for the reminder (optional)."
       },
       listName: {
         type: "string",
-        description: "Name of the list to create the reminder in (optional for create operation)"
+        description: "Name of the list to create the reminder in (optional for create; the list is created if it does not exist)."
       },
       listId: {
         type: "string",
-        description: "ID of the list to get reminders from (required for listById operation)"
+        description: "ID of the list to get reminders from (required for listById)."
       },
       props: {
         type: "array",
-        items: {
-          type: "string"
-        },
-        description: "Properties to include in the reminders (optional for listById operation)"
+        items: { type: "string" },
+        description: "Properties to include in the reminders (optional for listById)."
       },
       notes: {
         type: "string",
-        description: "Additional notes for the reminder (optional for create operation)"
+        description: "Reminder notes/body (optional for create and update)."
       },
       dueDate: {
         type: "string",
-        description: "Due date for the reminder in ISO format (optional for create operation)"
+        description: "Due date/time in ISO format (optional for create and update \u2014 set this to reschedule)."
+      },
+      completed: {
+        type: "boolean",
+        description: "update only: set true to mark the reminder done, false to un-complete it. (For a one-shot toggle prefer the dedicated 'complete'/'uncomplete' operations.)"
       }
     },
     required: ["operation"]
@@ -19309,74 +20666,88 @@ var REMINDERS_TOOL = {
 };
 var CALENDAR_TOOL = {
   name: "calendar",
-  description: "Search, create, and open calendar events in Apple Calendar app",
+  description: "Read and manage events in the macOS Calendar app. Operations: 'list' (events in a date window), 'search' (events whose title/location/notes contain text), 'open' (reveal an event in the app by id), 'create' (add an event), 'update' (rename/move/relocate/re-note an existing event), and 'delete' (remove an event). Locate an event for update/delete by its stable eventId, or by title within a date window \u2014 a title that matches more than one event returns the candidates so you can re-issue with a specific eventId.",
   inputSchema: {
     type: "object",
     properties: {
       operation: {
         type: "string",
-        description: "Operation to perform: 'search', 'open', 'list', or 'create'",
-        enum: ["search", "open", "list", "create"]
+        description: "Operation to perform.",
+        enum: ["search", "open", "list", "create", "update", "delete"]
       },
       searchText: {
         type: "string",
-        description: "Text to search for in event titles, locations, and notes (required for search operation)"
+        description: "Text to match in event title/location/notes (required for 'search')."
       },
       eventId: {
         type: "string",
-        description: "ID of the event to open (required for open operation)"
+        description: "Stable event id (uid). Required for 'open'. For 'update'/'delete' it is the precise locator and takes precedence over 'title' when both are given."
       },
       limit: {
         type: "number",
-        description: "Number of events to retrieve (optional, default 10)"
+        description: "Max events to return for 'search'/'list' (optional, default 10)."
       },
       fromDate: {
         type: "string",
-        description: "Start date for search range in ISO format (optional, default is today)"
+        description: "ISO-8601 start of the date window (optional, default = now). Used by 'search'/'list' and by 'update'/'delete' when locating by title."
       },
       toDate: {
         type: "string",
-        description: "End date for search range in ISO format (optional, default is 30 days from now for search, 7 days for list)"
+        description: "ISO-8601 end of the date window (optional; default = +7d for 'list', +30d for 'search' and for title-based 'update'/'delete')."
       },
       title: {
         type: "string",
-        description: "Title of the event to create (required for create operation)"
+        description: "For 'create': the new event's title (required). For 'update'/'delete': a title to locate the event by within the date window (used when no eventId is given)."
       },
       startDate: {
         type: "string",
-        description: "Start date/time of the event in ISO format (required for create operation)"
+        description: "ISO-8601 start date/time of the event (required for 'create')."
       },
       endDate: {
         type: "string",
-        description: "End date/time of the event in ISO format (required for create operation)"
+        description: "ISO-8601 end date/time of the event (required for 'create')."
       },
       location: {
         type: "string",
-        description: "Location of the event (optional for create operation)"
+        description: "Event location (optional, for 'create')."
       },
       notes: {
         type: "string",
-        description: "Additional notes for the event (optional for create operation)"
+        description: "Event notes/description (optional, for 'create')."
       },
       isAllDay: {
         type: "boolean",
-        description: "Whether the event is an all-day event (optional for create operation, default is false)"
+        description: "Whether the event is all-day (optional, for 'create', default false)."
       },
       calendarName: {
         type: "string",
-        description: "Name of the calendar to create the event in (optional for create operation, uses default calendar if not specified)"
+        description: "Name of the calendar to create the event in (optional, for 'create'; defaults to the first available calendar)."
+      },
+      newTitle: {
+        type: "string",
+        description: "New title to set on the located event (optional, for 'update'; cannot be empty)."
+      },
+      newStartDate: {
+        type: "string",
+        description: "New ISO-8601 start date/time to set on the located event (optional, for 'update')."
+      },
+      newEndDate: {
+        type: "string",
+        description: "New ISO-8601 end date/time to set on the located event (optional, for 'update')."
+      },
+      newLocation: {
+        type: "string",
+        description: "New location to set on the located event (optional, for 'update'; pass an empty string to clear it)."
+      },
+      newNotes: {
+        type: "string",
+        description: "New notes/description to set on the located event (optional, for 'update'; pass an empty string to clear it)."
       }
     },
     required: ["operation"]
   }
 };
-var tools = [
-  CONTACTS_TOOL,
-  NOTES_TOOL,
-  MESSAGES_TOOL,
-  REMINDERS_TOOL,
-  CALENDAR_TOOL
-];
+var tools = [CONTACTS_TOOL, NOTES_TOOL, MESSAGES_TOOL, REMINDERS_TOOL, CALENDAR_TOOL];
 var tools_default = tools;
 
 // index.ts
@@ -19508,7 +20879,7 @@ function initServer() {
           content: [
             {
               type: "text",
-              text: `The "${name}" app is disabled. Enable it in Faced's settings to use this tool.`
+              text: `The "${name}" app is disabled. Enable it via the APPLE_MCP_ENABLED_APPS environment variable to use this tool.`
             }
           ],
           isError: true
@@ -19521,43 +20892,135 @@ function initServer() {
           }
           try {
             const contactsModule = await loadModule("contacts");
-            if (args.name) {
-              const numbers = await contactsModule.findNumber(args.name);
-              return {
-                content: [
-                  {
-                    type: "text",
-                    text: numbers.length ? `${args.name}: ${numbers.join(", ")}` : `No contact found for "${args.name}". Try a different name or use no name parameter to list all contacts.`
-                  }
-                ],
-                isError: false
-              };
-            } else {
-              const allNumbers = await contactsModule.getAllNumbers();
-              const contactCount = Object.keys(allNumbers).length;
-              if (contactCount === 0) {
+            const operation = args.operation ?? (args.name ? "search" : "list");
+            switch (operation) {
+              case "list": {
+                const allNumbers = await contactsModule.getAllNumbers();
+                const contactCount = Object.keys(allNumbers).length;
+                if (contactCount === 0) {
+                  return {
+                    content: [
+                      {
+                        type: "text",
+                        text: "No contacts with phone numbers found in the address book."
+                      }
+                    ],
+                    isError: false
+                  };
+                }
+                const formatted = Object.entries(allNumbers).filter(([, phones]) => phones.length > 0).map(([name2, phones]) => `${name2}: ${phones.join(", ")}`);
                 return {
                   content: [
                     {
                       type: "text",
-                      text: "No contacts found in the address book. Please make sure you have granted access to Contacts."
+                      text: `Found ${contactCount} contacts:
+
+${formatted.join("\n")}`
                     }
                   ],
                   isError: false
                 };
               }
-              const formattedContacts = Object.entries(allNumbers).filter(([_, phones]) => phones.length > 0).map(([name2, phones]) => `${name2}: ${phones.join(", ")}`);
-              return {
-                content: [
-                  {
-                    type: "text",
-                    text: formattedContacts.length > 0 ? `Found ${contactCount} contacts:
+              case "search": {
+                if (!args.name) {
+                  throw new Error("A name is required for the search operation.");
+                }
+                const matches = await contactsModule.searchContacts(args.name);
+                if (matches.length === 0) {
+                  return {
+                    content: [
+                      {
+                        type: "text",
+                        text: `No contact found matching "${args.name}".`
+                      }
+                    ],
+                    isError: false
+                  };
+                }
+                const text = matches.map((c) => {
+                  const lines = [c.name];
+                  if (c.phones.length) lines.push(`  phones: ${c.phones.join(", ")}`);
+                  if (c.emails.length) lines.push(`  emails: ${c.emails.join(", ")}`);
+                  return lines.join("\n");
+                }).join("\n\n");
+                return {
+                  content: [
+                    {
+                      type: "text",
+                      text: `Found ${matches.length} contact(s):
 
-${formattedContacts.join("\n")}` : "Found contacts but none have phone numbers. Try searching by name to see more details."
-                  }
-                ],
-                isError: false
-              };
+${text}`
+                    }
+                  ],
+                  isError: false
+                };
+              }
+              case "create": {
+                const created = await contactsModule.createContact({
+                  firstName: args.firstName,
+                  lastName: args.lastName,
+                  organization: args.organization,
+                  phones: args.phones,
+                  emails: args.emails,
+                  phoneLabel: args.phoneLabel,
+                  emailLabel: args.emailLabel
+                });
+                const detail = [];
+                if (created.phones.length) detail.push(`phones: ${created.phones.join(", ")}`);
+                if (created.emails.length) detail.push(`emails: ${created.emails.join(", ")}`);
+                return {
+                  content: [
+                    {
+                      type: "text",
+                      text: `Created contact "${created.name}"${detail.length ? ` (${detail.join("; ")})` : ""}.`
+                    }
+                  ],
+                  isError: false
+                };
+              }
+              case "update": {
+                if (!args.name) {
+                  throw new Error("The 'name' of an existing contact is required to update it.");
+                }
+                const res = await contactsModule.updateContact({
+                  name: args.name,
+                  firstName: args.firstName,
+                  lastName: args.lastName,
+                  organization: args.organization,
+                  addPhones: args.addPhones,
+                  addEmails: args.addEmails,
+                  removePhones: args.removePhones,
+                  removeEmails: args.removeEmails,
+                  phoneLabel: args.phoneLabel,
+                  emailLabel: args.emailLabel
+                });
+                return {
+                  content: [
+                    {
+                      type: "text",
+                      text: res.updated ? `Updated contact "${res.name ?? args.name}".` : `No contact found matching "${args.name}" to update.`
+                    }
+                  ],
+                  isError: !res.updated
+                };
+              }
+              case "delete": {
+                if (!args.name) {
+                  throw new Error("The 'name' of an existing contact is required to delete it.");
+                }
+                const res = await contactsModule.deleteContact(args.name);
+                return {
+                  content: [
+                    {
+                      type: "text",
+                      text: res.deleted ? `Deleted contact "${res.name ?? args.name}".` : `No contact found matching "${args.name}" to delete.`
+                    }
+                  ],
+                  isError: !res.deleted
+                };
+              }
+              default:
+                throw new Error(`Unknown contacts operation: ${operation}`);
             }
           } catch (error2) {
             const errorMessage = error2 instanceof Error ? error2.message : String(error2);
@@ -19578,62 +21041,155 @@ ${formattedContacts.join("\n")}` : "Found contacts but none have phone numbers. 
           }
           try {
             const notesModule = await loadModule("notes");
-            const { operation } = args;
-            switch (operation) {
+            switch (args.operation) {
               case "search": {
-                if (!args.searchText) {
-                  throw new Error(
-                    "Search text is required for search operation"
-                  );
-                }
-                const foundNotes = await notesModule.findNote(args.searchText);
+                const hits = await notesModule.searchNotes(args.searchText);
                 return {
                   content: [
                     {
                       type: "text",
-                      text: foundNotes.length ? foundNotes.map((note) => `${note.name}:
-${note.content}`).join("\n\n") : `No notes found for "${args.searchText}"`
+                      text: hits.length ? hits.map((h) => `${h.name}
+  id: ${h.id}`).join("\n\n") : `No notes found with a title matching "${args.searchText}".`
                     }
                   ],
                   isError: false
                 };
               }
               case "list": {
-                const allNotes = await notesModule.getAllNotes();
+                const result2 = await notesModule.listNotes({
+                  folderName: args.folderName,
+                  fromDate: args.fromDate,
+                  toDate: args.toDate,
+                  limit: args.limit
+                });
+                if (!result2.success) {
+                  return {
+                    content: [{ type: "text", text: result2.message ?? "Folder not found." }],
+                    isError: true
+                  };
+                }
+                const notes2 = result2.notes ?? [];
                 return {
                   content: [
                     {
                       type: "text",
-                      text: allNotes.length ? allNotes.map((note) => `${note.name}:
-${note.content}`).join("\n\n") : "No notes exist."
+                      text: notes2.length ? notes2.map((n) => {
+                        const when = n.modificationDate ? ` (modified ${n.modificationDate.toISOString()})` : "";
+                        const idLine = n.id ? `
+  id: ${n.id}` : "";
+                        return `${n.name}${when}${idLine}
+${n.content}`;
+                      }).join("\n\n") : args.folderName ? `No notes in folder "${args.folderName}".` : "No notes exist."
                     }
                   ],
                   isError: false
                 };
               }
-              case "create": {
-                if (!args.title || !args.body) {
-                  throw new Error(
-                    "Title and body are required for create operation"
-                  );
+              case "get": {
+                const note = await notesModule.getNote({
+                  title: args.title,
+                  noteId: args.noteId
+                });
+                if (!note) {
+                  return {
+                    content: [
+                      {
+                        type: "text",
+                        text: `No note found for ${args.noteId ? `id "${args.noteId}"` : `title "${args.title}"`}.`
+                      }
+                    ],
+                    isError: true
+                  };
                 }
-                const result2 = await notesModule.createNote(
-                  args.title,
-                  args.body,
-                  args.folderName
-                );
+                const meta = [
+                  note.folderName ? `Folder: ${note.folderName}` : null,
+                  note.id ? `id: ${note.id}` : null,
+                  note.modificationDate ? `Modified: ${note.modificationDate.toISOString()}` : null
+                ].filter(Boolean).join("\n");
+                return {
+                  content: [{ type: "text", text: `${note.name}
+${meta}
+
+${note.content}` }],
+                  isError: false
+                };
+              }
+              case "create": {
+                const result2 = await notesModule.createNote({
+                  title: args.title,
+                  body: args.body,
+                  format: args.format,
+                  folderName: args.folderName
+                });
                 return {
                   content: [
                     {
                       type: "text",
-                      text: result2.success ? `Created note "${args.title}" in folder "${result2.folderName}"${result2.usedDefaultFolder ? " (created new folder)" : ""}.` : `Failed to create note: ${result2.message}`
+                      text: result2.success ? `Created note "${args.title}" in folder "${result2.folderName}"${result2.createdFolder ? " (new folder created)" : ""}.` : `Failed to create note: ${result2.message}`
+                    }
+                  ],
+                  isError: !result2.success
+                };
+              }
+              case "update": {
+                const result2 = await notesModule.updateNote({
+                  title: args.title,
+                  noteId: args.noteId,
+                  body: args.body,
+                  format: args.format,
+                  mode: args.mode
+                });
+                return {
+                  content: [
+                    {
+                      type: "text",
+                      text: result2.success ? `${args.mode === "append" ? "Appended to" : "Updated"} note "${result2.name ?? args.title ?? result2.id}".` : `Failed to update note: ${result2.message}`
+                    }
+                  ],
+                  isError: !result2.success
+                };
+              }
+              case "delete": {
+                const result2 = await notesModule.deleteNote({
+                  title: args.title,
+                  noteId: args.noteId
+                });
+                return {
+                  content: [
+                    {
+                      type: "text",
+                      text: result2.success ? `Deleted note "${result2.name ?? args.title ?? result2.id}".` : `Failed to delete note: ${result2.message}`
+                    }
+                  ],
+                  isError: !result2.success
+                };
+              }
+              case "listFolders": {
+                const folders = await notesModule.listFolders();
+                return {
+                  content: [
+                    {
+                      type: "text",
+                      text: folders.length ? folders.map((f) => `${f.name}${f.count != null ? ` (${f.count} notes)` : ""}`).join("\n") : "No folders exist."
+                    }
+                  ],
+                  isError: false
+                };
+              }
+              case "createFolder": {
+                const result2 = await notesModule.createFolder(args.folderName);
+                return {
+                  content: [
+                    {
+                      type: "text",
+                      text: result2.success ? result2.created ? `Created folder "${result2.name}".` : `Folder "${result2.name}" already exists.` : `Failed to create folder: ${result2.message}`
                     }
                   ],
                   isError: !result2.success
                 };
               }
               default:
-                throw new Error(`Unknown operation: ${operation}`);
+                throw new Error(`Unknown operation: ${args.operation}`);
             }
           } catch (error2) {
             const errorMessage = error2 instanceof Error ? error2.message : String(error2);
@@ -19655,50 +21211,86 @@ ${note.content}`).join("\n\n") : "No notes exist."
           try {
             const messageModule = await loadModule("message");
             switch (args.operation) {
+              case "fetch": {
+                let handles;
+                let known;
+                if (args.contactName) {
+                  const contactsModule = await loadModule("contacts");
+                  handles = await contactsModule.findHandles(args.contactName);
+                  if (handles.length === 0) {
+                    return {
+                      content: [{ type: "text", text: `No contact found matching "${args.contactName}".` }],
+                      isError: false
+                    };
+                  }
+                  known = args.contactName;
+                } else if (args.phoneNumber) {
+                  handles = [args.phoneNumber];
+                }
+                const messages = await messageModule.fetchMessages({
+                  handles,
+                  limit: args.limit,
+                  status: args.status,
+                  from: args.from
+                });
+                if (messages.length === 0) {
+                  return { content: [{ type: "text", text: "No messages found." }], isError: false };
+                }
+                const nameByHandle = /* @__PURE__ */ new Map();
+                if (!known) {
+                  const contactsModule = await loadModule("contacts");
+                  const senders = Array.from(
+                    new Set(messages.filter((m) => !m.is_from_me).map((m) => m.sender))
+                  );
+                  for (const s of senders) {
+                    const n = await contactsModule.findContactByPhone(s);
+                    if (n) nameByHandle.set(s, n);
+                  }
+                }
+                const lines = messages.map((m) => {
+                  const when = new Date(m.date).toLocaleString();
+                  const who = m.is_from_me ? "Me" : known ?? nameByHandle.get(m.sender) ?? m.sender;
+                  const tag = m.is_from_me ? "" : m.is_read ? " (read)" : " (unread)";
+                  return `[${when}] ${who}${tag}: ${m.content}`;
+                });
+                return { content: [{ type: "text", text: lines.join("\n") }], isError: false };
+              }
+              case "conversations": {
+                const conversations = await messageModule.fetchConversations({ limit: args.limit });
+                if (conversations.length === 0) {
+                  return { content: [{ type: "text", text: "No conversations found." }], isError: false };
+                }
+                const contactsModule = await loadModule("contacts");
+                const lines = [];
+                for (const c of conversations) {
+                  let title;
+                  if (c.is_group) {
+                    title = c.display_name || `Group (${c.chat_identifier})`;
+                  } else {
+                    const name2 = await contactsModule.findContactByPhone(c.chat_identifier);
+                    title = name2 ?? c.chat_identifier;
+                  }
+                  const m = c.last_message;
+                  const when = new Date(m.date).toLocaleString();
+                  const who = m.is_from_me ? "Me" : title;
+                  const tag = m.is_from_me ? "" : m.is_read ? " (read)" : " (unread)";
+                  lines.push(`[${when}] ${title} \u2014 ${who}${tag}: ${m.content}`);
+                }
+                return { content: [{ type: "text", text: lines.join("\n") }], isError: false };
+              }
               case "send": {
                 if (!args.phoneNumber || !args.message) {
-                  throw new Error(
-                    "Phone number and message are required for send operation"
-                  );
+                  throw new Error("phoneNumber and message are required for send");
                 }
-                await messageModule.sendMessage(args.phoneNumber, args.message);
+                const sent = await messageModule.sendMessage(args.phoneNumber, args.message);
                 return {
-                  content: [
-                    {
-                      type: "text",
-                      text: `Message sent to ${args.phoneNumber}`
-                    }
-                  ],
-                  isError: false
-                };
-              }
-              case "read": {
-                if (!args.phoneNumber) {
-                  throw new Error(
-                    "Phone number is required for read operation"
-                  );
-                }
-                const messages = await messageModule.readMessages(
-                  args.phoneNumber,
-                  args.limit
-                );
-                return {
-                  content: [
-                    {
-                      type: "text",
-                      text: messages.length > 0 ? messages.map(
-                        (msg) => `[${new Date(msg.date).toLocaleString()}] ${msg.is_from_me ? "Me" : msg.sender}: ${msg.content}`
-                      ).join("\n") : "No messages found"
-                    }
-                  ],
+                  content: [{ type: "text", text: `Message sent to ${sent.handle}` }],
                   isError: false
                 };
               }
               case "schedule": {
                 if (!args.phoneNumber || !args.message || !args.scheduledTime) {
-                  throw new Error(
-                    "Phone number, message, and scheduled time are required for schedule operation"
-                  );
+                  throw new Error("phoneNumber, message, and scheduledTime are required for schedule");
                 }
                 const scheduledMsg = await messageModule.scheduleMessage(
                   args.phoneNumber,
@@ -19706,47 +21298,7 @@ ${note.content}`).join("\n\n") : "No notes exist."
                   new Date(args.scheduledTime)
                 );
                 return {
-                  content: [
-                    {
-                      type: "text",
-                      text: `Message scheduled to be sent to ${args.phoneNumber} at ${scheduledMsg.scheduledTime}`
-                    }
-                  ],
-                  isError: false
-                };
-              }
-              case "unread": {
-                const messages = await messageModule.getUnreadMessages(
-                  args.limit
-                );
-                const contactsModule = await loadModule("contacts");
-                const messagesWithNames = await Promise.all(
-                  messages.map(async (msg) => {
-                    if (!msg.is_from_me) {
-                      const contactName = await contactsModule.findContactByPhone(msg.sender);
-                      return {
-                        ...msg,
-                        displayName: contactName || msg.sender
-                        // Use contact name if found, otherwise use phone/email
-                      };
-                    }
-                    return {
-                      ...msg,
-                      displayName: "Me"
-                    };
-                  })
-                );
-                return {
-                  content: [
-                    {
-                      type: "text",
-                      text: messagesWithNames.length > 0 ? `Found ${messagesWithNames.length} unread message(s):
-` + messagesWithNames.map(
-                        (msg) => `[${new Date(msg.date).toLocaleString()}] From ${msg.displayName}:
-${msg.content}`
-                      ).join("\n\n") : "No unread messages found"
-                    }
-                  ],
+                  content: [{ type: "text", text: `Message scheduled for ${scheduledMsg.handle} at ${scheduledMsg.scheduledTime}` }],
                   isError: false
                 };
               }
@@ -19756,12 +21308,7 @@ ${msg.content}`
           } catch (error2) {
             const errorMessage = error2 instanceof Error ? error2.message : String(error2);
             return {
-              content: [
-                {
-                  type: "text",
-                  text: errorMessage.includes("access") ? errorMessage : `Error with messages operation: ${errorMessage}`
-                }
-              ],
+              content: [{ type: "text", text: errorMessage.includes("access") ? errorMessage : `Error with messages operation: ${errorMessage}` }],
               isError: true
             };
           }
@@ -19789,17 +21336,34 @@ ${msg.content}`
               };
             } else if (operation === "search") {
               const { searchText } = args;
-              const results = await remindersModule.searchReminders(
-                searchText
+              const det = await remindersModule.searchRemindersDetailed(searchText);
+              const results = det.items;
+              const lines = results.map(
+                (r) => `- ${r.name}${r.dueDate ? ` (due ${r.dueDate})` : ""}${r.completed ? " [completed]" : ""} [list: ${r.listName}]${r.id ? ` [id: ${r.id}]` : ""}`
               );
+              const coverage = det.truncated ? ` Searched ${det.scannedLists} of ${det.totalLists} lists before the time budget ran out; name a list to search further.` : "";
               return {
                 content: [
                   {
                     type: "text",
-                    text: results.length > 0 ? `Found ${results.length} reminders matching "${searchText}".` : `No reminders found matching "${searchText}".`
+                    text: results.length > 0 ? `Found ${results.length} reminders matching "${searchText}":
+${lines.join("\n")}${coverage}` : `No reminders found matching "${searchText}".${coverage}`
                   }
                 ],
                 reminders: results,
+                isError: false
+              };
+            } else if (operation === "get") {
+              const { searchText } = args;
+              const reminder = await remindersModule.getReminderByName(searchText);
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: reminder ? `Found reminder "${reminder.name}".` : `No reminder found matching "${searchText}".`
+                  }
+                ],
+                reminder: reminder ?? void 0,
                 isError: false
               };
             } else if (operation === "open") {
@@ -19827,11 +21391,60 @@ ${msg.content}`
                 content: [
                   {
                     type: "text",
-                    text: `Created reminder "${result2.name}" ${listName ? `in list "${listName}"` : ""}.`
+                    text: `Created reminder "${result2.name}"${listName ? ` in list "${listName}"` : ""}.`
                   }
                 ],
                 success: true,
                 reminder: result2,
+                isError: false
+              };
+            } else if (operation === "update") {
+              const { searchText, name: name2, notes: notes2, dueDate, completed } = args;
+              const result2 = await remindersModule.updateReminder({
+                searchText,
+                name: name2,
+                notes: notes2,
+                dueDate,
+                completed
+              });
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: result2.updated ? `Updated reminder "${result2.name}".` : `No reminder found matching "${searchText}" to update.`
+                  }
+                ],
+                success: result2.updated,
+                isError: false
+              };
+            } else if (operation === "complete" || operation === "uncomplete") {
+              const { searchText } = args;
+              const completed = operation === "complete";
+              const result2 = await remindersModule.setReminderCompleted(
+                searchText,
+                completed
+              );
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: result2.updated ? `Marked reminder "${result2.name}" ${completed ? "completed" : "not completed"}.` : `No reminder found matching "${searchText}".`
+                  }
+                ],
+                success: result2.updated,
+                isError: false
+              };
+            } else if (operation === "delete") {
+              const { searchText } = args;
+              const result2 = await remindersModule.deleteReminder(searchText);
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: result2.deleted ? `Deleted reminder "${result2.name}".` : `No reminder found matching "${searchText}" to delete.`
+                  }
+                ],
+                success: result2.deleted,
                 isError: false
               };
             } else if (operation === "listById") {
@@ -19852,12 +21465,7 @@ ${msg.content}`
               };
             }
             return {
-              content: [
-                {
-                  type: "text",
-                  text: "Unknown operation"
-                }
-              ],
+              content: [{ type: "text", text: "Unknown operation" }],
               isError: true
             };
           } catch (error2) {
@@ -19924,11 +21532,7 @@ ${event.notes ? `Notes: ${event.notes}
               }
               case "list": {
                 const { limit, fromDate, toDate } = args;
-                const events = await calendarModule.getEvents(
-                  limit,
-                  fromDate,
-                  toDate
-                );
+                const events = await calendarModule.getEvents(limit, fromDate, toDate);
                 const startDateText = fromDate ? new Date(fromDate).toLocaleDateString() : "today";
                 const endDateText = toDate ? new Date(toDate).toLocaleDateString() : "next 7 days";
                 return {
@@ -19975,6 +21579,67 @@ ID: ${event.id}`
 Event ID: ${result2.eventId}` : ""}` : `Error creating event: ${result2.message}`
                     }
                   ],
+                  isError: !result2.success
+                };
+              }
+              case "update": {
+                const {
+                  eventId,
+                  title,
+                  fromDate,
+                  toDate,
+                  newTitle,
+                  newStartDate,
+                  newEndDate,
+                  newLocation,
+                  newNotes
+                } = args;
+                const result2 = await calendarModule.updateEvent(
+                  { eventId, title, fromDate, toDate },
+                  { newTitle, newStartDate, newEndDate, newLocation, newNotes }
+                );
+                let text;
+                if (result2.success) {
+                  text = `${result2.message}${result2.eventId ? `
+Event ID: ${result2.eventId}` : ""}`;
+                } else if (result2.candidates && result2.candidates.length > 0) {
+                  text = `${result2.message}
+
+${result2.candidates.map(
+                    (c) => `${c.title} (${c.start ? new Date(c.start).toLocaleString() : "no start"})
+ID: ${c.id}`
+                  ).join("\n\n")}`;
+                } else {
+                  text = `Error updating event: ${result2.message}`;
+                }
+                return {
+                  content: [{ type: "text", text }],
+                  isError: !result2.success
+                };
+              }
+              case "delete": {
+                const { eventId, title, fromDate, toDate } = args;
+                const result2 = await calendarModule.deleteEvent({
+                  eventId,
+                  title,
+                  fromDate,
+                  toDate
+                });
+                let text;
+                if (result2.success) {
+                  text = result2.message;
+                } else if (result2.candidates && result2.candidates.length > 0) {
+                  text = `${result2.message}
+
+${result2.candidates.map(
+                    (c) => `${c.title} (${c.start ? new Date(c.start).toLocaleString() : "no start"})
+ID: ${c.id}`
+                  ).join("\n\n")}`;
+                } else {
+                  text = `Error deleting event: ${result2.message}`;
+                }
+                return {
+                  content: [{ type: "text", text }],
                   isError: !result2.success
                 };
               }
@@ -20036,79 +21701,135 @@ Event ID: ${result2.eventId}` : ""}` : `Error creating event: ${result2.message}
   })();
 }
 function isContactsArgs(args) {
-  return typeof args === "object" && args !== null && (!("name" in args) || typeof args.name === "string");
+  if (typeof args !== "object" || args === null) return false;
+  const a = args;
+  const isStr = (v) => v === void 0 || typeof v === "string";
+  const isStrArr = (v) => v === void 0 || Array.isArray(v) && v.every((x) => typeof x === "string");
+  if (a.operation !== void 0 && !["list", "search", "create", "update", "delete"].includes(a.operation))
+    return false;
+  return isStr(a.name) && isStr(a.firstName) && isStr(a.lastName) && isStr(a.organization) && isStr(a.phoneLabel) && isStr(a.emailLabel) && isStrArr(a.phones) && isStrArr(a.emails) && isStrArr(a.addPhones) && isStrArr(a.addEmails) && isStrArr(a.removePhones) && isStrArr(a.removeEmails);
 }
 function isNotesArgs(args) {
-  if (typeof args !== "object" || args === null) {
+  if (typeof args !== "object" || args === null) return false;
+  const a = args;
+  const op = a.operation;
+  if (typeof op !== "string") return false;
+  if (![
+    "search",
+    "list",
+    "get",
+    "create",
+    "update",
+    "delete",
+    "listFolders",
+    "createFolder"
+  ].includes(op)) {
     return false;
   }
-  const { operation } = args;
-  if (typeof operation !== "string") {
+  for (const key of [
+    "searchText",
+    "title",
+    "noteId",
+    "body",
+    "folderName",
+    "fromDate",
+    "toDate"
+  ]) {
+    if (a[key] !== void 0 && typeof a[key] !== "string") return false;
+  }
+  if (a.format !== void 0 && !["markdown", "html", "plain"].includes(a.format)) {
     return false;
   }
-  if (!["search", "list", "create"].includes(operation)) {
+  if (a.mode !== void 0 && !["replace", "append"].includes(a.mode)) {
     return false;
   }
-  if (operation === "search") {
-    const { searchText } = args;
-    if (typeof searchText !== "string" || searchText === "") {
-      return false;
-    }
-  }
-  if (operation === "create") {
-    const { title, body } = args;
-    if (typeof title !== "string" || title === "" || typeof body !== "string") {
-      return false;
-    }
-    const { folderName } = args;
-    if (folderName !== void 0 && (typeof folderName !== "string" || folderName === "")) {
-      return false;
-    }
+  if (a.limit !== void 0 && typeof a.limit !== "number") return false;
+  const hasTitle = typeof a.title === "string" && a.title.trim() !== "";
+  const hasId = typeof a.noteId === "string" && a.noteId.trim() !== "";
+  switch (op) {
+    case "search":
+      if (typeof a.searchText !== "string" || a.searchText.trim() === "") return false;
+      break;
+    case "get":
+    case "delete":
+      if (!hasTitle && !hasId) return false;
+      break;
+    case "create":
+      if (!hasTitle) return false;
+      break;
+    case "update":
+      if (!hasTitle && !hasId) return false;
+      if (typeof a.body !== "string") return false;
+      break;
+    case "createFolder":
+      if (typeof a.folderName !== "string" || a.folderName.trim() === "") return false;
+      break;
   }
   return true;
 }
 function isMessagesArgs(args) {
   if (typeof args !== "object" || args === null) return false;
-  const { operation, phoneNumber, message: message2, limit, scheduledTime } = args;
-  if (!operation || !["send", "read", "schedule", "unread"].includes(operation)) {
+  const { operation, contactName, phoneNumber, message: message2, limit, scheduledTime, status, from } = args;
+  if (!operation || !["fetch", "conversations", "send", "schedule"].includes(operation)) {
     return false;
   }
+  if (contactName !== void 0 && typeof contactName !== "string") return false;
+  if (phoneNumber !== void 0 && typeof phoneNumber !== "string") return false;
+  if (message2 !== void 0 && typeof message2 !== "string") return false;
+  if (scheduledTime !== void 0 && typeof scheduledTime !== "string") return false;
+  if (limit !== void 0 && typeof limit !== "number") return false;
+  if (status !== void 0 && !["read", "unread"].includes(status)) return false;
+  if (from !== void 0 && !["them", "me"].includes(from)) return false;
   switch (operation) {
     case "send":
     case "schedule":
       if (!phoneNumber || !message2) return false;
       if (operation === "schedule" && !scheduledTime) return false;
       break;
-    case "read":
-      if (!phoneNumber) return false;
-      break;
-    case "unread":
+    case "fetch":
+    case "conversations":
       break;
   }
-  if (phoneNumber && typeof phoneNumber !== "string") return false;
-  if (message2 && typeof message2 !== "string") return false;
-  if (limit && typeof limit !== "number") return false;
-  if (scheduledTime && typeof scheduledTime !== "string") return false;
   return true;
 }
 function isRemindersArgs(args) {
   if (typeof args !== "object" || args === null) {
     return false;
   }
-  const { operation } = args;
+  const a = args;
+  const { operation } = a;
   if (typeof operation !== "string") {
     return false;
   }
-  if (!["list", "search", "open", "create", "listById"].includes(operation)) {
+  if (![
+    "list",
+    "search",
+    "get",
+    "open",
+    "create",
+    "update",
+    "complete",
+    "uncomplete",
+    "delete",
+    "listById"
+  ].includes(operation)) {
     return false;
   }
-  if ((operation === "search" || operation === "open") && (typeof args.searchText !== "string" || args.searchText === "")) {
+  if ([
+    "search",
+    "get",
+    "open",
+    "update",
+    "complete",
+    "uncomplete",
+    "delete"
+  ].includes(operation) && (typeof a.searchText !== "string" || a.searchText === "")) {
     return false;
   }
-  if (operation === "create" && (typeof args.name !== "string" || args.name === "")) {
+  if (operation === "create" && (typeof a.name !== "string" || a.name === "")) {
     return false;
   }
-  if (operation === "listById" && (typeof args.listId !== "string" || args.listId === "")) {
+  if (operation === "listById" && (typeof a.listId !== "string" || a.listId === "")) {
     return false;
   }
   return true;
@@ -20121,7 +21842,7 @@ function isCalendarArgs(args) {
   if (typeof operation !== "string") {
     return false;
   }
-  if (!["search", "open", "list", "create"].includes(operation)) {
+  if (!["search", "open", "list", "create", "update", "delete"].includes(operation)) {
     return false;
   }
   if (operation === "search") {
@@ -20139,6 +21860,14 @@ function isCalendarArgs(args) {
   if (operation === "create") {
     const { title, startDate, endDate } = args;
     if (typeof title !== "string" || typeof startDate !== "string" || typeof endDate !== "string") {
+      return false;
+    }
+  }
+  if (operation === "update" || operation === "delete") {
+    const { eventId, title } = args;
+    const hasId = typeof eventId === "string" && eventId.trim() !== "";
+    const hasTitle = typeof title === "string" && title.trim() !== "";
+    if (!hasId && !hasTitle) {
       return false;
     }
   }
