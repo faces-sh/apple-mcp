@@ -12397,27 +12397,19 @@ async function scan(opts) {
           lists = R.lists();
         }
         const items = [];
-        const listCap = Math.min(lists.length, maxLists);
-        for (let li = 0; li < listCap; li++) {
-          let listName;
+        const readMatches = (list, listName) => {
           let rems;
           try {
-            const list = lists[li];
-            listName = String(list.name());
-            if (needle) {
-              try {
-                rems = list.reminders.whose({ name: { _contains: search } })();
-              } catch (e) {
-                rems = list.reminders();
-              }
-            } else {
-              rems = list.reminders();
-            }
+            rems = needle ? list.reminders.whose({ name: { _contains: search } })() : list.reminders();
           } catch (e) {
-            continue;
+            try {
+              rems = list.reminders();
+            } catch (e2) {
+              return;
+            }
           }
           for (let ri = 0; ri < rems.length; ri++) {
-            if (items.length >= max) return { items, listNotFound: false };
+            if (items.length >= max) return;
             try {
               const rec = read(rems[ri], listName);
               if (needle) {
@@ -12428,8 +12420,55 @@ async function scan(opts) {
             } catch (e) {
             }
           }
+        };
+        let defaultListName = null;
+        if (needle && !listId) {
+          try {
+            const dl = R.defaultList();
+            defaultListName = String(dl.name());
+            readMatches(dl, defaultListName);
+            if (items.length > 0) {
+              return {
+                items,
+                listNotFound: false,
+                truncated: false,
+                scannedLists: 1,
+                totalLists: lists.length
+              };
+            }
+          } catch (e) {
+          }
         }
-        return { items, listNotFound: false };
+        const budgetMs = needle ? 25e3 : 6e4;
+        const t0 = Date.now();
+        let scanned = defaultListName ? 1 : 0;
+        let truncated = false;
+        const listCap = Math.min(lists.length, maxLists);
+        for (let li = 0; li < listCap; li++) {
+          if (Date.now() - t0 > budgetMs) {
+            truncated = true;
+            break;
+          }
+          let listName;
+          let list;
+          try {
+            list = lists[li];
+            listName = String(list.name());
+          } catch (e) {
+            continue;
+          }
+          if (defaultListName && listName === defaultListName) continue;
+          scanned++;
+          readMatches(list, listName);
+          if (items.length >= max) break;
+        }
+        return {
+          items,
+          listNotFound: false,
+          truncated,
+          scannedLists: scanned,
+          totalLists: lists.length
+        };
       },
       {
         search: opts.search ?? null,
@@ -12471,6 +12510,18 @@ async function getAllReminders() {
 async function searchReminders(searchText) {
   if (!searchText || searchText.trim() === "") return [];
   return (await scan({ search: searchText })).items;
+}
+async function searchRemindersDetailed(searchText) {
+  if (!searchText || searchText.trim() === "") {
+    return { items: [], truncated: false, scannedLists: 0, totalLists: 0 };
+  }
+  const r = await scan({ search: searchText });
+  return {
+    items: r.items,
+    truncated: r.truncated ?? false,
+    scannedLists: r.scannedLists ?? 0,
+    totalLists: r.totalLists ?? 0
+  };
 }
 async function getReminderByName(name) {
   if (!name || name.trim() === "") return null;
@@ -12680,6 +12731,7 @@ var init_reminders = __esm({
     MAX_LISTS = 1e3;
     REMINDERS_DENIED = `Reminders access is not granted. In System Settings \u25B8 Privacy & Security, grant ${APP_NAME} access to Reminders (and Automation \u25B8 Reminders), then try again.`;
     reminders_default = {
+      searchRemindersDetailed,
       getAllLists,
       getAllReminders,
       searchReminders,
@@ -21250,12 +21302,18 @@ ${note.content}` }],
               };
             } else if (operation === "search") {
               const { searchText } = args;
-              const results = await remindersModule.searchReminders(searchText);
+              const det = await remindersModule.searchRemindersDetailed(searchText);
+              const results = det.items;
+              const lines = results.map(
+                (r) => `- ${r.name}${r.dueDate ? ` (due ${r.dueDate})` : ""}${r.completed ? " [completed]" : ""} [list: ${r.listName}]${r.id ? ` [id: ${r.id}]` : ""}`
+              );
+              const coverage = det.truncated ? ` Searched ${det.scannedLists} of ${det.totalLists} lists before the time budget ran out; name a list to search further.` : "";
               return {
                 content: [
                   {
                     type: "text",
-                    text: results.length > 0 ? `Found ${results.length} reminders matching "${searchText}".` : `No reminders found matching "${searchText}".`
+                    text: results.length > 0 ? `Found ${results.length} reminders matching "${searchText}":
+${lines.join("\n")}${coverage}` : `No reminders found matching "${searchText}".${coverage}`
                   }
                 ],
                 reminders: results,

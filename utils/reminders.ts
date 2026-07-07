@@ -64,7 +64,7 @@ async function requestRemindersAccess(): Promise<{
 async function scan(opts: {
 	search?: string | null;
 	listId?: string | null;
-}): Promise<{ items: Reminder[]; listNotFound: boolean }> {
+}): Promise<{ items: Reminder[]; listNotFound: boolean; truncated?: boolean; scannedLists?: number; totalLists?: number }> {
 	try {
 		const result = await run(
 			(args: {
@@ -122,32 +122,26 @@ async function scan(opts: {
 				}
 
 				const items: Reminder[] = [];
-				const listCap = Math.min(lists.length, maxLists);
-				for (let li = 0; li < listCap; li++) {
-					let listName: string;
+				// Reminders is SLOW: even a whose() query costs ~5s per list, and a 50-list iCloud
+				// store blows any upstream timeout, which then reads as "no matches" for reminders
+				// that exist. So a search is default-list-first (where creations land), returns on
+				// first hits, and sweeps the remaining lists under a hard time budget, reporting the
+				// coverage HONESTLY when it stops early: a silent cap is a lie shaped like an answer.
+				const readMatches = (list: any, listName: string) => {
 					let rems: any[];
 					try {
-						const list = lists[li];
-						listName = String(list.name());
-						// With a search needle, filter INSIDE the app via whose(): one Apple Event per
-						// list instead of one per reminder property. Full enumeration on a large iCloud
-						// store takes minutes and silently times out upstream, which read as "search
-						// found nothing" (the updateReminder locate path already worked this way).
-						if (needle) {
-							try {
-								rems = list.reminders.whose({ name: { _contains: search } })();
-							} catch (e) {
-								rems = list.reminders(); // whose unsupported → bounded fallback below
-							}
-						} else {
-							rems = list.reminders();
-						}
+						rems = needle
+							? list.reminders.whose({ name: { _contains: search } })()
+							: list.reminders();
 					} catch (e) {
-						// Skip an unreadable list; do not abort the whole scan.
-						continue;
+						try {
+							rems = list.reminders();
+						} catch (e2) {
+							return;
+						}
 					}
 					for (let ri = 0; ri < rems.length; ri++) {
-						if (items.length >= max) return { items, listNotFound: false };
+						if (items.length >= max) return;
 						try {
 							const rec = read(rems[ri], listName);
 							if (needle) {
@@ -159,8 +153,45 @@ async function scan(opts: {
 							// Skip an individual unreadable reminder.
 						}
 					}
+				};
+
+				let defaultListName: string | null = null;
+				if (needle && !listId) {
+					try {
+						const dl = R.defaultList();
+						defaultListName = String(dl.name());
+						readMatches(dl, defaultListName);
+						if (items.length > 0) {
+							return { items, listNotFound: false, truncated: false,
+								scannedLists: 1, totalLists: lists.length };
+						}
+					} catch (e) {
+						// No default list readable; sweep below covers everything.
+					}
 				}
-				return { items, listNotFound: false };
+
+				const budgetMs = needle ? 25000 : 60000;
+				const t0 = Date.now();
+				let scanned = defaultListName ? 1 : 0;
+				let truncated = false;
+				const listCap = Math.min(lists.length, maxLists);
+				for (let li = 0; li < listCap; li++) {
+					if (Date.now() - t0 > budgetMs) { truncated = true; break; }
+					let listName: string;
+					let list: any;
+					try {
+						list = lists[li];
+						listName = String(list.name());
+					} catch (e) {
+						continue;
+					}
+					if (defaultListName && listName === defaultListName) continue; // already searched
+					scanned++;
+					readMatches(list, listName);
+					if (items.length >= max) break;
+				}
+				return { items, listNotFound: false, truncated,
+					scannedLists: scanned, totalLists: lists.length };
 			},
 			{
 				search: opts.search ?? null,
@@ -209,6 +240,28 @@ async function getAllReminders(): Promise<Reminder[]> {
 async function searchReminders(searchText: string): Promise<Reminder[]> {
 	if (!searchText || searchText.trim() === "") return [];
 	return (await scan({ search: searchText })).items;
+}
+
+/**
+ * Search with coverage: the items PLUS how much of the store was actually searched, so the tool
+ * layer can say "searched 12 of 50 lists" instead of passing a partial sweep off as a full one.
+ */
+async function searchRemindersDetailed(searchText: string): Promise<{
+	items: Reminder[];
+	truncated: boolean;
+	scannedLists: number;
+	totalLists: number;
+}> {
+	if (!searchText || searchText.trim() === "") {
+		return { items: [], truncated: false, scannedLists: 0, totalLists: 0 };
+	}
+	const r = await scan({ search: searchText });
+	return {
+		items: r.items,
+		truncated: r.truncated ?? false,
+		scannedLists: r.scannedLists ?? 0,
+		totalLists: r.totalLists ?? 0,
+	};
 }
 
 /**
@@ -509,6 +562,7 @@ async function deleteReminder(
 }
 
 export default {
+	searchRemindersDetailed,
 	getAllLists,
 	getAllReminders,
 	searchReminders,

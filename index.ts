@@ -736,15 +736,26 @@ function initServer() {
 							};
 						} else if (operation === "search") {
 							const { searchText } = args;
-							const results = await remindersModule.searchReminders(searchText!);
+							const det = await remindersModule.searchRemindersDetailed(searchText!);
+							const results = det.items;
+							// The ITEMS go in the text: MCP clients show content text only, and a bare
+							// "Found 4" left the caller knowing nothing it could act on. Coverage is
+							// reported honestly when the time budget stopped the sweep early.
+							const lines = results.map(
+								(r) =>
+									`- ${r.name}${r.dueDate ? ` (due ${r.dueDate})` : ""}${r.completed ? " [completed]" : ""} [list: ${r.listName}]${r.id ? ` [id: ${r.id}]` : ""}`,
+							);
+							const coverage = det.truncated
+								? ` Searched ${det.scannedLists} of ${det.totalLists} lists before the time budget ran out; name a list to search further.`
+								: "";
 							return {
 								content: [
 									{
 										type: "text",
 										text:
 											results.length > 0
-												? `Found ${results.length} reminders matching "${searchText}".`
-												: `No reminders found matching "${searchText}".`,
+												? `Found ${results.length} reminders matching "${searchText}":\n${lines.join("\n")}${coverage}`
+												: `No reminders found matching "${searchText}".${coverage}`,
 									},
 								],
 								reminders: results,
