@@ -789,13 +789,14 @@ function initServer() {
 								isError: !result.success,
 							};
 						} else if (operation === "create") {
-							const { name, listName, notes, dueDate, recurrence } = args;
+							const { name, listName, notes, dueDate, recurrence, allowDuplicate } = args;
 							const result = await remindersModule.createReminder(
 								name!,
 								listName,
 								notes,
 								dueDate,
 								recurrence,
+								allowDuplicate,
 							);
 							return {
 								content: [
@@ -1008,6 +1009,7 @@ function initServer() {
 									isAllDay,
 									calendarName,
 									recurrence,
+									allowDuplicate,
 								} = args;
 								const result = await calendarModule.createEvent(
 									title!,
@@ -1018,6 +1020,7 @@ function initServer() {
 									isAllDay,
 									calendarName,
 									recurrence,
+									allowDuplicate,
 								);
 								return {
 									content: [
@@ -1362,6 +1365,7 @@ function isRemindersArgs(args: unknown): args is {
 	dueDate?: string;
 	completed?: boolean;
 	recurrence?: Recurrence;
+	allowDuplicate?: boolean;
 } {
 	if (typeof args !== "object" || args === null) {
 		return false;
@@ -1450,6 +1454,7 @@ function isCalendarArgs(args: unknown): args is {
 	newLocation?: string;
 	newNotes?: string;
 	recurrence?: Recurrence;
+	allowDuplicate?: boolean;
 } {
 	if (typeof args !== "object" || args === null) {
 		return false;

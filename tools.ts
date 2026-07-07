@@ -281,6 +281,10 @@ const REMINDERS_TOOL: Tool = {
           interval: { type: "number", description: "Repeat every N periods (default 1)." }
         },
         required: ["frequency"]
+      },
+      allowDuplicate: {
+        type: "boolean",
+        description: "create only: creating a reminder whose name matches an existing open reminder FAILS with a pointer to 'update' (changing a reminder must edit it, not add a twin). Pass true only when the user truly wants a second reminder with the same name."
       }
     },
     required: ["operation"]
@@ -394,6 +398,13 @@ const CALENDAR_TOOL: Tool = {
           interval: { type: "number", description: "Repeat every N periods (default 1)." },
         },
         required: ["frequency"],
+      },
+      allowDuplicate: {
+        type: "boolean",
+        description:
+          "create only: creating an event whose title matches an existing upcoming event FAILS with " +
+          "that event's id and a pointer to 'update' (moving or changing a meeting must edit it, not " +
+          "double-book). Pass true only when the user truly wants a second event with the same title.",
       },
     },
     required: ["operation"],

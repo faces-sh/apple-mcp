@@ -216,6 +216,7 @@ async function createEvent(
 	isAllDay = false,
 	calendarName?: string,
 	recurrence?: Recurrence,
+	allowDuplicate?: boolean,
 ): Promise<{ success: boolean; message: string; eventId?: string }> {
 	if (!title || title.trim() === "") {
 		return { success: false, message: "Event title cannot be empty." };
@@ -250,6 +251,7 @@ async function createEvent(
 			location,
 			notes,
 			recurrence,
+			allowDuplicate,
 		});
 		const repeats = event.recurrence ? `, repeating ${event.recurrence}` : "";
 		return {

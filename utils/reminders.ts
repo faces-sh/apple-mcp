@@ -123,6 +123,7 @@ async function createReminder(
 	notes?: string,
 	dueDate?: string,
 	recurrence?: Recurrence,
+	allowDuplicate?: boolean,
 ): Promise<Reminder> {
 	if (!name || name.trim() === "") {
 		throw new Error("Reminder name cannot be empty.");
@@ -133,6 +134,7 @@ async function createReminder(
 		notes,
 		dueMs: dueMs(dueDate),
 		recurrence,
+		allowDuplicate,
 	});
 }
 

@@ -12445,7 +12445,7 @@ function dueMs(dueDate) {
   }
   return ms;
 }
-async function createReminder(name, listName, notes2, dueDate, recurrence) {
+async function createReminder(name, listName, notes2, dueDate, recurrence, allowDuplicate) {
   if (!name || name.trim() === "") {
     throw new Error("Reminder name cannot be empty.");
   }
@@ -12454,7 +12454,8 @@ async function createReminder(name, listName, notes2, dueDate, recurrence) {
     listName,
     notes: notes2,
     dueMs: dueMs(dueDate),
-    recurrence
+    recurrence,
+    allowDuplicate
   });
 }
 async function updateReminder(opts) {
@@ -12615,7 +12616,7 @@ async function openEvent(eventId) {
     message: event.title ? `Opened Calendar at "${event.title}".` : "Opened Calendar at the event."
   };
 }
-async function createEvent(title, startDate, endDate, location, notes2, isAllDay = false, calendarName, recurrence) {
+async function createEvent(title, startDate, endDate, location, notes2, isAllDay = false, calendarName, recurrence, allowDuplicate) {
   if (!title || title.trim() === "") {
     return { success: false, message: "Event title cannot be empty." };
   }
@@ -12645,7 +12646,8 @@ async function createEvent(title, startDate, endDate, location, notes2, isAllDay
       calendarName,
       location,
       notes: notes2,
-      recurrence
+      recurrence,
+      allowDuplicate
     });
     const repeats = event.recurrence ? `, repeating ${event.recurrence}` : "";
     return {
@@ -20093,6 +20095,10 @@ var REMINDERS_TOOL = {
           interval: { type: "number", description: "Repeat every N periods (default 1)." }
         },
         required: ["frequency"]
+      },
+      allowDuplicate: {
+        type: "boolean",
+        description: "create only: creating a reminder whose name matches an existing open reminder FAILS with a pointer to 'update' (changing a reminder must edit it, not add a twin). Pass true only when the user truly wants a second reminder with the same name."
       }
     },
     required: ["operation"]
@@ -20185,6 +20191,10 @@ var CALENDAR_TOOL = {
           interval: { type: "number", description: "Repeat every N periods (default 1)." }
         },
         required: ["frequency"]
+      },
+      allowDuplicate: {
+        type: "boolean",
+        description: "create only: creating an event whose title matches an existing upcoming event FAILS with that event's id and a pointer to 'update' (moving or changing a meeting must edit it, not double-book). Pass true only when the user truly wants a second event with the same title."
       }
     },
     required: ["operation"]
@@ -20822,13 +20832,14 @@ ${lines.join("\n")}` : `No reminders found matching "${searchText}".`
                 isError: !result2.success
               };
             } else if (operation === "create") {
-              const { name: name2, listName, notes: notes2, dueDate, recurrence } = args;
+              const { name: name2, listName, notes: notes2, dueDate, recurrence, allowDuplicate } = args;
               const result2 = await remindersModule.createReminder(
                 name2,
                 listName,
                 notes2,
                 dueDate,
-                recurrence
+                recurrence,
+                allowDuplicate
               );
               return {
                 content: [
@@ -21005,7 +21016,8 @@ ID: ${event.id}`
                   notes: notes2,
                   isAllDay,
                   calendarName,
-                  recurrence
+                  recurrence,
+                  allowDuplicate
                 } = args;
                 const result2 = await calendarModule.createEvent(
                   title,
@@ -21015,7 +21027,8 @@ ID: ${event.id}`
                   notes2,
                   isAllDay,
                   calendarName,
-                  recurrence
+                  recurrence,
+                  allowDuplicate
                 );
                 return {
                   content: [

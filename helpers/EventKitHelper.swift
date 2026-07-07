@@ -207,6 +207,21 @@ func runReminders() -> Never {
 
     case "create":
         guard let name = payload["name"] as? String, !name.isEmpty else { fail("create requires a name") }
+        // Duplicate seatbelt: "change that reminder" mis-sent as a create would silently leave the user
+        // with two. An existing open reminder with the SAME name makes create fail loud, naming it and
+        // pointing at update; allowDuplicate is the explicit escape hatch when two are truly wanted.
+        if (payload["allowDuplicate"] as? Bool) != true {
+            let existing = fetchReminders(in: nil).first {
+                !$0.isCompleted && ($0.title ?? "").lowercased() == name.lowercased()
+            }
+            if let existing {
+                var due = ""
+                if let comps = existing.dueDateComponents, let d = Calendar.current.date(from: comps) {
+                    due = ", due \(localISO.string(from: d))"
+                }
+                fail("A reminder named \"\(existing.title ?? name)\"\(due) already exists in list \"\(existing.calendar?.title ?? "?")\". To change it, use the update operation (it edits in place). Pass allowDuplicate=true only if a second reminder with this name is truly wanted.")
+            }
+        }
         let reminder = EKReminder(eventStore: store)
         reminder.title = name
         if let notes = payload["notes"] as? String, !notes.isEmpty { reminder.notes = notes }
@@ -352,6 +367,19 @@ func runCalendar() -> Never {
         guard let title = payload["title"] as? String, !title.isEmpty else { fail("create requires a title") }
         guard let start = date(fromMs: payload["startMs"]), let end = date(fromMs: payload["endMs"]) else {
             fail("create requires startMs and endMs")
+        }
+        // Duplicate seatbelt, same shape as reminders: "move that meeting" mis-sent as a create leaves
+        // the user double-booked. An upcoming event with the SAME title makes create fail loud with the
+        // existing event's id (update/delete take it directly); allowDuplicate is the escape hatch.
+        if (payload["allowDuplicate"] as? Bool) != true {
+            let horizon = Date(timeIntervalSinceNow: 365 * 24 * 3600)
+            let existing = eventsInWindow(Date(), max(horizon, end)).first {
+                ($0.title ?? "").lowercased() == title.lowercased()
+            }
+            if let existing {
+                let when = existing.startDate.map { localISO.string(from: $0) } ?? "?"
+                fail("An event titled \"\(existing.title ?? title)\" already exists at \(when) (id \(existing.eventIdentifier ?? "?")). To change it, use the update operation with that eventId (it edits in place); use delete to remove it. Pass allowDuplicate=true only if a second event with this title is truly wanted.")
+            }
         }
         let event = EKEvent(eventStore: store)
         event.title = title
