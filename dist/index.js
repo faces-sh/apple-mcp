@@ -8064,7 +8064,7 @@ var require_run = __commonJS({
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.run = exports.runJXACode = void 0;
-    var execFile3 = __require("child_process").execFile;
+    var execFile4 = __require("child_process").execFile;
     var macosVersion = require_macos_version();
     function runJXACode(jxaCode) {
       return executeInOsa(jxaCode, []);
@@ -8083,7 +8083,7 @@ var require_run = __commonJS({
     function executeInOsa(code, args) {
       return new Promise(function(resolve, reject) {
         macosVersion.assertGreaterThanOrEqualTo("10.10");
-        var child = execFile3("/usr/bin/osascript", ["-l", "JavaScript"], {
+        var child = execFile4("/usr/bin/osascript", ["-l", "JavaScript"], {
           env: {
             OSA_ARGS: JSON.stringify(args)
           },
@@ -12332,6 +12332,29 @@ var reminders_exports = {};
 __export(reminders_exports, {
   default: () => reminders_default
 });
+import { execFile as execFile3 } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import * as nodePath from "node:path";
+function runHelper(args) {
+  return new Promise((resolve, reject) => {
+    execFile3(HELPER_PATH, args, { timeout: 4e4, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+      if (err && !stdout) {
+        reject(new Error(`reminders-helper failed: ${err.message}`));
+        return;
+      }
+      try {
+        const parsed = JSON.parse(stdout);
+        if (parsed && typeof parsed === "object" && "error" in parsed) {
+          reject(new Error(String(parsed.error)));
+          return;
+        }
+        resolve(parsed);
+      } catch (e) {
+        reject(new Error(`reminders-helper returned unparseable output: ${String(e)}`));
+      }
+    });
+  });
+}
 async function requestRemindersAccess() {
   try {
     await (0, import_run3.run)(() => {
@@ -12509,11 +12532,20 @@ async function getAllReminders() {
 }
 async function searchReminders(searchText) {
   if (!searchText || searchText.trim() === "") return [];
-  return (await scan({ search: searchText })).items;
+  try {
+    return await runHelper(["search", searchText.trim()]);
+  } catch (_e) {
+    return (await scan({ search: searchText })).items;
+  }
 }
 async function searchRemindersDetailed(searchText) {
   if (!searchText || searchText.trim() === "") {
     return { items: [], truncated: false, scannedLists: 0, totalLists: 0 };
+  }
+  try {
+    const items = await runHelper(["search", searchText.trim()]);
+    return { items, truncated: false, scannedLists: -1, totalLists: -1 };
+  } catch (_e) {
   }
   const r = await scan({ search: searchText });
   return {
@@ -12721,13 +12753,14 @@ async function deleteReminder(searchText) {
     throw error2 instanceof Error ? error2 : new Error(String(error2));
   }
 }
-var import_run3, MAX_REMINDERS, MAX_LISTS, REMINDERS_DENIED, reminders_default;
+var import_run3, MAX_REMINDERS, HELPER_PATH, MAX_LISTS, REMINDERS_DENIED, reminders_default;
 var init_reminders = __esm({
   "utils/reminders.ts"() {
     "use strict";
     import_run3 = __toESM(require_run(), 1);
     init_native();
     MAX_REMINDERS = 1e3;
+    HELPER_PATH = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), "reminders-helper");
     MAX_LISTS = 1e3;
     REMINDERS_DENIED = `Reminders access is not granted. In System Settings \u25B8 Privacy & Security, grant ${APP_NAME} access to Reminders (and Automation \u25B8 Reminders), then try again.`;
     reminders_default = {

@@ -10,6 +10,38 @@ import { APP_NAME, PermissionError, isPermissionDenial } from "./native";
 
 // Maximum reminders to materialize in one scan (guards against pathological stores).
 const MAX_REMINDERS = 1000;
+
+// ── Native EventKit helper ────────────────────────────────────────────────────────────────────────
+// Scripting the Reminders app costs ~5 seconds PER LIST per query; on a 50-list store every search
+// blew the upstream timeout and read as "no matches". The compiled helper (dist/reminders-helper)
+// queries the EventKit store directly: one indexed fetch over every list, sub-second. Reads go
+// native-first; the JXA paths remain as the fallback when the helper is missing or denied.
+import { execFile } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import * as nodePath from "node:path";
+
+const HELPER_PATH = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), "reminders-helper");
+
+function runHelper(args: string[]): Promise<Reminder[]> {
+	return new Promise((resolve, reject) => {
+		execFile(HELPER_PATH, args, { timeout: 40_000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+			if (err && !stdout) {
+				reject(new Error(`reminders-helper failed: ${err.message}`));
+				return;
+			}
+			try {
+				const parsed = JSON.parse(stdout);
+				if (parsed && typeof parsed === "object" && "error" in parsed) {
+					reject(new Error(String((parsed as { error: unknown }).error)));
+					return;
+				}
+				resolve(parsed as Reminder[]);
+			} catch (e) {
+				reject(new Error(`reminders-helper returned unparseable output: ${String(e)}`));
+			}
+		});
+	});
+}
 // Maximum lists to enumerate.
 const MAX_LISTS = 1000;
 
@@ -239,7 +271,11 @@ async function getAllReminders(): Promise<Reminder[]> {
 /** Reminders whose name or body contains `searchText` (case-insensitive). Denial throws. */
 async function searchReminders(searchText: string): Promise<Reminder[]> {
 	if (!searchText || searchText.trim() === "") return [];
-	return (await scan({ search: searchText })).items;
+	try {
+		return await runHelper(["search", searchText.trim()]);
+	} catch (_e) {
+		return (await scan({ search: searchText })).items;
+	}
 }
 
 /**
@@ -254,6 +290,12 @@ async function searchRemindersDetailed(searchText: string): Promise<{
 }> {
 	if (!searchText || searchText.trim() === "") {
 		return { items: [], truncated: false, scannedLists: 0, totalLists: 0 };
+	}
+	try {
+		const items = await runHelper(["search", searchText.trim()]);
+		return { items, truncated: false, scannedLists: -1, totalLists: -1 }; // native: full coverage
+	} catch (_e) {
+		// Helper missing or denied → the budgeted JXA sweep, with its honest partial coverage.
 	}
 	const r = await scan({ search: searchText });
 	return {
