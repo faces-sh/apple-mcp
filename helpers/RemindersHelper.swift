@@ -43,6 +43,7 @@ var out: [[String: Any]] = []
 let fetchDone = DispatchSemaphore(value: 0)
 store.fetchReminders(matching: predicate) { reminders in
     let iso = ISO8601DateFormatter()
+    iso.timeZone = TimeZone.current   // local wall-clock with offset, so callers report the user's time
     for r in reminders ?? [] {
         if out.count >= MAX_ITEMS { break }
         let name = r.title ?? ""
