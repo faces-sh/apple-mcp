@@ -294,7 +294,8 @@ const REMINDERS_TOOL: Tool = {
 const CALENDAR_TOOL: Tool = {
   name: "calendar",
   description:
-    "Read and manage events in the macOS Calendar app. Operations: 'list' (events in a date window), " +
+    "Read and manage events in the macOS Calendar app. Operations: 'listCalendars' (the exact names of " +
+    "every calendar events can be created in; use it whenever a calendarName is uncertain), 'list' (events in a date window), " +
     "'search' (events whose title/location/notes contain text), 'open' (reveal an event in the app by id), " +
     "'create' (add an event), 'update' (rename/move/relocate/re-note an existing event), and 'delete' " +
     "(remove an event). Locate an event for update/delete by its stable eventId, or by title within a " +
@@ -306,7 +307,7 @@ const CALENDAR_TOOL: Tool = {
       operation: {
         type: "string",
         description: "Operation to perform.",
-        enum: ["search", "open", "list", "create", "update", "delete"],
+        enum: ["listCalendars", "search", "open", "list", "create", "update", "delete"],
       },
       searchText: {
         type: "string",

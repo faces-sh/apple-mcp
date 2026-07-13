@@ -999,6 +999,21 @@ function initServer() {
 								};
 							}
 
+							case "listCalendars": {
+								const names = await calendarModule.listCalendarNames();
+								return {
+									content: [
+										{
+											type: "text",
+											text: names.length
+												? `Calendars events can be created in (exact names):\n${names.join("\n")}`
+												: "No calendars found in the Calendar app.",
+										},
+									],
+									isError: false,
+								};
+							}
+
 							case "create": {
 								const {
 									title,
@@ -1022,15 +1037,23 @@ function initServer() {
 									recurrence,
 									allowDuplicate,
 								);
+								// A calendar-not-found failure carries the cure: the exact names that DO
+								// exist, so the model's next create needs no separate lookup round.
+								let createText: string;
+								if (result.success) {
+									createText = `${result.message} Event scheduled from ${new Date(startDate!).toLocaleString()} to ${new Date(endDate!).toLocaleString()}${result.eventId ? `\nEvent ID: ${result.eventId}` : ""}`;
+								} else {
+									createText = `Error creating event: ${result.message}`;
+									if (/was not found/i.test(result.message)) {
+										try {
+											const names = await calendarModule.listCalendarNames();
+											if (names.length)
+												createText += `\nAvailable calendars (exact names): ${names.join(", ")}. Re-issue create with one of these.`;
+										} catch {}
+									}
+								}
 								return {
-									content: [
-										{
-											type: "text",
-											text: result.success
-												? `${result.message} Event scheduled from ${new Date(startDate!).toLocaleString()} to ${new Date(endDate!).toLocaleString()}${result.eventId ? `\nEvent ID: ${result.eventId}` : ""}`
-												: `Error creating event: ${result.message}`,
-										},
-									],
+									content: [{ type: "text", text: createText }],
 									isError: !result.success,
 								};
 							}
@@ -1435,7 +1458,7 @@ function isRemindersArgs(args: unknown): args is {
 }
 
 function isCalendarArgs(args: unknown): args is {
-	operation: "search" | "open" | "list" | "create" | "update" | "delete";
+	operation: "listCalendars" | "search" | "open" | "list" | "create" | "update" | "delete";
 	searchText?: string;
 	eventId?: string;
 	limit?: number;

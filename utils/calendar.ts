@@ -1,6 +1,7 @@
 import { run } from "@jxa/run";
 import { PermissionError, isPermissionDenial } from "./native";
 import { runEventKit, type Recurrence } from "./eventkit";
+import { runAppleScript } from "run-applescript";
 
 // All calendar data access goes through the native EventKit helper (see utils/eventkit.ts for
 // why: speed, one indexed query per window, recurrence). The only Apple Events call left in this
@@ -411,6 +412,23 @@ async function deleteEvent(locator: LocateOptions): Promise<MutationResult> {
 	};
 }
 
+/**
+ * The exact names of every calendar events can be created in. EventKit's helper has no
+ * list-calendars action, so this is the one AppleScript read in the module; the model needs it
+ * whenever a user's phrase ("my gmail cal") is not a real calendar name.
+ */
+async function listCalendarNames(): Promise<string[]> {
+	const raw = await runAppleScript(`tell application "Calendar"
+	set out to {}
+	repeat with c in calendars
+		set end of out to (name of c)
+	end repeat
+	return out
+end tell`);
+	if (!raw) return [];
+	return raw.split(", ").map((n) => n.trim()).filter(Boolean);
+}
+
 const calendar = {
 	searchEvents,
 	openEvent,
@@ -418,6 +436,7 @@ const calendar = {
 	createEvent,
 	updateEvent,
 	deleteEvent,
+	listCalendarNames,
 	requestCalendarAccess,
 };
 

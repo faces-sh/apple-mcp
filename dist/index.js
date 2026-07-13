@@ -12758,6 +12758,17 @@ async function deleteEvent(locator) {
     eventId: result2.event.id
   };
 }
+async function listCalendarNames() {
+  const raw = await runAppleScript(`tell application "Calendar"
+	set out to {}
+	repeat with c in calendars
+		set end of out to (name of c)
+	end repeat
+	return out
+end tell`);
+  if (!raw) return [];
+  return raw.split(", ").map((n) => n.trim()).filter(Boolean);
+}
 var import_run4, LIST_WINDOW_DAYS, SEARCH_WINDOW_DAYS, MUTATE_WINDOW_DAYS, calendar, calendar_default;
 var init_calendar = __esm({
   "utils/calendar.ts"() {
@@ -12765,6 +12776,7 @@ var init_calendar = __esm({
     import_run4 = __toESM(require_run(), 1);
     init_native();
     init_eventkit();
+    init_run_applescript();
     LIST_WINDOW_DAYS = 7;
     SEARCH_WINDOW_DAYS = 30;
     MUTATE_WINDOW_DAYS = 30;
@@ -12775,6 +12787,7 @@ var init_calendar = __esm({
       createEvent,
       updateEvent,
       deleteEvent,
+      listCalendarNames,
       requestCalendarAccess
     };
     calendar_default = calendar;
@@ -20106,14 +20119,14 @@ var REMINDERS_TOOL = {
 };
 var CALENDAR_TOOL = {
   name: "calendar",
-  description: "Read and manage events in the macOS Calendar app. Operations: 'list' (events in a date window), 'search' (events whose title/location/notes contain text), 'open' (reveal an event in the app by id), 'create' (add an event), 'update' (rename/move/relocate/re-note an existing event), and 'delete' (remove an event). Locate an event for update/delete by its stable eventId, or by title within a date window \u2014 a title that matches more than one event returns the candidates so you can re-issue with a specific eventId.",
+  description: "Read and manage events in the macOS Calendar app. Operations: 'listCalendars' (the exact names of every calendar events can be created in; use it whenever a calendarName is uncertain), 'list' (events in a date window), 'search' (events whose title/location/notes contain text), 'open' (reveal an event in the app by id), 'create' (add an event), 'update' (rename/move/relocate/re-note an existing event), and 'delete' (remove an event). Locate an event for update/delete by its stable eventId, or by title within a date window \u2014 a title that matches more than one event returns the candidates so you can re-issue with a specific eventId.",
   inputSchema: {
     type: "object",
     properties: {
       operation: {
         type: "string",
         description: "Operation to perform.",
-        enum: ["search", "open", "list", "create", "update", "delete"]
+        enum: ["listCalendars", "search", "open", "list", "create", "update", "delete"]
       },
       searchText: {
         type: "string",
@@ -21007,6 +21020,19 @@ ID: ${event.id}`
                   isError: false
                 };
               }
+              case "listCalendars": {
+                const names = await calendarModule.listCalendarNames();
+                return {
+                  content: [
+                    {
+                      type: "text",
+                      text: names.length ? `Calendars events can be created in (exact names):
+${names.join("\n")}` : "No calendars found in the Calendar app."
+                    }
+                  ],
+                  isError: false
+                };
+              }
               case "create": {
                 const {
                   title,
@@ -21030,14 +21056,24 @@ ID: ${event.id}`
                   recurrence,
                   allowDuplicate
                 );
-                return {
-                  content: [
-                    {
-                      type: "text",
-                      text: result2.success ? `${result2.message} Event scheduled from ${new Date(startDate).toLocaleString()} to ${new Date(endDate).toLocaleString()}${result2.eventId ? `
-Event ID: ${result2.eventId}` : ""}` : `Error creating event: ${result2.message}`
+                let createText;
+                if (result2.success) {
+                  createText = `${result2.message} Event scheduled from ${new Date(startDate).toLocaleString()} to ${new Date(endDate).toLocaleString()}${result2.eventId ? `
+Event ID: ${result2.eventId}` : ""}`;
+                } else {
+                  createText = `Error creating event: ${result2.message}`;
+                  if (/was not found/i.test(result2.message)) {
+                    try {
+                      const names = await calendarModule.listCalendarNames();
+                      if (names.length)
+                        createText += `
+Available calendars (exact names): ${names.join(", ")}. Re-issue create with one of these.`;
+                    } catch {
                     }
-                  ],
+                  }
+                }
+                return {
+                  content: [{ type: "text", text: createText }],
                   isError: !result2.success
                 };
               }
