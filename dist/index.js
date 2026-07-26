@@ -2102,9 +2102,9 @@ var require_json_schema_traverse = __commonJS({
       cb = opts.cb || cb;
       var pre = typeof cb == "function" ? cb : cb.pre || function() {
       };
-      var post = cb.post || function() {
+      var post2 = cb.post || function() {
       };
-      _traverse(opts, pre, post, schema, "", schema);
+      _traverse(opts, pre, post2, schema, "", schema);
     };
     traverse.keywords = {
       additionalItems: true,
@@ -2150,7 +2150,7 @@ var require_json_schema_traverse = __commonJS({
       maxProperties: true,
       minProperties: true
     };
-    function _traverse(opts, pre, post, schema, jsonPtr, rootSchema, parentJsonPtr, parentKeyword, parentSchema, keyIndex) {
+    function _traverse(opts, pre, post2, schema, jsonPtr, rootSchema, parentJsonPtr, parentKeyword, parentSchema, keyIndex) {
       if (schema && typeof schema == "object" && !Array.isArray(schema)) {
         pre(schema, jsonPtr, rootSchema, parentJsonPtr, parentKeyword, parentSchema, keyIndex);
         for (var key in schema) {
@@ -2158,18 +2158,18 @@ var require_json_schema_traverse = __commonJS({
           if (Array.isArray(sch)) {
             if (key in traverse.arrayKeywords) {
               for (var i = 0; i < sch.length; i++)
-                _traverse(opts, pre, post, sch[i], jsonPtr + "/" + key + "/" + i, rootSchema, jsonPtr, key, schema, i);
+                _traverse(opts, pre, post2, sch[i], jsonPtr + "/" + key + "/" + i, rootSchema, jsonPtr, key, schema, i);
             }
           } else if (key in traverse.propsKeywords) {
             if (sch && typeof sch == "object") {
               for (var prop in sch)
-                _traverse(opts, pre, post, sch[prop], jsonPtr + "/" + key + "/" + escapeJsonPtr(prop), rootSchema, jsonPtr, key, schema, prop);
+                _traverse(opts, pre, post2, sch[prop], jsonPtr + "/" + key + "/" + escapeJsonPtr(prop), rootSchema, jsonPtr, key, schema, prop);
             }
           } else if (key in traverse.keywords || opts.allKeys && !(key in traverse.skipKeywords)) {
-            _traverse(opts, pre, post, sch, jsonPtr + "/" + key, rootSchema, jsonPtr, key, schema);
+            _traverse(opts, pre, post2, sch, jsonPtr + "/" + key, rootSchema, jsonPtr, key, schema);
           }
         }
-        post(schema, jsonPtr, rootSchema, parentJsonPtr, parentKeyword, parentSchema, keyIndex);
+        post2(schema, jsonPtr, rootSchema, parentJsonPtr, parentKeyword, parentSchema, keyIndex);
       }
     }
     function escapeJsonPtr(str) {
@@ -4496,11 +4496,11 @@ var require_core = __commonJS({
     }
     function addRule(keyword, definition, dataType) {
       var _a;
-      const post = definition === null || definition === void 0 ? void 0 : definition.post;
-      if (dataType && post)
+      const post2 = definition === null || definition === void 0 ? void 0 : definition.post;
+      if (dataType && post2)
         throw new Error('keyword with "post" flag cannot have "type"');
       const { RULES } = this;
-      let ruleGroup = post ? RULES.post : RULES.rules.find(({ type: t }) => t === dataType);
+      let ruleGroup = post2 ? RULES.post : RULES.rules.find(({ type: t }) => t === dataType);
       if (!ruleGroup) {
         ruleGroup = { type: dataType, rules: [] };
         RULES.rules.push(ruleGroup);
@@ -20218,6 +20218,75 @@ var tools_default = tools;
 
 // index.ts
 init_eventkit();
+
+// circuitBuffer.ts
+var THRESHOLD = 200;
+var CircuitError = class extends Error {
+};
+function cfg() {
+  const url = (process.env.MAESTRO_CIRCUIT_URL || "").trim();
+  const secret = (process.env.MAESTRO_CIRCUIT_SECRET || "").trim();
+  const session = (process.env.MAESTRO_SESSION_ID || "").trim();
+  return url && secret && session ? { url, secret, session } : null;
+}
+async function post(path, body, url, secret) {
+  const r = await fetch(url.replace(/\/$/, "") + path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Circuit-Secret": secret },
+    body: JSON.stringify(body)
+  });
+  return { status: r.status, json: r.status === 200 ? await r.json() : null };
+}
+async function fetchSlug(slug, c) {
+  const { status, json } = await post("/get", { session: c.session, slug }, c.url, c.secret);
+  if (status === 404) {
+    throw new CircuitError(`Unknown or expired circuit slug ${slug}; it is no longer cached, re-fetch it.`);
+  }
+  return json && json.payload || "";
+}
+async function resolveArgs(args) {
+  const c = cfg();
+  if (!c) return args;
+  const expand = async (v) => {
+    if (typeof v === "string" && /@@h\d+@@/.test(v)) {
+      const tokens = new Set(v.match(/@@h\d+@@/g) || []);
+      let out = v;
+      for (const t of tokens) {
+        const payload = await fetchSlug(t, c);
+        out = out.split(t).join(payload);
+      }
+      return out;
+    }
+    if (Array.isArray(v)) return Promise.all(v.map(expand));
+    if (v && typeof v === "object") {
+      const o = {};
+      for (const k of Object.keys(v)) o[k] = await expand(v[k]);
+      return o;
+    }
+    return v;
+  };
+  return expand(args);
+}
+async function wrapResult(result2) {
+  const c = cfg();
+  if (!c || !result2 || !Array.isArray(result2.content)) return result2;
+  const first = result2.content[0];
+  if (!first || first.type !== "text" || typeof first.text !== "string" || first.text.length < THRESHOLD) {
+    return result2;
+  }
+  let slug;
+  try {
+    const { json } = await post("/put", { session: c.session, payload: first.text }, c.url, c.secret);
+    slug = json && json.slug;
+  } catch {
+    return result2;
+  }
+  if (!slug) return result2;
+  const tag = `[circuit ${slug} \xB7 to feed this whole result into another tool, pass ${slug} as its argument instead of retyping it; read_tool_result(${slug}) shows it in full later]`;
+  return { ...result2, content: [{ ...first, text: tag + "\n\n" + first.text }, ...result2.content.slice(1)] };
+}
+
+// index.ts
 var ENABLED_APPS = (() => {
   const raw = process.env.APPLE_MCP_ENABLED_APPS;
   if (raw === void 0) return null;
@@ -20335,9 +20404,10 @@ function initServer() {
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: tools_default.filter((tool) => isAppEnabled(tool.name))
   }));
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const handleCallTool = async (request) => {
     try {
-      const { name, arguments: args } = request.params;
+      const { name } = request.params;
+      const args = await resolveArgs(request.params.arguments);
       if (!args) {
         throw new Error("No arguments provided");
       }
@@ -21172,7 +21242,11 @@ ID: ${c.id}`
         isError: true
       };
     }
-  });
+  };
+  server.setRequestHandler(
+    CallToolRequestSchema,
+    async (request) => wrapResult(await handleCallTool(request))
+  );
   console.error("Setting up MCP server transport...");
   (async () => {
     try {

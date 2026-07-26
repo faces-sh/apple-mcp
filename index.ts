@@ -7,6 +7,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import tools from "./tools";
 import { isRecurrence, type Recurrence } from "./utils/eventkit";
+import { resolveArgs, wrapResult } from "./circuitBuffer.js";
 
 // Per-app filtering. A host application exposes only the Apple apps the user has toggled
 // on by passing APPLE_MCP_ENABLED_APPS as a comma-separated list of tool names. Tool names map 1:1
@@ -196,9 +197,14 @@ function initServer() {
 		tools: tools.filter((tool) => isAppEnabled(tool.name)),
 	}));
 
-	server.setRequestHandler(CallToolRequestSchema, async (request) => {
+	const handleCallTool = async (
+		request: { params: { name: string; arguments?: Record<string, unknown> } },
+	) => {
 		try {
-			const { name, arguments: args } = request.params;
+			const { name } = request.params;
+			// Circuit cache: expand any @@hN@@ slug in the args back into its payload BEFORE the tool runs. A
+			// thrown CircuitError (unknown/expired slug) is caught by this same try and returned as an error.
+			const args = await resolveArgs(request.params.arguments);
 
 			if (!args) {
 				throw new Error("No arguments provided");
@@ -1163,7 +1169,12 @@ function initServer() {
 				isError: true,
 			};
 		}
-	});
+	};
+
+	// Park a large result + prepend its slug so the next tool can wire it instead of the model retyping it.
+	server.setRequestHandler(CallToolRequestSchema, async (request) =>
+		wrapResult(await handleCallTool(request)),
+	);
 
 	// Start the server transport
 	console.error("Setting up MCP server transport...");
