@@ -1,16 +1,13 @@
 import { run } from "@jxa/run";
-import {
-	PermissionError,
-	isPermissionDenial,
-	rethrowIfPermissionDenied,
-} from "./native";
+import { ToolFailure, isPermissionDenial, throwAppleFailure } from "./native";
+import { rawBody } from "./failure";
 
 // We drive Notes through JXA (@jxa/run) rather than by interpolating user input into an AppleScript
 // source string. JXA returns REAL JS objects/arrays (so there is no "string return treated as array"
 // bug), and every user-controlled value (search text, title, body, folder name) is passed as a
 // serialized *argument* to the script — so there is no script injection. JXA still goes through Apple
 // Events, so the same Automation (kTCCServiceAppleEvents) permission applies: a denial surfaces as a
-// thrown error which we convert to a typed PermissionError (charter #2: denied ≠ empty ≠ broke).
+// thrown error which we convert to a typed ToolFailure (charter #2: denied is not empty is not broke).
 
 // Maximum notes to scan in any one pass (guards against pathological note stores).
 const MAX_NOTES = 1000;
@@ -20,9 +17,21 @@ const MAX_CONTENT_PREVIEW = 2000;
 // Folder used when the caller does not name one.
 const DEFAULT_FOLDER = "Claude";
 
-const NOTES_DENIED =
-	"Notes access is not granted. In System Settings ▸ Privacy & Security ▸ Automation, grant Faced " +
-	"access to Notes, then try again.";
+// The one sentence each outcome puts on line 1 of the envelope. It says WHAT DID NOT HAPPEN and
+// stops: the envelope spec forbids inventing a remedy, because this server knows what macOS refused
+// and knows nothing about what the person should do about it.
+const NOTES_SUMMARIES = {
+	denied: "Could not reach your notes: macOS denied access to Notes.",
+	notRunning: "Could not reach your notes: the Notes app could not be reached.",
+	timedOut: "Could not reach your notes: Notes did not answer in time.",
+	failed: "Could not reach your notes.",
+};
+const NOTES_CREATE_SUMMARIES = {
+	denied: "Could not create the note: macOS denied access to Notes.",
+	notRunning: "Could not create the note: the Notes app could not be reached.",
+	timedOut: "Could not create the note: Notes did not answer in time.",
+	failed: "Could not create the note.",
+};
 
 type Note = {
 	name: string;
@@ -31,12 +40,13 @@ type Note = {
 	modificationDate?: Date;
 };
 
+// `createNote` throws on every failure now, so this describes a note that EXISTS. There is no
+// success flag to read and no failure message to render: a result object that could mean either was
+// how "Failed to create note: ..." reached callers as ordinary text.
 type CreateNoteResult = {
-	success: boolean;
-	note?: Note;
-	message?: string;
-	folderName?: string;
-	usedDefaultFolder?: boolean;
+	note: Note;
+	folderName: string;
+	usedDefaultFolder: boolean;
 };
 
 type FolderNotesResult = {
@@ -47,6 +57,32 @@ type FolderNotesResult = {
 
 // Raw shapes returned across the JXA boundary (JSON-serialized; Dates arrive as epoch millis).
 type RawNote = { name: string; content: string };
+/** A bounded scan plus the bookkeeping that lets an all-failed pass be told apart from an empty one. */
+type RawScan = {
+	items: RawNote[];
+	attempted: number;
+	skipped: number;
+	firstError: string;
+};
+
+/**
+ * Fail when a scan touched notes and could not read a single one.
+ *
+ * Skipping an individual unreadable note is right: one bad note must not lose the other nine hundred.
+ * But if every note we touched threw, "[]" is not an empty Notes library, it is a broken read reported
+ * as a fact about the user's data, and that is exactly the swallowed failure the envelope spec exists
+ * to stop. So the scan counts its skips and keeps the first thing Notes said, and an all-skipped pass
+ * fails loudly with that verbatim.
+ */
+function failIfEverythingWasSkipped(scan: RawScan, summaryPrefix: string): void {
+	if (scan.attempted > 0 && scan.skipped === scan.attempted) {
+		throw new ToolFailure(
+			"applescript_error",
+			`${summaryPrefix}: all ${scan.attempted} notes failed to read.`,
+			rawBody(scan.firstError),
+		);
+	}
+}
 type RawFolderNote = {
 	name: string;
 	content: string;
@@ -67,24 +103,29 @@ async function requestNotesAccess(): Promise<{
 		return { hasAccess: true, message: "Notes access is granted." };
 	} catch (error) {
 		if (isPermissionDenial(error)) {
-			return { hasAccess: false, message: NOTES_DENIED };
+			return { hasAccess: false, message: NOTES_SUMMARIES.denied };
 		}
-		throw error instanceof Error ? error : new Error(String(error));
+		// Not a denial, so this probe cannot answer the question it was asked. Surface it rather than
+		// reporting "no access" for something that was never about access.
+		throwAppleFailure(error, NOTES_SUMMARIES);
 	}
 }
 
 /**
  * All notes across every folder, with name and a (bounded) plaintext preview. Empty array is a
- * genuine authorized-but-empty result; a permission denial throws PermissionError instead.
+ * genuine authorized-but-empty result; a permission denial throws a ToolFailure instead.
  */
 async function getAllNotes(): Promise<Note[]> {
+	let scan: RawScan;
 	try {
-		const notes = (await run(
+		scan = (await run(
 			(opts: { max: number; maxLen: number }) => {
 				const Notes = Application("Notes");
 				const all = Notes.notes();
 				const out: { name: string; content: string }[] = [];
 				const count = Math.min(all.length, opts.max);
+				let skipped = 0;
+				let firstError = "";
 				for (let i = 0; i < count; i++) {
 					try {
 						const note = all[i];
@@ -100,35 +141,41 @@ async function getAllNotes(): Promise<Note[]> {
 						});
 					} catch (_e) {
 						// Skip an individual unreadable note; do not abort the whole scan.
+						skipped++;
+						if (!firstError) firstError = String(_e);
 					}
 				}
-				return out;
+				return { items: out, attempted: count, skipped, firstError };
 			},
 			{ max: MAX_NOTES, maxLen: MAX_CONTENT_PREVIEW },
-		)) as RawNote[];
-
-		return notes.map((n) => ({ name: n.name, content: n.content }));
+		)) as RawScan;
 	} catch (error) {
-		rethrowIfPermissionDenied(error, NOTES_DENIED);
+		throwAppleFailure(error, NOTES_SUMMARIES);
 	}
+
+	failIfEverythingWasSkipped(scan, "Could not list your notes");
+	return scan.items.map((n) => ({ name: n.name, content: n.content }));
 }
 
 /**
  * Notes whose title or body contains `searchText` (case-insensitive). Matching happens inside the
  * JXA pass using the *passed argument* (never interpolated source), so it is injection-safe and only
- * transfers the hits. Empty array = no match; a permission denial throws PermissionError.
+ * transfers the hits. Empty array = no match; a permission denial throws a ToolFailure.
  */
 async function findNote(searchText: string): Promise<Note[]> {
 	if (!searchText || searchText.trim() === "") return [];
 
+	let scan: RawScan;
 	try {
-		const notes = (await run(
+		scan = (await run(
 			(opts: { search: string; max: number; maxLen: number }) => {
 				const Notes = Application("Notes");
 				const all = Notes.notes();
 				const out: { name: string; content: string }[] = [];
 				const needle = opts.search.toLowerCase();
 				const count = Math.min(all.length, opts.max);
+				let skipped = 0;
+				let firstError = "";
 				for (let i = 0; i < count; i++) {
 					try {
 						const note = all[i];
@@ -145,23 +192,26 @@ async function findNote(searchText: string): Promise<Note[]> {
 						out.push({ name: name || "Untitled Note", content });
 					} catch (_e) {
 						// Skip an individual unreadable note; do not abort the whole scan.
+						skipped++;
+						if (!firstError) firstError = String(_e);
 					}
 				}
-				return out;
+				return { items: out, attempted: count, skipped, firstError };
 			},
 			{ search: searchText, max: MAX_NOTES, maxLen: MAX_CONTENT_PREVIEW },
-		)) as RawNote[];
-
-		return notes.map((n) => ({ name: n.name, content: n.content }));
+		)) as RawScan;
 	} catch (error) {
-		rethrowIfPermissionDenied(error, NOTES_DENIED);
+		throwAppleFailure(error, NOTES_SUMMARIES);
 	}
+
+	failIfEverythingWasSkipped(scan, "Could not search your notes");
+	return scan.items.map((n) => ({ name: n.name, content: n.content }));
 }
 
 /**
  * Create a note. Notes derives the title from the first line of the body, so we prepend `title`. If
  * `folderName` (default "Claude") does not exist we create it and report `usedDefaultFolder: true`.
- * A permission denial throws PermissionError; a genuine validation failure returns success:false.
+ * Every failure throws a typed ToolFailure: a denial, an unreachable Notes app, a missing title.
  */
 async function createNote(
 	title: string,
@@ -169,7 +219,10 @@ async function createNote(
 	folderName: string = DEFAULT_FOLDER,
 ): Promise<CreateNoteResult> {
 	if (!title || title.trim() === "") {
-		return { success: false, message: "Note title cannot be empty." };
+		throw new ToolFailure(
+			"bad_request",
+			"Could not create the note: no title was given.",
+		);
 	}
 
 	const targetFolder =
@@ -217,25 +270,23 @@ async function createNote(
 		)) as { folderName: string; usedDefaultFolder: boolean };
 
 		return {
-			success: true,
 			note: { name: title, content: body ?? "" },
 			folderName: result.folderName,
 			usedDefaultFolder: result.usedDefaultFolder,
 		};
 	} catch (error) {
-		// A TCC denial is a real, actionable fault — surface it loudly, do not return success:false.
-		if (isPermissionDenial(error)) throw new PermissionError(NOTES_DENIED);
-		return {
-			success: false,
-			message: `Failed to create note: ${error instanceof Error ? error.message : String(error)}`,
-		};
+		// EVERY failure here throws, including the ones that used to come back as success:false with the
+		// reason folded into a sentence. A caller reading a result object cannot tell "the note was not
+		// created" from "the note was created and here is a note about it", and the reason Notes gave
+		// was being rewritten on its way out. Now it travels verbatim on the envelope instead.
+		throwAppleFailure(error, NOTES_CREATE_SUMMARIES);
 	}
 }
 
 /**
  * Scan a single folder by name. Returns `{ found, notes }` with each note's bounded content plus its
  * creation/modification timestamps (epoch millis). `found: false` means the folder genuinely does not
- * exist; a permission denial throws PermissionError.
+ * exist; a permission denial throws a ToolFailure.
  */
 async function scanFolder(
 	folderName: string,
@@ -321,13 +372,13 @@ async function scanFolder(
 			})),
 		};
 	} catch (error) {
-		rethrowIfPermissionDenied(error, NOTES_DENIED);
+		throwAppleFailure(error, NOTES_SUMMARIES);
 	}
 }
 
 /** All notes in a named folder. success:false (with message) only when the folder does not exist. */
 async function getNotesFromFolder(folderName: string): Promise<FolderNotesResult> {
-	const { found, notes } = await scanFolder(folderName); // throws PermissionError on denial
+	const { found, notes } = await scanFolder(folderName); // throws ToolFailure on denial
 	if (!found) {
 		return { success: false, message: `Folder "${folderName}" not found.` };
 	}
@@ -339,7 +390,7 @@ async function getRecentNotesFromFolder(
 	folderName: string,
 	limit: number = 5,
 ): Promise<FolderNotesResult> {
-	const { found, notes } = await scanFolder(folderName); // throws PermissionError on denial
+	const { found, notes } = await scanFolder(folderName); // throws ToolFailure on denial
 	if (!found) {
 		return { success: false, message: `Folder "${folderName}" not found.` };
 	}
@@ -361,7 +412,7 @@ async function getNotesByDateRange(
 	toDate?: string,
 	limit: number = 20,
 ): Promise<FolderNotesResult> {
-	const { found, notes } = await scanFolder(folderName); // throws PermissionError on denial
+	const { found, notes } = await scanFolder(folderName); // throws ToolFailure on denial
 	if (!found) {
 		return { success: false, message: `Folder "${folderName}" not found.` };
 	}

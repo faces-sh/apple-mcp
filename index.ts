@@ -6,6 +6,7 @@ import {
 	ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import tools from "./tools";
+import { failureResult, failureResultFrom } from "./utils/failure";
 
 // Per-app filtering. Faced bundles this server and exposes only the Apple apps the user has toggled
 // on by passing APPLE_MCP_ENABLED_APPS as a comma-separated list of tool names. Tool names map 1:1
@@ -200,25 +201,36 @@ function initServer() {
 			const { name, arguments: args } = request.params;
 
 			if (!args) {
-				throw new Error("No arguments provided");
+				return failureResult(
+					"bad_request",
+					`Could not run the "${name}" tool: no arguments were given.`,
+				);
+			}
+
+			// Does this tool EXIST, before asking whether it is switched on. The other order reported
+			// every unknown name as "app_disabled" whenever APPLE_MCP_ENABLED_APPS was set, which told
+			// a caller to go turn on a tool this server has never had.
+			if (!tools.some((tool) => tool.name === name)) {
+				return failureResult(
+					"unknown_tool",
+					`There is no tool called "${name}" on this server.`,
+				);
 			}
 
 			if (!isAppEnabled(name)) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: `The "${name}" app is disabled. Enable it in Faced's settings to use this tool.`,
-						},
-					],
-					isError: true,
-				};
+				return failureResult(
+					"app_disabled",
+					`The "${name}" app is not enabled on this server.`,
+				);
 			}
 
 			switch (name) {
 				case "contacts": {
 					if (!isContactsArgs(args)) {
-						throw new Error("Invalid arguments for contacts tool");
+						return failureResult(
+							"bad_request",
+							"Could not look up contacts: `name` must be a string when given.",
+						);
 					}
 
 					try {
@@ -242,12 +254,14 @@ function initServer() {
 							const contactCount = Object.keys(allNumbers).length;
 
 							if (contactCount === 0) {
+								// A genuine empty address book, and nothing else: every way this call could
+								// have FAILED (a denial, an unreachable app, an all-unreadable scan) throws
+								// out of getAllNumbers before we get here. The old text hedged with "make
+								// sure you have granted access to Contacts", which invited a reader to treat
+								// an empty result as a permission problem it is not.
 								return {
 									content: [
-										{
-											type: "text",
-											text: "No contacts found in the address book. Please make sure you have granted access to Contacts.",
-										},
+										{ type: "text", text: "No contacts found in the address book." },
 									],
 									isError: false,
 								};
@@ -271,22 +285,21 @@ function initServer() {
 							};
 						}
 					} catch (error) {
-						const errorMessage = error instanceof Error ? error.message : String(error);
-						return {
-							content: [
-								{
-									type: "text",
-									text: errorMessage.includes("access") ? errorMessage : `Error accessing contacts: ${errorMessage}`,
-								},
-							],
-							isError: true,
-						};
+						return failureResultFrom(
+							error,
+							"internal_error",
+							"Could not look up contacts.",
+						);
 					}
 				}
 
 				case "notes": {
 					if (!isNotesArgs(args)) {
-						throw new Error("Invalid arguments for notes tool");
+						return failureResult(
+							"bad_request",
+							"Could not run the notes tool: `operation` must be search, list or create, " +
+								"with `searchText` for a search and `title` plus `body` for a create.",
+						);
 					}
 
 					try {
@@ -296,8 +309,9 @@ function initServer() {
 						switch (operation) {
 							case "search": {
 								if (!args.searchText) {
-									throw new Error(
-										"Search text is required for search operation",
+									return failureResult(
+										"bad_request",
+										"Could not search your notes: no search text was given.",
 									);
 								}
 
@@ -336,11 +350,16 @@ function initServer() {
 
 							case "create": {
 								if (!args.title || !args.body) {
-									throw new Error(
-										"Title and body are required for create operation",
+									return failureResult(
+										"bad_request",
+										"Could not create the note: a title and a body are both required.",
 									);
 								}
 
+								// createNote THROWS on every failure now, so reaching this line means the
+								// note exists. It used to return a result object whose `success: false`
+								// carried the reason as prose, which is how "Failed to create note: ..."
+								// travelled to callers as ordinary text.
 								const result = await notesModule.createNote(
 									args.title,
 									args.body,
@@ -351,35 +370,36 @@ function initServer() {
 									content: [
 										{
 											type: "text",
-											text: result.success
-												? `Created note "${args.title}" in folder "${result.folderName}"${result.usedDefaultFolder ? " (created new folder)" : ""}.`
-												: `Failed to create note: ${result.message}`,
+											text: `Created note "${args.title}" in folder "${result.folderName}"${result.usedDefaultFolder ? " (created new folder)" : ""}.`,
 										},
 									],
-									isError: !result.success,
+									isError: false,
 								};
 							}
 
 							default:
-								throw new Error(`Unknown operation: ${operation}`);
+								return failureResult(
+									"bad_request",
+									`Could not run the notes tool: "${operation}" is not one of search, list or create.`,
+								);
 						}
 					} catch (error) {
-						const errorMessage = error instanceof Error ? error.message : String(error);
-						return {
-							content: [
-								{
-									type: "text",
-									text: errorMessage.includes("access") ? errorMessage : `Error accessing notes: ${errorMessage}`,
-								},
-							],
-							isError: true,
-						};
+						return failureResultFrom(
+							error,
+							"internal_error",
+							"Could not run the notes tool.",
+						);
 					}
 				}
 
 				case "messages": {
 					if (!isMessagesArgs(args)) {
-						throw new Error("Invalid arguments for messages tool");
+						return failureResult(
+							"bad_request",
+							"Could not run the messages tool: `operation` must be send, read, schedule or " +
+								"unread, with `phoneNumber` for all but unread, `message` for a send or a " +
+								"schedule, and `scheduledTime` for a schedule.",
+						);
 					}
 
 					try {
@@ -388,8 +408,9 @@ function initServer() {
 						switch (args.operation) {
 							case "send": {
 								if (!args.phoneNumber || !args.message) {
-									throw new Error(
-										"Phone number and message are required for send operation",
+									return failureResult(
+										"bad_request",
+										"Could not send the message: a phone number and a message are both required.",
 									);
 								}
 								await messageModule.sendMessage(args.phoneNumber, args.message);
@@ -406,8 +427,9 @@ function initServer() {
 
 							case "read": {
 								if (!args.phoneNumber) {
-									throw new Error(
-										"Phone number is required for read operation",
+									return failureResult(
+										"bad_request",
+										"Could not read your messages: no phone number was given.",
 									);
 								}
 								const messages = await messageModule.readMessages(
@@ -435,8 +457,10 @@ function initServer() {
 
 							case "schedule": {
 								if (!args.phoneNumber || !args.message || !args.scheduledTime) {
-									throw new Error(
-										"Phone number, message, and scheduled time are required for schedule operation",
+									return failureResult(
+										"bad_request",
+										"Could not schedule the message: a phone number, a message and a " +
+											"scheduled time are all required.",
 									);
 								}
 								const scheduledMsg = await messageModule.scheduleMessage(
@@ -501,25 +525,28 @@ function initServer() {
 							}
 
 							default:
-								throw new Error(`Unknown operation: ${args.operation}`);
+								return failureResult(
+									"bad_request",
+									`Could not run the messages tool: "${args.operation}" is not one of send, read, schedule or unread.`,
+								);
 						}
 					} catch (error) {
-						const errorMessage = error instanceof Error ? error.message : String(error);
-						return {
-							content: [
-								{
-									type: "text",
-									text: errorMessage.includes("access") ? errorMessage : `Error with messages operation: ${errorMessage}`,
-								},
-							],
-							isError: true,
-						};
+						return failureResultFrom(
+							error,
+							"internal_error",
+							"Could not run the messages tool.",
+						);
 					}
 				}
 
 				case "reminders": {
 					if (!isRemindersArgs(args)) {
-						throw new Error("Invalid arguments for reminders tool");
+						return failureResult(
+							"bad_request",
+							"Could not run the reminders tool: `operation` must be list, search, open, " +
+								"create or listById, with `searchText` for a search or an open, `name` for a " +
+								"create, and `listId` for a listById.",
+						);
 					}
 
 					try {
@@ -562,20 +589,19 @@ function initServer() {
 								isError: false,
 							};
 						} else if (operation === "open") {
-							// Open a reminder
+							// Open a reminder. openReminder THROWS when nothing matches, so reaching this
+							// line means a reminder was found and Reminders was brought forward.
 							const { searchText } = args;
 							const result = await remindersModule.openReminder(searchText!);
 							return {
 								content: [
 									{
 										type: "text",
-										text: result.success
-											? `Opened Reminders app. Found reminder: ${result.reminder?.name}`
-											: result.message,
+										text: `Opened Reminders app. Found reminder: ${result.reminder.name}`,
 									},
 								],
 								...result,
-								isError: !result.success,
+								isError: false,
 							};
 						} else if (operation === "create") {
 							// Create a reminder
@@ -619,34 +645,28 @@ function initServer() {
 							};
 						}
 
-						return {
-							content: [
-								{
-									type: "text",
-									text: "Unknown operation",
-								},
-							],
-							isError: true,
-						};
+						return failureResult(
+							"bad_request",
+							`Could not run the reminders tool: "${operation}" is not one of list, search, open, create or listById.`,
+						);
 					} catch (error) {
-						console.error("Error in reminders tool:", error);
-						const errorMessage = error instanceof Error ? error.message : String(error);
-						return {
-							content: [
-								{
-									type: "text",
-									text: errorMessage.includes("access") ? errorMessage : `Error in reminders tool: ${errorMessage}`,
-								},
-							],
-							isError: true,
-						};
+						return failureResultFrom(
+							error,
+							"internal_error",
+							"Could not run the reminders tool.",
+						);
 					}
 				}
 
 
 				case "calendar": {
 					if (!isCalendarArgs(args)) {
-						throw new Error("Invalid arguments for calendar tool");
+						return failureResult(
+							"bad_request",
+							"Could not run the calendar tool: `operation` must be search, open, list or " +
+								"create, with `searchText` for a search, `eventId` for an open, and `title` " +
+								"plus `startDate` plus `endDate` for a create.",
+						);
 					}
 
 					try {
@@ -687,19 +707,14 @@ function initServer() {
 							}
 
 							case "open": {
+								// openEvent THROWS when the id matches nothing, so reaching this line means
+								// the event exists and Calendar was brought forward on it.
 								const { eventId } = args;
 								const result = await calendarModule.openEvent(eventId!);
 
 								return {
-									content: [
-										{
-											type: "text",
-											text: result.success
-												? result.message
-												: `Error opening event: ${result.message}`,
-										},
-									],
-									isError: !result.success,
+									content: [{ type: "text", text: result.message }],
+									isError: false,
 								};
 							}
 
@@ -750,6 +765,8 @@ function initServer() {
 									isAllDay,
 									calendarName,
 								} = args;
+								// createEvent THROWS on every failure now, so reaching this line means the
+								// event exists.
 								const result = await calendarModule.createEvent(
 									title!,
 									startDate!,
@@ -763,48 +780,43 @@ function initServer() {
 									content: [
 										{
 											type: "text",
-											text: result.success
-												? `${result.message} Event scheduled from ${new Date(startDate!).toLocaleString()} to ${new Date(endDate!).toLocaleString()}${result.eventId ? `\nEvent ID: ${result.eventId}` : ""}`
-												: `Error creating event: ${result.message}`,
+											text: `${result.message} Event scheduled from ${new Date(startDate!).toLocaleString()} to ${new Date(endDate!).toLocaleString()}\nEvent ID: ${result.eventId}`,
 										},
 									],
-									isError: !result.success,
+									isError: false,
 								};
 							}
 
 							default:
-								throw new Error(`Unknown calendar operation: ${operation}`);
+								return failureResult(
+									"bad_request",
+									`Could not run the calendar tool: "${operation}" is not one of search, open, list or create.`,
+								);
 						}
 					} catch (error) {
-						const errorMessage = error instanceof Error ? error.message : String(error);
-						return {
-							content: [
-								{
-									type: "text",
-									text: errorMessage.includes("access") ? errorMessage : `Error in calendar tool: ${errorMessage}`,
-								},
-							],
-							isError: true,
-						};
+						return failureResultFrom(
+							error,
+							"internal_error",
+							"Could not run the calendar tool.",
+						);
 					}
 				}
 
 				default:
-					return {
-						content: [{ type: "text", text: `Unknown tool: ${name}` }],
-						isError: true,
-					};
+					return failureResult(
+						"unknown_tool",
+						`There is no tool called "${name}" on this server.`,
+					);
 			}
 		} catch (error) {
-			return {
-				content: [
-					{
-						type: "text",
-						text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-					},
-				],
-				isError: true,
-			};
+			// The backstop. Everything below this now raises a typed failure, so anything arriving here
+			// is unclassified: it keeps a plain sentence and carries the thrown value verbatim, because
+			// the one thing we must not do is decide what an error we did not anticipate means.
+			return failureResultFrom(
+				error,
+				"internal_error",
+				`Could not run the "${request.params.name}" tool.`,
+			);
 		}
 	});
 

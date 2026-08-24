@@ -1,21 +1,40 @@
 import { run } from "@jxa/run";
-import { PermissionError, isPermissionDenial } from "./native";
+import { ToolFailure, isPermissionDenial, throwAppleFailure } from "./native";
+import { rawBody } from "./failure";
 
 // We drive the Reminders app through JXA (@jxa/run) rather than by interpolating user input into an
 // AppleScript source string. JXA returns REAL JS objects/arrays (so there is no string-parsing bug),
 // and every user-controlled value (search text, names, notes, dates, list ids) is passed as a
 // serialized *argument* to the script — never spliced into source — so there is no script injection.
 // JXA still rides Apple Events, so the same Automation (kTCCServiceAppleEvents) permission applies; a
-// denial surfaces as a thrown error which we convert to a typed PermissionError (denied ≠ empty).
+// denial surfaces as a thrown error which we convert to a typed ToolFailure (denied is not empty).
 
 // Maximum reminders to materialize in one scan (guards against pathological stores).
 const MAX_REMINDERS = 1000;
 // Maximum lists to enumerate.
 const MAX_LISTS = 1000;
 
-const REMINDERS_DENIED =
-	"Reminders access is not granted. In System Settings ▸ Privacy & Security, grant Faced access " +
-	"to Reminders (and Automation ▸ Reminders), then try again.";
+// The one sentence each outcome puts on line 1 of the envelope. It says WHAT DID NOT HAPPEN and
+// stops: the envelope spec forbids inventing a remedy, because this server knows what macOS refused
+// and knows nothing about what the person should do about it.
+const REMINDERS_SUMMARIES = {
+	denied: "Could not reach your reminders: macOS denied access to Reminders.",
+	notRunning: "Could not reach your reminders: the Reminders app could not be reached.",
+	timedOut: "Could not reach your reminders: Reminders did not answer in time.",
+	failed: "Could not reach your reminders.",
+};
+const REMINDERS_CREATE_SUMMARIES = {
+	denied: "Could not create the reminder: macOS denied access to Reminders.",
+	notRunning: "Could not create the reminder: the Reminders app could not be reached.",
+	timedOut: "Could not create the reminder: Reminders did not answer in time.",
+	failed: "Could not create the reminder.",
+};
+const REMINDERS_OPEN_SUMMARIES = {
+	denied: "Could not open Reminders: macOS denied access to Reminders.",
+	notRunning: "Could not open Reminders: the Reminders app could not be reached.",
+	timedOut: "Could not open Reminders: Reminders did not answer in time.",
+	failed: "Could not open Reminders.",
+};
 
 /** A single reminder, in the exact shape the dispatcher expects. */
 interface Reminder {
@@ -49,22 +68,31 @@ async function requestRemindersAccess(): Promise<{
 		return { hasAccess: true, message: "Reminders access is granted." };
 	} catch (error) {
 		if (isPermissionDenial(error)) {
-			return { hasAccess: false, message: REMINDERS_DENIED };
+			return { hasAccess: false, message: REMINDERS_SUMMARIES.denied };
 		}
-		throw error instanceof Error ? error : new Error(String(error));
+		// Not a denial, so this probe cannot answer the question it was asked. Surface it rather than
+		// reporting "no access" for something that was never about access.
+		throwAppleFailure(error, REMINDERS_SUMMARIES);
 	}
 }
 
 /**
  * The single reusable scan seam: enumerate reminders across all lists, or a single list by id, and
  * optionally filter by a case-insensitive needle over name + body. Returns real JS objects (no string
- * parsing). A TCC denial throws PermissionError; an authorized-but-empty result returns an empty
+ * parsing). A TCC denial throws a ToolFailure; an authorized-but-empty result returns an empty
  * `items` array; a missing list id is reported via `listNotFound` so callers can fail honestly.
  */
 async function scan(opts: {
 	search?: string | null;
 	listId?: string | null;
 }): Promise<{ items: Reminder[]; listNotFound: boolean }> {
+	let scanned: {
+		items: Reminder[];
+		listNotFound: boolean;
+		listCount: number;
+		skippedLists: number;
+		firstError: string;
+	};
 	try {
 		const result = await run(
 			(args: {
@@ -104,6 +132,8 @@ async function scan(opts: {
 
 				// Resolve which lists to walk.
 				let lists: any[];
+				let skippedLists = 0;
+				let firstError = "";
 				if (listId) {
 					const all = R.lists();
 					let target: any = null;
@@ -115,7 +145,14 @@ async function scan(opts: {
 							}
 						} catch (e) {}
 					}
-					if (!target) return { items: [], listNotFound: true };
+					if (!target)
+						return {
+							items: [],
+							listNotFound: true,
+							listCount: 0,
+							skippedLists: 0,
+							firstError: "",
+						};
 					lists = [target];
 				} else {
 					lists = R.lists();
@@ -131,11 +168,21 @@ async function scan(opts: {
 						listName = String(list.name());
 						rems = list.reminders();
 					} catch (e) {
-						// Skip an unreadable list; do not abort the whole scan.
+						// Skip an unreadable list; do not abort the whole scan. Counted, because a scan
+						// where EVERY list failed is a broken read, not an empty Reminders store.
+						skippedLists++;
+						if (!firstError) firstError = String(e);
 						continue;
 					}
 					for (let ri = 0; ri < rems.length; ri++) {
-						if (items.length >= max) return { items, listNotFound: false };
+						if (items.length >= max)
+							return {
+								items,
+								listNotFound: false,
+								listCount: listCap,
+								skippedLists,
+								firstError,
+							};
 						try {
 							const rec = read(rems[ri], listName);
 							if (needle) {
@@ -148,7 +195,13 @@ async function scan(opts: {
 						}
 					}
 				}
-				return { items, listNotFound: false };
+				return {
+					items,
+					listNotFound: false,
+					listCount: listCap,
+					skippedLists,
+					firstError,
+				};
 			},
 			{
 				search: opts.search ?? null,
@@ -157,35 +210,68 @@ async function scan(opts: {
 				maxLists: MAX_LISTS,
 			},
 		);
-		return result as { items: Reminder[]; listNotFound: boolean };
+		scanned = result as {
+			items: Reminder[];
+			listNotFound: boolean;
+			listCount: number;
+			skippedLists: number;
+			firstError: string;
+		};
 	} catch (error) {
-		if (isPermissionDenial(error)) throw new PermissionError(REMINDERS_DENIED);
-		throw error instanceof Error ? error : new Error(String(error));
+		throwAppleFailure(error, REMINDERS_SUMMARIES);
 	}
+
+	// Every list threw. "[]" here would report a broken read as a fact about the user's reminders,
+	// which is the swallowed failure the envelope spec exists to stop.
+	if (scanned.listCount > 0 && scanned.skippedLists === scanned.listCount) {
+		throw new ToolFailure(
+			"applescript_error",
+			`Could not read your reminders: all ${scanned.listCount} lists failed to read.`,
+			rawBody(scanned.firstError),
+		);
+	}
+	return { items: scanned.items, listNotFound: scanned.listNotFound };
 }
 
 /** All reminder lists (id + name). A denial throws; an empty store returns []. */
 async function getAllLists(): Promise<ReminderList[]> {
+	let scanned: {
+		items: ReminderList[];
+		attempted: number;
+		skipped: number;
+		firstError: string;
+	};
 	try {
-		const lists = (await run((max: number) => {
+		scanned = (await run((max: number) => {
 			const R = Application("Reminders");
 			const all = R.lists();
 			const out: { id: string; name: string }[] = [];
 			const count = Math.min(all.length, max);
+			let skipped = 0;
+			let firstError = "";
 			for (let i = 0; i < count; i++) {
 				try {
 					out.push({ id: String(all[i].id()), name: String(all[i].name()) });
 				} catch (e) {
 					// Skip an unreadable list.
+					skipped++;
+					if (!firstError) firstError = String(e);
 				}
 			}
-			return out;
-		}, MAX_LISTS)) as ReminderList[];
-		return lists;
+			return { items: out, attempted: count, skipped, firstError };
+		}, MAX_LISTS)) as typeof scanned;
 	} catch (error) {
-		if (isPermissionDenial(error)) throw new PermissionError(REMINDERS_DENIED);
-		throw error instanceof Error ? error : new Error(String(error));
+		throwAppleFailure(error, REMINDERS_SUMMARIES);
 	}
+
+	if (scanned.attempted > 0 && scanned.skipped === scanned.attempted) {
+		throw new ToolFailure(
+			"applescript_error",
+			`Could not list your reminder lists: all ${scanned.attempted} lists failed to read.`,
+			rawBody(scanned.firstError),
+		);
+	}
+	return scanned.items;
 }
 
 /** Every reminder across every list (bounded by MAX_REMINDERS). Denial throws; empty store returns []. */
@@ -200,17 +286,20 @@ async function searchReminders(searchText: string): Promise<Reminder[]> {
 }
 
 /**
- * Bring the Reminders app forward and report the best name match for `searchText`. Returns success
- * with the matched reminder, or a clear failure when nothing matches. A denial throws PermissionError.
+ * Bring the Reminders app forward and report the best name match for `searchText`. Returns the
+ * matched reminder, or throws when nothing matches. A denial throws too.
  */
 async function openReminder(searchText: string): Promise<{
-	success: boolean;
 	message: string;
-	reminder?: { name: string };
+	reminder: { name: string };
 }> {
-	const matches = await searchReminders(searchText); // throws PermissionError on denial
+	const matches = await searchReminders(searchText); // throws ToolFailure on denial
 	if (matches.length === 0) {
-		return { success: false, message: "No matching reminders found." };
+		// Nothing to open is a FAILURE of what was asked, not a successful open of nothing.
+		throw new ToolFailure(
+			"not_found",
+			`Could not open a reminder: nothing matches "${searchText}".`,
+		);
 	}
 
 	try {
@@ -219,12 +308,10 @@ async function openReminder(searchText: string): Promise<{
 			return true;
 		});
 	} catch (error) {
-		if (isPermissionDenial(error)) throw new PermissionError(REMINDERS_DENIED);
-		throw error instanceof Error ? error : new Error(String(error));
+		throwAppleFailure(error, REMINDERS_OPEN_SUMMARIES);
 	}
 
 	return {
-		success: true,
 		message: `Opened Reminders. Found reminder: ${matches[0].name}`,
 		reminder: { name: matches[0].name },
 	};
@@ -242,7 +329,10 @@ async function createReminder(
 	dueDate?: string,
 ): Promise<Reminder> {
 	if (!name || name.trim() === "") {
-		throw new Error("Reminder name cannot be empty.");
+		throw new ToolFailure(
+			"bad_request",
+			"Could not create the reminder: no name was given.",
+		);
 	}
 
 	try {
@@ -326,10 +416,7 @@ async function createReminder(
 		)) as Reminder;
 		return created;
 	} catch (error) {
-		if (isPermissionDenial(error)) throw new PermissionError(REMINDERS_DENIED);
-		throw error instanceof Error
-			? error
-			: new Error(`Failed to create reminder: ${String(error)}`);
+		throwAppleFailure(error, REMINDERS_CREATE_SUMMARIES);
 	}
 }
 
@@ -343,11 +430,17 @@ async function getRemindersFromListById(
 	props?: string[],
 ): Promise<Reminder[]> {
 	if (!listId || listId.trim() === "") {
-		throw new Error("A reminder list id is required.");
+		throw new ToolFailure(
+			"bad_request",
+			"Could not read the reminder list: no list id was given.",
+		);
 	}
-	const result = await scan({ listId }); // throws PermissionError on denial
+	const result = await scan({ listId }); // throws ToolFailure on denial
 	if (result.listNotFound) {
-		throw new Error(`No reminder list found with id "${listId}".`);
+		throw new ToolFailure(
+			"not_found",
+			`Could not read the reminder list: no list has the id "${listId}".`,
+		);
 	}
 	return result.items;
 }

@@ -6904,6 +6904,79 @@ var require_dist = __commonJS({
   }
 });
 
+// utils/failure.ts
+function redactSecrets(body) {
+  let out = body;
+  for (const [pattern, replacement] of SECRET_PATTERNS) {
+    out = out.replace(pattern, replacement);
+  }
+  return out;
+}
+function truncateBody(body) {
+  if (body.length <= MAX_BODY) return body;
+  return body.slice(0, MAX_BODY) + " ...[truncated]";
+}
+function rawBody(error2) {
+  if (error2 && typeof error2 === "object") {
+    const e = error2;
+    const stderr = typeof e.stderr === "string" ? e.stderr : e.stderr instanceof Buffer ? e.stderr.toString() : "";
+    const message2 = typeof e.message === "string" ? e.message : "";
+    const parts = [stderr.trim(), message2.trim()].filter(Boolean);
+    if (parts.length > 0) return truncateBody(redactSecrets(parts.join("\n")));
+  }
+  const asString = String(error2).trim();
+  return asString ? truncateBody(redactSecrets(asString)) : "";
+}
+function envelope(code, summary, body = "") {
+  const evidence = truncateBody(redactSecrets(body)).trim();
+  return evidence ? `[${code}] ${summary}
+${evidence}` : `[${code}] ${summary}`;
+}
+function failureResult(code, summary, body = "") {
+  return {
+    content: [{ type: "text", text: envelope(code, summary, body) }],
+    isError: true
+  };
+}
+function failureResultFrom(error2, fallbackCode, fallbackSummary) {
+  if (error2 instanceof ToolFailure) {
+    return failureResult(error2.code, error2.summary, error2.body);
+  }
+  return failureResult(fallbackCode, fallbackSummary, rawBody(error2));
+}
+var MAX_BODY, SECRET_PATTERNS, ToolFailure;
+var init_failure = __esm({
+  "utils/failure.ts"() {
+    "use strict";
+    MAX_BODY = 4e3;
+    SECRET_PATTERNS = [
+      [/\b(authorization|cookie|set-cookie)\s*:\s*[^\r\n]+/gi, "$1: <redacted>"],
+      [
+        /("(?:access_token|refresh_token|client_secret)"\s*:\s*")[^"]*(")/gi,
+        "$1<redacted>$2"
+      ],
+      [
+        /\b(access_token|refresh_token|client_secret)=[^\s&"']+/gi,
+        "$1=<redacted>"
+      ]
+    ];
+    ToolFailure = class extends Error {
+      code;
+      /** Line 1: what did not happen, in words a person reads. Never a stack trace, never a symbol. */
+      summary;
+      /** The underlying error output, verbatim. Empty when the failure had no underlying output. */
+      body;
+      constructor(code, summary, body = "") {
+        super(summary);
+        this.name = "ToolFailure";
+        this.code = code;
+        this.summary = summary;
+        this.body = body;
+      }
+    };
+  }
+});
+
 // node_modules/semver/semver.js
 var require_semver = __commonJS({
   "node_modules/semver/semver.js"(exports, module) {
@@ -8115,16 +8188,32 @@ var require_run = __commonJS({
 // utils/native.ts
 function isPermissionDenial(error2) {
   const msg = (error2 instanceof Error ? error2.message : String(error2)).toLowerCase();
-  return msg.includes("-1743") || // errAEEventNotPermitted — Automation denied / never prompted
+  return msg.includes("-1743") || // errAEEventNotPermitted - Automation denied / never prompted
   msg.includes("-1744") || // user consent required
   msg.includes("-10004") || // privilege violation
   msg.includes("not authorized") || msg.includes("not allowed") || msg.includes("not permitted") || msg.includes("doesn't have permission") || msg.includes("does not have permission") || msg.includes("permission to") || msg.includes("access denied");
 }
-function rethrowIfPermissionDenied(error2, deniedMessage) {
-  if (isPermissionDenial(error2)) {
-    throw new PermissionError(deniedMessage);
-  }
-  throw error2 instanceof Error ? error2 : new Error(String(error2));
+function isAppNotRunning(error2) {
+  const msg = (error2 instanceof Error ? error2.message : String(error2)).toLowerCase();
+  return msg.includes("-600") || // procNotFound
+  msg.includes("-609") || // connectionInvalid
+  msg.includes("isn't running") || msg.includes("is not running") || msg.includes("can't be launched") || msg.includes("cannot be launched");
+}
+function isAppleEventTimeout(error2) {
+  const msg = (error2 instanceof Error ? error2.message : String(error2)).toLowerCase();
+  return msg.includes("-1712") || msg.includes("appleevent timed out");
+}
+function classifyAppleError(error2) {
+  if (isPermissionDenial(error2)) return "permission_denied";
+  if (isAppNotRunning(error2)) return "app_not_running";
+  if (isAppleEventTimeout(error2)) return "timeout";
+  return "applescript_error";
+}
+function throwAppleFailure(error2, summaries) {
+  if (error2 instanceof ToolFailure) throw error2;
+  const code = classifyAppleError(error2);
+  const summary = code === "permission_denied" ? summaries.denied : code === "app_not_running" ? summaries.notRunning : code === "timeout" ? summaries.timedOut : summaries.failed;
+  throw new ToolFailure(code, summary, rawBody(error2));
 }
 function escapeAppleScriptString(value) {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
@@ -8143,16 +8232,10 @@ function phonesMatch(a, b) {
   const [shorter, longer] = da.length <= db.length ? [da, db] : [db, da];
   return shorter.length >= 7 && longer.endsWith(shorter);
 }
-var PermissionError;
 var init_native = __esm({
   "utils/native.ts"() {
     "use strict";
-    PermissionError = class extends Error {
-      constructor(message2) {
-        super(message2);
-        this.name = "PermissionError";
-      }
-    };
+    init_failure();
   }
 });
 
@@ -10814,18 +10897,21 @@ async function requestContactsAccess() {
     return { hasAccess: true, message: "Contacts access is granted." };
   } catch (error2) {
     if (isPermissionDenial(error2)) {
-      return { hasAccess: false, message: CONTACTS_DENIED };
+      return { hasAccess: false, message: CONTACTS_SUMMARIES.denied };
     }
-    throw error2 instanceof Error ? error2 : new Error(String(error2));
+    throwAppleFailure(error2, CONTACTS_SUMMARIES);
   }
 }
 async function getAllContacts() {
+  let scan2;
   try {
-    return await (0, import_run.run)((max) => {
+    scan2 = await (0, import_run.run)((max) => {
       const app = Application("Contacts");
       const people = app.people();
       const out = [];
       const count = Math.min(people.length, max);
+      let skipped = 0;
+      let firstError = "";
       for (let i = 0; i < count; i++) {
         try {
           const person = people[i];
@@ -10834,15 +10920,24 @@ async function getAllContacts() {
           if (phones.length > 0 || emails.length > 0) {
             out.push({ name: person.name(), phones, emails });
           }
-        } catch {
+        } catch (e) {
+          skipped++;
+          if (!firstError) firstError = String(e);
         }
       }
-      return out;
+      return { items: out, attempted: count, skipped, firstError };
     }, MAX_CONTACTS);
   } catch (error2) {
-    if (isPermissionDenial(error2)) throw new PermissionError(CONTACTS_DENIED);
-    throw error2 instanceof Error ? error2 : new Error(String(error2));
+    throwAppleFailure(error2, CONTACTS_SUMMARIES);
   }
+  if (scan2.attempted > 0 && scan2.skipped === scan2.attempted) {
+    throw new ToolFailure(
+      "applescript_error",
+      `Could not read your contacts: all ${scan2.attempted} contacts failed to read.`,
+      rawBody(scan2.firstError)
+    );
+  }
+  return scan2.items;
 }
 async function getAllNumbers() {
   const contacts2 = await getAllContacts();
@@ -10899,15 +10994,21 @@ async function findContactByPhone(handle) {
   }
   return null;
 }
-var import_run, MAX_CONTACTS, CONTACTS_DENIED, contacts_default;
+var import_run, MAX_CONTACTS, CONTACTS_SUMMARIES, contacts_default;
 var init_contacts = __esm({
   "utils/contacts.ts"() {
     "use strict";
     import_run = __toESM(require_run(), 1);
     init_native();
+    init_failure();
     init_phone();
     MAX_CONTACTS = 1e3;
-    CONTACTS_DENIED = "Contacts access is not granted. In System Settings \u25B8 Privacy & Security, grant Faced access to Contacts (and Automation \u25B8 Contacts), then try again.";
+    CONTACTS_SUMMARIES = {
+      denied: "Could not read your contacts: macOS denied access to Contacts.",
+      notRunning: "Could not read your contacts: the Contacts app could not be reached.",
+      timedOut: "Could not read your contacts: Contacts did not answer in time.",
+      failed: "Could not read your contacts."
+    };
     contacts_default = {
       getAllNumbers,
       findNumber,
@@ -10922,6 +11023,15 @@ var notes_exports = {};
 __export(notes_exports, {
   default: () => notes_default
 });
+function failIfEverythingWasSkipped(scan2, summaryPrefix) {
+  if (scan2.attempted > 0 && scan2.skipped === scan2.attempted) {
+    throw new ToolFailure(
+      "applescript_error",
+      `${summaryPrefix}: all ${scan2.attempted} notes failed to read.`,
+      rawBody(scan2.firstError)
+    );
+  }
+}
 async function requestNotesAccess() {
   try {
     await (0, import_run2.run)(() => {
@@ -10930,19 +11040,22 @@ async function requestNotesAccess() {
     return { hasAccess: true, message: "Notes access is granted." };
   } catch (error2) {
     if (isPermissionDenial(error2)) {
-      return { hasAccess: false, message: NOTES_DENIED };
+      return { hasAccess: false, message: NOTES_SUMMARIES.denied };
     }
-    throw error2 instanceof Error ? error2 : new Error(String(error2));
+    throwAppleFailure(error2, NOTES_SUMMARIES);
   }
 }
 async function getAllNotes() {
+  let scan2;
   try {
-    const notes2 = await (0, import_run2.run)(
+    scan2 = await (0, import_run2.run)(
       (opts) => {
         const Notes = Application("Notes");
         const all = Notes.notes();
         const out = [];
         const count = Math.min(all.length, opts.max);
+        let skipped = 0;
+        let firstError = "";
         for (let i = 0; i < count; i++) {
           try {
             const note = all[i];
@@ -10957,27 +11070,33 @@ async function getAllNotes() {
               content
             });
           } catch (_e) {
+            skipped++;
+            if (!firstError) firstError = String(_e);
           }
         }
-        return out;
+        return { items: out, attempted: count, skipped, firstError };
       },
       { max: MAX_NOTES, maxLen: MAX_CONTENT_PREVIEW }
     );
-    return notes2.map((n) => ({ name: n.name, content: n.content }));
   } catch (error2) {
-    rethrowIfPermissionDenied(error2, NOTES_DENIED);
+    throwAppleFailure(error2, NOTES_SUMMARIES);
   }
+  failIfEverythingWasSkipped(scan2, "Could not list your notes");
+  return scan2.items.map((n) => ({ name: n.name, content: n.content }));
 }
 async function findNote(searchText) {
   if (!searchText || searchText.trim() === "") return [];
+  let scan2;
   try {
-    const notes2 = await (0, import_run2.run)(
+    scan2 = await (0, import_run2.run)(
       (opts) => {
         const Notes = Application("Notes");
         const all = Notes.notes();
         const out = [];
         const needle = opts.search.toLowerCase();
         const count = Math.min(all.length, opts.max);
+        let skipped = 0;
+        let firstError = "";
         for (let i = 0; i < count; i++) {
           try {
             const note = all[i];
@@ -10993,20 +11112,26 @@ async function findNote(searchText) {
             }
             out.push({ name: name || "Untitled Note", content });
           } catch (_e) {
+            skipped++;
+            if (!firstError) firstError = String(_e);
           }
         }
-        return out;
+        return { items: out, attempted: count, skipped, firstError };
       },
       { search: searchText, max: MAX_NOTES, maxLen: MAX_CONTENT_PREVIEW }
     );
-    return notes2.map((n) => ({ name: n.name, content: n.content }));
   } catch (error2) {
-    rethrowIfPermissionDenied(error2, NOTES_DENIED);
+    throwAppleFailure(error2, NOTES_SUMMARIES);
   }
+  failIfEverythingWasSkipped(scan2, "Could not search your notes");
+  return scan2.items.map((n) => ({ name: n.name, content: n.content }));
 }
 async function createNote(title, body, folderName = DEFAULT_FOLDER) {
   if (!title || title.trim() === "") {
-    return { success: false, message: "Note title cannot be empty." };
+    throw new ToolFailure(
+      "bad_request",
+      "Could not create the note: no title was given."
+    );
   }
   const targetFolder = folderName && folderName.trim() !== "" ? folderName : DEFAULT_FOLDER;
   const noteBody = `${title}
@@ -11044,17 +11169,12 @@ ${body ?? ""}`;
       { folderName: targetFolder, body: noteBody }
     );
     return {
-      success: true,
       note: { name: title, content: body ?? "" },
       folderName: result2.folderName,
       usedDefaultFolder: result2.usedDefaultFolder
     };
   } catch (error2) {
-    if (isPermissionDenial(error2)) throw new PermissionError(NOTES_DENIED);
-    return {
-      success: false,
-      message: `Failed to create note: ${error2 instanceof Error ? error2.message : String(error2)}`
-    };
+    throwAppleFailure(error2, NOTES_CREATE_SUMMARIES);
   }
 }
 async function scanFolder(folderName) {
@@ -11121,7 +11241,7 @@ async function scanFolder(folderName) {
       }))
     };
   } catch (error2) {
-    rethrowIfPermissionDenied(error2, NOTES_DENIED);
+    throwAppleFailure(error2, NOTES_SUMMARIES);
   }
 }
 async function getNotesFromFolder(folderName) {
@@ -11164,16 +11284,28 @@ async function getNotesByDateRange(folderName, fromDate, toDate, limit = 20) {
   });
   return { success: true, notes: filtered.slice(0, Math.max(0, limit)) };
 }
-var import_run2, MAX_NOTES, MAX_CONTENT_PREVIEW, DEFAULT_FOLDER, NOTES_DENIED, notes_default;
+var import_run2, MAX_NOTES, MAX_CONTENT_PREVIEW, DEFAULT_FOLDER, NOTES_SUMMARIES, NOTES_CREATE_SUMMARIES, notes_default;
 var init_notes = __esm({
   "utils/notes.ts"() {
     "use strict";
     import_run2 = __toESM(require_run(), 1);
     init_native();
+    init_failure();
     MAX_NOTES = 1e3;
     MAX_CONTENT_PREVIEW = 2e3;
     DEFAULT_FOLDER = "Claude";
-    NOTES_DENIED = "Notes access is not granted. In System Settings \u25B8 Privacy & Security \u25B8 Automation, grant Faced access to Notes, then try again.";
+    NOTES_SUMMARIES = {
+      denied: "Could not reach your notes: macOS denied access to Notes.",
+      notRunning: "Could not reach your notes: the Notes app could not be reached.",
+      timedOut: "Could not reach your notes: Notes did not answer in time.",
+      failed: "Could not reach your notes."
+    };
+    NOTES_CREATE_SUMMARIES = {
+      denied: "Could not create the note: macOS denied access to Notes.",
+      notRunning: "Could not create the note: the Notes app could not be reached.",
+      timedOut: "Could not create the note: Notes did not answer in time.",
+      failed: "Could not create the note."
+    };
     notes_default = {
       getAllNotes,
       findNote,
@@ -11250,24 +11382,37 @@ tell application "Messages"
     send "${body}" to targetBuddy
 end tell`);
   } catch (error2) {
-    rethrowIfPermissionDenied(error2, MESSAGES_SEND_DENIED);
+    throwAppleFailure(error2, MESSAGES_SEND_SUMMARIES);
   }
 }
-async function checkMessagesDBAccess() {
-  try {
-    await access(CHAT_DB);
-    await execFileAsync2("sqlite3", [CHAT_DB, "SELECT 1;"]);
-    return true;
-  } catch (error2) {
-    console.error(
-      `Cannot read the Messages database (${CHAT_DB}): ${error2 instanceof Error ? error2.message : String(error2)}`
-    );
-    return false;
+function throwMessagesDbFailure(error2, summary) {
+  if (error2 instanceof ToolFailure) throw error2;
+  const body = rawBody(error2);
+  const text = body.toLowerCase();
+  const code = error2?.code;
+  if (isPermissionDenial(error2) || code === "EACCES" || code === "EPERM" || text.includes("unable to open database file") || text.includes("authorization denied") || text.includes("operation not permitted")) {
+    throw new ToolFailure("permission_denied", MESSAGES_READ_DENIED, body);
   }
+  if (code === "ENOENT" && !text.includes("sqlite3")) {
+    throw new ToolFailure(
+      "not_found",
+      `Could not read your message history: there is no Messages database at ${CHAT_DB}.`,
+      body
+    );
+  }
+  throw new ToolFailure("database_error", summary, body);
 }
 async function ensureMessagesDBAccess() {
-  if (await checkMessagesDBAccess()) return;
-  throw new PermissionError(MESSAGES_DB_DENIED);
+  try {
+    await access(CHAT_DB);
+  } catch (error2) {
+    throwMessagesDbFailure(error2, MESSAGES_READ_FAILED);
+  }
+  try {
+    await execFileAsync2("sqlite3", [CHAT_DB, "SELECT 1;"]);
+  } catch (error2) {
+    throwMessagesDbFailure(error2, MESSAGES_READ_FAILED);
+  }
 }
 function decodeAttributedBody(hexString) {
   try {
@@ -11335,24 +11480,39 @@ function decodeAttributedBody(hexString) {
   }
 }
 async function getAttachmentPaths(messageId) {
-  if (!Number.isInteger(messageId)) return [];
-  try {
-    const query = `
+  if (!Number.isInteger(messageId)) {
+    throw new ToolFailure(
+      "internal_error",
+      "Could not read the message attachments: the message id was not a number.",
+      String(messageId)
+    );
+  }
+  const query = `
             SELECT filename
             FROM attachment
             INNER JOIN message_attachment_join
             ON attachment.ROWID = message_attachment_join.attachment_id
             WHERE message_attachment_join.message_id = ${messageId}
         `;
-    const { stdout } = await execFileAsync2("sqlite3", ["-json", CHAT_DB, query]);
-    if (!stdout.trim()) {
-      return [];
-    }
+  let stdout;
+  try {
+    ({ stdout } = await execFileAsync2("sqlite3", ["-json", CHAT_DB, query]));
+  } catch (error2) {
+    throwMessagesDbFailure(
+      error2,
+      "Could not read the message attachments."
+    );
+  }
+  if (!stdout.trim()) return [];
+  try {
     const attachments = JSON.parse(stdout);
     return attachments.map((a) => a.filename).filter(Boolean);
   } catch (error2) {
-    console.error("Error getting attachments:", error2);
-    return [];
+    throw new ToolFailure(
+      "database_error",
+      "Could not read the message attachments: sqlite3 returned something that is not JSON.",
+      rawBody(error2)
+    );
   }
 }
 async function readMessages(phoneNumber, limit = 10) {
@@ -11360,7 +11520,12 @@ async function readMessages(phoneNumber, limit = 10) {
     const maxLimit = clampLimit(limit);
     await ensureMessagesDBAccess();
     const phoneFormats = handleCandidates(phoneNumber);
-    if (phoneFormats.length === 0) return [];
+    if (phoneFormats.length === 0) {
+      throw new ToolFailure(
+        "bad_request",
+        `Could not read your messages: "${phoneNumber}" is not a usable phone number or email address.`
+      );
+    }
     console.error("Trying handle formats:", phoneFormats);
     const phoneList = phoneFormats.map((p) => `'${escapeSqlString(p)}'`).join(",");
     const query = `
@@ -11402,9 +11567,7 @@ async function readMessages(phoneNumber, limit = 10) {
     const messages = JSON.parse(stdout);
     return await formatMessages(messages);
   } catch (error2) {
-    if (error2 instanceof PermissionError) throw error2;
-    console.error("Error reading messages:", error2);
-    rethrowIfPermissionDenied(error2, MESSAGES_DB_DENIED);
+    throwMessagesDbFailure(error2, "Could not read your messages.");
   }
 }
 async function getUnreadMessages(limit = 10) {
@@ -11450,9 +11613,7 @@ async function getUnreadMessages(limit = 10) {
     const messages = JSON.parse(stdout);
     return await formatMessages(messages);
   } catch (error2) {
-    if (error2 instanceof PermissionError) throw error2;
-    console.error("Error reading unread messages:", error2);
-    rethrowIfPermissionDenied(error2, MESSAGES_DB_DENIED);
+    throwMessagesDbFailure(error2, "Could not read your unread messages.");
   }
 }
 async function formatMessages(messages) {
@@ -11501,13 +11662,19 @@ ${content}`;
 async function scheduleMessage(phoneNumber, message2, scheduledTime) {
   const delay = scheduledTime.getTime() - Date.now();
   if (delay < 0) {
-    throw new Error("Cannot schedule message in the past");
+    throw new ToolFailure(
+      "bad_request",
+      "Could not schedule the message: the time given is in the past."
+    );
   }
   const timeoutId = setTimeout(async () => {
     try {
       await sendMessage(phoneNumber, message2);
     } catch (error2) {
-      console.error("Failed to send scheduled message:", error2);
+      console.error(
+        `[scheduled_send_failed] The scheduled message to ${phoneNumber} was not sent.
+${rawBody(error2)}`
+      );
     }
   }, delay);
   return {
@@ -11517,17 +11684,24 @@ async function scheduleMessage(phoneNumber, message2, scheduledTime) {
     phoneNumber
   };
 }
-var execFileAsync2, CHAT_DB, MESSAGES_DB_DENIED, MESSAGES_SEND_DENIED, CONFIG, MAX_RETRIES, RETRY_DELAY, message_default;
+var execFileAsync2, CHAT_DB, MESSAGES_SEND_SUMMARIES, MESSAGES_READ_DENIED, MESSAGES_READ_FAILED, CONFIG, MAX_RETRIES, RETRY_DELAY, message_default;
 var init_message = __esm({
   "utils/message.ts"() {
     "use strict";
     init_run_applescript();
     init_native();
+    init_failure();
     init_phone();
     execFileAsync2 = promisify2(execFile2);
     CHAT_DB = `${process.env.HOME}/Library/Messages/chat.db`;
-    MESSAGES_DB_DENIED = "Messages access is not granted. Reading message history needs Full Disk Access: in System Settings \u25B8 Privacy & Security \u25B8 Full Disk Access, enable Faced, then try again.";
-    MESSAGES_SEND_DENIED = "Messages access is not granted. In System Settings \u25B8 Privacy & Security \u25B8 Automation, allow Faced to control Messages, then try again.";
+    MESSAGES_SEND_SUMMARIES = {
+      denied: "Could not send the message: macOS denied control of Messages.",
+      notRunning: "Could not send the message: the Messages app could not be reached.",
+      timedOut: "Could not send the message: Messages did not answer in time.",
+      failed: "Could not send the message."
+    };
+    MESSAGES_READ_DENIED = "Could not read your message history: macOS denied access to the Messages database.";
+    MESSAGES_READ_FAILED = "Could not read your message history.";
     CONFIG = {
       // Maximum messages to process (to avoid performance issues)
       MAX_MESSAGES: 50,
@@ -11560,12 +11734,13 @@ async function requestRemindersAccess() {
     return { hasAccess: true, message: "Reminders access is granted." };
   } catch (error2) {
     if (isPermissionDenial(error2)) {
-      return { hasAccess: false, message: REMINDERS_DENIED };
+      return { hasAccess: false, message: REMINDERS_SUMMARIES.denied };
     }
-    throw error2 instanceof Error ? error2 : new Error(String(error2));
+    throwAppleFailure(error2, REMINDERS_SUMMARIES);
   }
 }
 async function scan(opts) {
+  let scanned;
   try {
     const result2 = await (0, import_run3.run)(
       (args) => {
@@ -11599,6 +11774,8 @@ async function scan(opts) {
           return { name, id, body, completed, dueDate, listName };
         };
         let lists;
+        let skippedLists = 0;
+        let firstError = "";
         if (listId) {
           const all = R.lists();
           let target = null;
@@ -11611,7 +11788,14 @@ async function scan(opts) {
             } catch (e) {
             }
           }
-          if (!target) return { items: [], listNotFound: true };
+          if (!target)
+            return {
+              items: [],
+              listNotFound: true,
+              listCount: 0,
+              skippedLists: 0,
+              firstError: ""
+            };
           lists = [target];
         } else {
           lists = R.lists();
@@ -11626,10 +11810,19 @@ async function scan(opts) {
             listName = String(list.name());
             rems = list.reminders();
           } catch (e) {
+            skippedLists++;
+            if (!firstError) firstError = String(e);
             continue;
           }
           for (let ri = 0; ri < rems.length; ri++) {
-            if (items.length >= max) return { items, listNotFound: false };
+            if (items.length >= max)
+              return {
+                items,
+                listNotFound: false,
+                listCount: listCap,
+                skippedLists,
+                firstError
+              };
             try {
               const rec = read(rems[ri], listName);
               if (needle) {
@@ -11641,7 +11834,13 @@ async function scan(opts) {
             }
           }
         }
-        return { items, listNotFound: false };
+        return {
+          items,
+          listNotFound: false,
+          listCount: listCap,
+          skippedLists,
+          firstError
+        };
       },
       {
         search: opts.search ?? null,
@@ -11650,32 +11849,50 @@ async function scan(opts) {
         maxLists: MAX_LISTS
       }
     );
-    return result2;
+    scanned = result2;
   } catch (error2) {
-    if (isPermissionDenial(error2)) throw new PermissionError(REMINDERS_DENIED);
-    throw error2 instanceof Error ? error2 : new Error(String(error2));
+    throwAppleFailure(error2, REMINDERS_SUMMARIES);
   }
+  if (scanned.listCount > 0 && scanned.skippedLists === scanned.listCount) {
+    throw new ToolFailure(
+      "applescript_error",
+      `Could not read your reminders: all ${scanned.listCount} lists failed to read.`,
+      rawBody(scanned.firstError)
+    );
+  }
+  return { items: scanned.items, listNotFound: scanned.listNotFound };
 }
 async function getAllLists() {
+  let scanned;
   try {
-    const lists = await (0, import_run3.run)((max) => {
+    scanned = await (0, import_run3.run)((max) => {
       const R = Application("Reminders");
       const all = R.lists();
       const out = [];
       const count = Math.min(all.length, max);
+      let skipped = 0;
+      let firstError = "";
       for (let i = 0; i < count; i++) {
         try {
           out.push({ id: String(all[i].id()), name: String(all[i].name()) });
         } catch (e) {
+          skipped++;
+          if (!firstError) firstError = String(e);
         }
       }
-      return out;
+      return { items: out, attempted: count, skipped, firstError };
     }, MAX_LISTS);
-    return lists;
   } catch (error2) {
-    if (isPermissionDenial(error2)) throw new PermissionError(REMINDERS_DENIED);
-    throw error2 instanceof Error ? error2 : new Error(String(error2));
+    throwAppleFailure(error2, REMINDERS_SUMMARIES);
   }
+  if (scanned.attempted > 0 && scanned.skipped === scanned.attempted) {
+    throw new ToolFailure(
+      "applescript_error",
+      `Could not list your reminder lists: all ${scanned.attempted} lists failed to read.`,
+      rawBody(scanned.firstError)
+    );
+  }
+  return scanned.items;
 }
 async function getAllReminders() {
   return (await scan({})).items;
@@ -11687,7 +11904,10 @@ async function searchReminders(searchText) {
 async function openReminder(searchText) {
   const matches = await searchReminders(searchText);
   if (matches.length === 0) {
-    return { success: false, message: "No matching reminders found." };
+    throw new ToolFailure(
+      "not_found",
+      `Could not open a reminder: nothing matches "${searchText}".`
+    );
   }
   try {
     await (0, import_run3.run)(() => {
@@ -11695,18 +11915,19 @@ async function openReminder(searchText) {
       return true;
     });
   } catch (error2) {
-    if (isPermissionDenial(error2)) throw new PermissionError(REMINDERS_DENIED);
-    throw error2 instanceof Error ? error2 : new Error(String(error2));
+    throwAppleFailure(error2, REMINDERS_OPEN_SUMMARIES);
   }
   return {
-    success: true,
     message: `Opened Reminders. Found reminder: ${matches[0].name}`,
     reminder: { name: matches[0].name }
   };
 }
 async function createReminder(name, listName, notes2, dueDate) {
   if (!name || name.trim() === "") {
-    throw new Error("Reminder name cannot be empty.");
+    throw new ToolFailure(
+      "bad_request",
+      "Could not create the reminder: no name was given."
+    );
   }
   try {
     const created = await (0, import_run3.run)(
@@ -11779,29 +12000,52 @@ async function createReminder(name, listName, notes2, dueDate) {
     );
     return created;
   } catch (error2) {
-    if (isPermissionDenial(error2)) throw new PermissionError(REMINDERS_DENIED);
-    throw error2 instanceof Error ? error2 : new Error(`Failed to create reminder: ${String(error2)}`);
+    throwAppleFailure(error2, REMINDERS_CREATE_SUMMARIES);
   }
 }
 async function getRemindersFromListById(listId, props) {
   if (!listId || listId.trim() === "") {
-    throw new Error("A reminder list id is required.");
+    throw new ToolFailure(
+      "bad_request",
+      "Could not read the reminder list: no list id was given."
+    );
   }
   const result2 = await scan({ listId });
   if (result2.listNotFound) {
-    throw new Error(`No reminder list found with id "${listId}".`);
+    throw new ToolFailure(
+      "not_found",
+      `Could not read the reminder list: no list has the id "${listId}".`
+    );
   }
   return result2.items;
 }
-var import_run3, MAX_REMINDERS, MAX_LISTS, REMINDERS_DENIED, reminders_default;
+var import_run3, MAX_REMINDERS, MAX_LISTS, REMINDERS_SUMMARIES, REMINDERS_CREATE_SUMMARIES, REMINDERS_OPEN_SUMMARIES, reminders_default;
 var init_reminders = __esm({
   "utils/reminders.ts"() {
     "use strict";
     import_run3 = __toESM(require_run(), 1);
     init_native();
+    init_failure();
     MAX_REMINDERS = 1e3;
     MAX_LISTS = 1e3;
-    REMINDERS_DENIED = "Reminders access is not granted. In System Settings \u25B8 Privacy & Security, grant Faced access to Reminders (and Automation \u25B8 Reminders), then try again.";
+    REMINDERS_SUMMARIES = {
+      denied: "Could not reach your reminders: macOS denied access to Reminders.",
+      notRunning: "Could not reach your reminders: the Reminders app could not be reached.",
+      timedOut: "Could not reach your reminders: Reminders did not answer in time.",
+      failed: "Could not reach your reminders."
+    };
+    REMINDERS_CREATE_SUMMARIES = {
+      denied: "Could not create the reminder: macOS denied access to Reminders.",
+      notRunning: "Could not create the reminder: the Reminders app could not be reached.",
+      timedOut: "Could not create the reminder: Reminders did not answer in time.",
+      failed: "Could not create the reminder."
+    };
+    REMINDERS_OPEN_SUMMARIES = {
+      denied: "Could not open Reminders: macOS denied access to Reminders.",
+      notRunning: "Could not open Reminders: the Reminders app could not be reached.",
+      timedOut: "Could not open Reminders: Reminders did not answer in time.",
+      failed: "Could not open Reminders."
+    };
     reminders_default = {
       getAllLists,
       getAllReminders,
@@ -11822,8 +12066,9 @@ __export(calendar_exports, {
 function parseDate(value, label) {
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) {
-    throw new Error(
-      `Invalid ${label} "${value}". Use ISO-8601 (e.g. 2026-06-21 or 2026-06-21T14:30:00Z).`
+    throw new ToolFailure(
+      "bad_request",
+      `Could not use the dates given: "${value}" is not a valid ${label}. Use ISO-8601 (e.g. 2026-06-21 or 2026-06-21T14:30:00Z).`
     );
   }
   return d;
@@ -11839,7 +12084,10 @@ function resolveWindow(fromDate, toDate, defaultDays) {
     to.setDate(to.getDate() + defaultDays);
   }
   if (to.getTime() < from.getTime()) {
-    throw new Error("toDate must not be earlier than fromDate.");
+    throw new ToolFailure(
+      "bad_request",
+      "Could not use the dates given: toDate is earlier than fromDate."
+    );
   }
   return { fromMs: from.getTime(), toMs: to.getTime() };
 }
@@ -11849,21 +12097,25 @@ async function requestCalendarAccess() {
     return { hasAccess: true, message: "Calendar access is granted." };
   } catch (error2) {
     if (isPermissionDenial(error2)) {
-      return { hasAccess: false, message: CALENDAR_DENIED };
+      return { hasAccess: false, message: CALENDAR_SUMMARIES.denied };
     }
-    throw error2 instanceof Error ? error2 : new Error(String(error2));
+    throwAppleFailure(error2, CALENDAR_SUMMARIES);
   }
 }
 async function scanWindow(fromMs, toMs, limit, search) {
-  const events = await (0, import_run4.run)(
+  const scan2 = await (0, import_run4.run)(
     (args) => {
       const C = Application("Calendar");
       const from = new Date(args.fromMs);
       const to = new Date(args.toMs);
       const out = [];
       let scanned = 0;
+      let visited = 0;
+      let skippedCalendars = 0;
+      let firstError = "";
       const cals = C.calendars();
       for (let ci = 0; ci < cals.length && out.length < args.limit; ci++) {
+        visited++;
         try {
           const cal = cals[ci];
           const calName = cal.name();
@@ -11907,39 +12159,54 @@ async function scanWindow(fromMs, toMs, limit, search) {
             } catch (_badEvent) {
             }
           }
-        } catch (_badCalendar) {
+        } catch (badCalendar) {
+          skippedCalendars++;
+          if (!firstError) firstError = String(badCalendar);
         }
       }
-      return out;
+      return { items: out, visited, skippedCalendars, firstError };
     },
     { fromMs, toMs, limit, search, cap: MAX_SCAN }
   );
-  return events;
+  if (scan2.visited > 0 && scan2.skippedCalendars === scan2.visited) {
+    throw new ToolFailure(
+      "applescript_error",
+      `Could not read your calendar: all ${scan2.visited} calendars failed to read.`,
+      rawBody(scan2.firstError)
+    );
+  }
+  return scan2.items;
 }
 async function getEvents(limit = 10, fromDate, toDate) {
   const { fromMs, toMs } = resolveWindow(fromDate, toDate, LIST_WINDOW_DAYS);
   try {
     return await scanWindow(fromMs, toMs, Math.max(1, limit), "");
   } catch (error2) {
-    if (isPermissionDenial(error2)) throw new PermissionError(CALENDAR_DENIED);
-    throw error2 instanceof Error ? error2 : new Error(String(error2));
+    throwAppleFailure(error2, CALENDAR_SUMMARIES);
   }
 }
 async function searchEvents(searchText, limit = 10, fromDate, toDate) {
   const needle = (searchText ?? "").trim().toLowerCase();
-  if (needle === "") return [];
+  if (needle === "") {
+    throw new ToolFailure(
+      "bad_request",
+      "Could not search your calendar: no search text was given."
+    );
+  }
   const { fromMs, toMs } = resolveWindow(fromDate, toDate, SEARCH_WINDOW_DAYS);
   try {
     return await scanWindow(fromMs, toMs, Math.max(1, limit), needle);
   } catch (error2) {
-    if (isPermissionDenial(error2)) throw new PermissionError(CALENDAR_DENIED);
-    throw error2 instanceof Error ? error2 : new Error(String(error2));
+    throwAppleFailure(error2, CALENDAR_SUMMARIES);
   }
 }
 async function openEvent(eventId) {
   const id = (eventId ?? "").trim();
   if (id === "") {
-    return { success: false, message: "An event ID is required to open an event." };
+    throw new ToolFailure(
+      "bad_request",
+      "Could not open the event: no event ID was given."
+    );
   }
   try {
     const found = await (0, import_run4.run)(
@@ -11947,6 +12214,8 @@ async function openEvent(eventId) {
         const C = Application("Calendar");
         const cals = C.calendars();
         let scanned = 0;
+        let skippedCalendars = 0;
+        let firstError = "";
         for (let ci = 0; ci < cals.length; ci++) {
           try {
             const cal = cals[ci];
@@ -11977,47 +12246,63 @@ async function openEvent(eventId) {
               } catch (_noTitle) {
               }
               C.activate();
-              return { found: true, title };
+              return {
+                found: true,
+                title,
+                skippedCalendars,
+                firstError,
+                visited: cals.length
+              };
             }
-          } catch (_badCalendar) {
+          } catch (badCalendar) {
+            skippedCalendars++;
+            if (!firstError) firstError = String(badCalendar);
           }
         }
-        return { found: false, title: "" };
+        return { found: false, title: "", skippedCalendars, firstError, visited: cals.length };
       },
       { id, cap: MAX_SCAN }
     );
+    if (found.visited > 0 && found.skippedCalendars === found.visited) {
+      throw new ToolFailure(
+        "applescript_error",
+        `Could not open the event: all ${found.visited} calendars failed to read.`,
+        rawBody(found.firstError)
+      );
+    }
     if (!found.found) {
-      return { success: false, message: `No event found with ID "${id}".` };
+      throw new ToolFailure(
+        "not_found",
+        `Could not open the event: no event has the ID "${id}".`
+      );
     }
     return {
-      success: true,
       message: found.title ? `Opened Calendar at "${found.title}".` : "Opened Calendar at the event."
     };
   } catch (error2) {
-    if (isPermissionDenial(error2)) throw new PermissionError(CALENDAR_DENIED);
-    throw error2 instanceof Error ? error2 : new Error(String(error2));
+    throwAppleFailure(error2, CALENDAR_OPEN_SUMMARIES);
   }
 }
 async function createEvent(title, startDate, endDate, location, notes2, isAllDay = false, calendarName) {
   if (!title || title.trim() === "") {
-    return { success: false, message: "Event title cannot be empty." };
+    throw new ToolFailure(
+      "bad_request",
+      "Could not create the event: no title was given."
+    );
   }
   if (!startDate || !endDate) {
-    return { success: false, message: "Start date and end date are required." };
+    throw new ToolFailure(
+      "bad_request",
+      "Could not create the event: a start date and an end date are both required."
+    );
   }
-  let start;
-  let end;
-  try {
-    start = parseDate(startDate, "startDate");
-    end = parseDate(endDate, "endDate");
-  } catch (error2) {
-    return {
-      success: false,
-      message: error2 instanceof Error ? error2.message : String(error2)
-    };
-  }
+  const start = parseDate(startDate, "startDate");
+  const end = parseDate(endDate, "endDate");
   if (!isAllDay && end.getTime() <= start.getTime()) {
-    return { success: false, message: "End date must be after start date." };
+    throw new ToolFailure(
+      "bad_request",
+      "Could not create the event: the end date is not after the start date."
+    );
   }
   try {
     const result2 = await (0, import_run4.run)(
@@ -12062,36 +12347,52 @@ async function createEvent(title, startDate, endDate, location, notes2, isAllDay
     );
     if ("error" in result2) {
       if (result2.error === "calendar_not_found") {
-        return {
-          success: false,
-          message: `Calendar "${calendarName}" was not found.`
-        };
+        throw new ToolFailure(
+          "not_found",
+          `Could not create the event: there is no calendar named "${calendarName}".`
+        );
       }
-      return {
-        success: false,
-        message: "No calendars are available to create the event in."
-      };
+      throw new ToolFailure(
+        "not_found",
+        "Could not create the event: there are no calendars to create it in."
+      );
     }
     return {
-      success: true,
       message: `Event "${title.trim()}" created in "${result2.calendarName}".`,
       eventId: result2.uid
     };
   } catch (error2) {
-    if (isPermissionDenial(error2)) throw new PermissionError(CALENDAR_DENIED);
-    throw error2 instanceof Error ? error2 : new Error(String(error2));
+    throwAppleFailure(error2, CALENDAR_CREATE_SUMMARIES);
   }
 }
-var import_run4, MAX_SCAN, LIST_WINDOW_DAYS, SEARCH_WINDOW_DAYS, CALENDAR_DENIED, calendar, calendar_default;
+var import_run4, MAX_SCAN, LIST_WINDOW_DAYS, SEARCH_WINDOW_DAYS, CALENDAR_SUMMARIES, CALENDAR_OPEN_SUMMARIES, CALENDAR_CREATE_SUMMARIES, calendar, calendar_default;
 var init_calendar = __esm({
   "utils/calendar.ts"() {
     "use strict";
     import_run4 = __toESM(require_run(), 1);
     init_native();
+    init_failure();
     MAX_SCAN = 1e3;
     LIST_WINDOW_DAYS = 7;
     SEARCH_WINDOW_DAYS = 30;
-    CALENDAR_DENIED = "Calendar access is not granted. In System Settings \u25B8 Privacy & Security, grant Faced access to Calendars (and Automation \u25B8 Calendar), then try again.";
+    CALENDAR_SUMMARIES = {
+      denied: "Could not read your calendar: macOS denied access to Calendar.",
+      notRunning: "Could not read your calendar: the Calendar app could not be reached.",
+      timedOut: "Could not read your calendar: Calendar did not answer in time.",
+      failed: "Could not read your calendar."
+    };
+    CALENDAR_OPEN_SUMMARIES = {
+      denied: "Could not open the event: macOS denied access to Calendar.",
+      notRunning: "Could not open the event: the Calendar app could not be reached.",
+      timedOut: "Could not open the event: Calendar did not answer in time.",
+      failed: "Could not open the event."
+    };
+    CALENDAR_CREATE_SUMMARIES = {
+      denied: "Could not create the event: macOS denied access to Calendar.",
+      notRunning: "Could not create the event: the Calendar app could not be reached.",
+      timedOut: "Could not create the event: Calendar did not answer in time.",
+      failed: "Could not create the event."
+    };
     calendar = {
       searchEvents,
       openEvent,
@@ -19380,6 +19681,7 @@ var tools = [
 var tools_default = tools;
 
 // index.ts
+init_failure();
 var ENABLED_APPS = (() => {
   const raw = process.env.APPLE_MCP_ENABLED_APPS;
   if (raw === void 0) return null;
@@ -19501,23 +19803,30 @@ function initServer() {
     try {
       const { name, arguments: args } = request.params;
       if (!args) {
-        throw new Error("No arguments provided");
+        return failureResult(
+          "bad_request",
+          `Could not run the "${name}" tool: no arguments were given.`
+        );
+      }
+      if (!tools_default.some((tool) => tool.name === name)) {
+        return failureResult(
+          "unknown_tool",
+          `There is no tool called "${name}" on this server.`
+        );
       }
       if (!isAppEnabled(name)) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `The "${name}" app is disabled. Enable it in Faced's settings to use this tool.`
-            }
-          ],
-          isError: true
-        };
+        return failureResult(
+          "app_disabled",
+          `The "${name}" app is not enabled on this server.`
+        );
       }
       switch (name) {
         case "contacts": {
           if (!isContactsArgs(args)) {
-            throw new Error("Invalid arguments for contacts tool");
+            return failureResult(
+              "bad_request",
+              "Could not look up contacts: `name` must be a string when given."
+            );
           }
           try {
             const contactsModule = await loadModule("contacts");
@@ -19538,10 +19847,7 @@ function initServer() {
               if (contactCount === 0) {
                 return {
                   content: [
-                    {
-                      type: "text",
-                      text: "No contacts found in the address book. Please make sure you have granted access to Contacts."
-                    }
+                    { type: "text", text: "No contacts found in the address book." }
                   ],
                   isError: false
                 };
@@ -19560,21 +19866,19 @@ ${formattedContacts.join("\n")}` : "Found contacts but none have phone numbers. 
               };
             }
           } catch (error2) {
-            const errorMessage = error2 instanceof Error ? error2.message : String(error2);
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: errorMessage.includes("access") ? errorMessage : `Error accessing contacts: ${errorMessage}`
-                }
-              ],
-              isError: true
-            };
+            return failureResultFrom(
+              error2,
+              "internal_error",
+              "Could not look up contacts."
+            );
           }
         }
         case "notes": {
           if (!isNotesArgs(args)) {
-            throw new Error("Invalid arguments for notes tool");
+            return failureResult(
+              "bad_request",
+              "Could not run the notes tool: `operation` must be search, list or create, with `searchText` for a search and `title` plus `body` for a create."
+            );
           }
           try {
             const notesModule = await loadModule("notes");
@@ -19582,8 +19886,9 @@ ${formattedContacts.join("\n")}` : "Found contacts but none have phone numbers. 
             switch (operation) {
               case "search": {
                 if (!args.searchText) {
-                  throw new Error(
-                    "Search text is required for search operation"
+                  return failureResult(
+                    "bad_request",
+                    "Could not search your notes: no search text was given."
                   );
                 }
                 const foundNotes = await notesModule.findNote(args.searchText);
@@ -19613,8 +19918,9 @@ ${note.content}`).join("\n\n") : "No notes exist."
               }
               case "create": {
                 if (!args.title || !args.body) {
-                  throw new Error(
-                    "Title and body are required for create operation"
+                  return failureResult(
+                    "bad_request",
+                    "Could not create the note: a title and a body are both required."
                   );
                 }
                 const result2 = await notesModule.createNote(
@@ -19626,39 +19932,41 @@ ${note.content}`).join("\n\n") : "No notes exist."
                   content: [
                     {
                       type: "text",
-                      text: result2.success ? `Created note "${args.title}" in folder "${result2.folderName}"${result2.usedDefaultFolder ? " (created new folder)" : ""}.` : `Failed to create note: ${result2.message}`
+                      text: `Created note "${args.title}" in folder "${result2.folderName}"${result2.usedDefaultFolder ? " (created new folder)" : ""}.`
                     }
                   ],
-                  isError: !result2.success
+                  isError: false
                 };
               }
               default:
-                throw new Error(`Unknown operation: ${operation}`);
+                return failureResult(
+                  "bad_request",
+                  `Could not run the notes tool: "${operation}" is not one of search, list or create.`
+                );
             }
           } catch (error2) {
-            const errorMessage = error2 instanceof Error ? error2.message : String(error2);
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: errorMessage.includes("access") ? errorMessage : `Error accessing notes: ${errorMessage}`
-                }
-              ],
-              isError: true
-            };
+            return failureResultFrom(
+              error2,
+              "internal_error",
+              "Could not run the notes tool."
+            );
           }
         }
         case "messages": {
           if (!isMessagesArgs(args)) {
-            throw new Error("Invalid arguments for messages tool");
+            return failureResult(
+              "bad_request",
+              "Could not run the messages tool: `operation` must be send, read, schedule or unread, with `phoneNumber` for all but unread, `message` for a send or a schedule, and `scheduledTime` for a schedule."
+            );
           }
           try {
             const messageModule = await loadModule("message");
             switch (args.operation) {
               case "send": {
                 if (!args.phoneNumber || !args.message) {
-                  throw new Error(
-                    "Phone number and message are required for send operation"
+                  return failureResult(
+                    "bad_request",
+                    "Could not send the message: a phone number and a message are both required."
                   );
                 }
                 await messageModule.sendMessage(args.phoneNumber, args.message);
@@ -19674,8 +19982,9 @@ ${note.content}`).join("\n\n") : "No notes exist."
               }
               case "read": {
                 if (!args.phoneNumber) {
-                  throw new Error(
-                    "Phone number is required for read operation"
+                  return failureResult(
+                    "bad_request",
+                    "Could not read your messages: no phone number was given."
                   );
                 }
                 const messages = await messageModule.readMessages(
@@ -19696,8 +20005,9 @@ ${note.content}`).join("\n\n") : "No notes exist."
               }
               case "schedule": {
                 if (!args.phoneNumber || !args.message || !args.scheduledTime) {
-                  throw new Error(
-                    "Phone number, message, and scheduled time are required for schedule operation"
+                  return failureResult(
+                    "bad_request",
+                    "Could not schedule the message: a phone number, a message and a scheduled time are all required."
                   );
                 }
                 const scheduledMsg = await messageModule.scheduleMessage(
@@ -19751,24 +20061,25 @@ ${msg.content}`
                 };
               }
               default:
-                throw new Error(`Unknown operation: ${args.operation}`);
+                return failureResult(
+                  "bad_request",
+                  `Could not run the messages tool: "${args.operation}" is not one of send, read, schedule or unread.`
+                );
             }
           } catch (error2) {
-            const errorMessage = error2 instanceof Error ? error2.message : String(error2);
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: errorMessage.includes("access") ? errorMessage : `Error with messages operation: ${errorMessage}`
-                }
-              ],
-              isError: true
-            };
+            return failureResultFrom(
+              error2,
+              "internal_error",
+              "Could not run the messages tool."
+            );
           }
         }
         case "reminders": {
           if (!isRemindersArgs(args)) {
-            throw new Error("Invalid arguments for reminders tool");
+            return failureResult(
+              "bad_request",
+              "Could not run the reminders tool: `operation` must be list, search, open, create or listById, with `searchText` for a search or an open, `name` for a create, and `listId` for a listById."
+            );
           }
           try {
             const remindersModule = await loadModule("reminders");
@@ -19809,11 +20120,11 @@ ${msg.content}`
                 content: [
                   {
                     type: "text",
-                    text: result2.success ? `Opened Reminders app. Found reminder: ${result2.reminder?.name}` : result2.message
+                    text: `Opened Reminders app. Found reminder: ${result2.reminder.name}`
                   }
                 ],
                 ...result2,
-                isError: !result2.success
+                isError: false
               };
             } else if (operation === "create") {
               const { name: name2, listName, notes: notes2, dueDate } = args;
@@ -19851,32 +20162,24 @@ ${msg.content}`
                 isError: false
               };
             }
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: "Unknown operation"
-                }
-              ],
-              isError: true
-            };
+            return failureResult(
+              "bad_request",
+              `Could not run the reminders tool: "${operation}" is not one of list, search, open, create or listById.`
+            );
           } catch (error2) {
-            console.error("Error in reminders tool:", error2);
-            const errorMessage = error2 instanceof Error ? error2.message : String(error2);
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: errorMessage.includes("access") ? errorMessage : `Error in reminders tool: ${errorMessage}`
-                }
-              ],
-              isError: true
-            };
+            return failureResultFrom(
+              error2,
+              "internal_error",
+              "Could not run the reminders tool."
+            );
           }
         }
         case "calendar": {
           if (!isCalendarArgs(args)) {
-            throw new Error("Invalid arguments for calendar tool");
+            return failureResult(
+              "bad_request",
+              "Could not run the calendar tool: `operation` must be search, open, list or create, with `searchText` for a search, `eventId` for an open, and `title` plus `startDate` plus `endDate` for a create."
+            );
           }
           try {
             const calendarModule = await loadModule("calendar");
@@ -19913,13 +20216,8 @@ ${event.notes ? `Notes: ${event.notes}
                 const { eventId } = args;
                 const result2 = await calendarModule.openEvent(eventId);
                 return {
-                  content: [
-                    {
-                      type: "text",
-                      text: result2.success ? result2.message : `Error opening event: ${result2.message}`
-                    }
-                  ],
-                  isError: !result2.success
+                  content: [{ type: "text", text: result2.message }],
+                  isError: false
                 };
               }
               case "list": {
@@ -19971,45 +20269,39 @@ ID: ${event.id}`
                   content: [
                     {
                       type: "text",
-                      text: result2.success ? `${result2.message} Event scheduled from ${new Date(startDate).toLocaleString()} to ${new Date(endDate).toLocaleString()}${result2.eventId ? `
-Event ID: ${result2.eventId}` : ""}` : `Error creating event: ${result2.message}`
+                      text: `${result2.message} Event scheduled from ${new Date(startDate).toLocaleString()} to ${new Date(endDate).toLocaleString()}
+Event ID: ${result2.eventId}`
                     }
                   ],
-                  isError: !result2.success
+                  isError: false
                 };
               }
               default:
-                throw new Error(`Unknown calendar operation: ${operation}`);
+                return failureResult(
+                  "bad_request",
+                  `Could not run the calendar tool: "${operation}" is not one of search, open, list or create.`
+                );
             }
           } catch (error2) {
-            const errorMessage = error2 instanceof Error ? error2.message : String(error2);
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: errorMessage.includes("access") ? errorMessage : `Error in calendar tool: ${errorMessage}`
-                }
-              ],
-              isError: true
-            };
+            return failureResultFrom(
+              error2,
+              "internal_error",
+              "Could not run the calendar tool."
+            );
           }
         }
         default:
-          return {
-            content: [{ type: "text", text: `Unknown tool: ${name}` }],
-            isError: true
-          };
+          return failureResult(
+            "unknown_tool",
+            `There is no tool called "${name}" on this server.`
+          );
       }
     } catch (error2) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error: ${error2 instanceof Error ? error2.message : String(error2)}`
-          }
-        ],
-        isError: true
-      };
+      return failureResultFrom(
+        error2,
+        "internal_error",
+        `Could not run the "${request.params.name}" tool.`
+      );
     }
   });
   console.error("Setting up MCP server transport...");
