@@ -1,5 +1,10 @@
 import { run } from "@jxa/run";
-import { ToolFailure, isPermissionDenial, throwAppleFailure } from "./native";
+import {
+	ToolFailure,
+	grantSentence,
+	isPermissionDenial,
+	throwAppleFailure,
+} from "./native";
 import { rawBody } from "./failure";
 
 // We drive the Reminders app through JXA (@jxa/run) rather than by interpolating user input into an
@@ -14,23 +19,33 @@ const MAX_REMINDERS = 1000;
 // Maximum lists to enumerate.
 const MAX_LISTS = 1000;
 
-// The one sentence each outcome puts on line 1 of the envelope. It says WHAT DID NOT HAPPEN and
-// stops: the envelope spec forbids inventing a remedy, because this server knows what macOS refused
-// and knows nothing about what the person should do about it.
-const REMINDERS_SUMMARIES = {
-	denied: "Could not reach your reminders: macOS denied access to Reminders.",
+// The one sentence each outcome puts on line 1 of the envelope. It says WHAT DID NOT HAPPEN, and for
+// a denial it also NAMES the permission that is missing and the app to enable it for.
+//
+// Naming it is not inventing a remedy. Only this server can tell a denied Automation grant from a
+// denied Contacts one, so nothing upstream could reconstruct that sentence, and dropping it deletes it
+// rather than moving it somewhere better. What stays out is anything we would be guessing: no "then
+// try again", no theory about why the grant is missing.
+export const REMINDERS_SUMMARIES = {
+	denied:
+		"Could not reach your reminders: macOS denied access to Reminders. " +
+		grantSentence("Reminders", "Automation > Reminders"),
 	notRunning: "Could not reach your reminders: the Reminders app could not be reached.",
 	timedOut: "Could not reach your reminders: Reminders did not answer in time.",
 	failed: "Could not reach your reminders.",
 };
-const REMINDERS_CREATE_SUMMARIES = {
-	denied: "Could not create the reminder: macOS denied access to Reminders.",
+export const REMINDERS_CREATE_SUMMARIES = {
+	denied:
+		"Could not create the reminder: macOS denied access to Reminders. " +
+		grantSentence("Reminders", "Automation > Reminders"),
 	notRunning: "Could not create the reminder: the Reminders app could not be reached.",
 	timedOut: "Could not create the reminder: Reminders did not answer in time.",
 	failed: "Could not create the reminder.",
 };
-const REMINDERS_OPEN_SUMMARIES = {
-	denied: "Could not open Reminders: macOS denied access to Reminders.",
+export const REMINDERS_OPEN_SUMMARIES = {
+	denied:
+		"Could not open Reminders: macOS denied access to Reminders. " +
+		grantSentence("Reminders", "Automation > Reminders"),
 	notRunning: "Could not open Reminders: the Reminders app could not be reached.",
 	timedOut: "Could not open Reminders: Reminders did not answer in time.",
 	failed: "Could not open Reminders.",

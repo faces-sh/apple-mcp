@@ -1,6 +1,7 @@
 import { run } from "@jxa/run";
 import {
 	ToolFailure,
+	grantSentence,
 	isPermissionDenial,
 	phonesMatch,
 	throwAppleFailure,
@@ -17,11 +18,17 @@ interface ContactEntry {
 // Maximum contacts to scan (guards against pathological address books).
 const MAX_CONTACTS = 1000;
 
-// The one sentence each outcome puts on line 1 of the envelope. It says WHAT DID NOT HAPPEN and stops
-// there: the envelope spec forbids inventing a remedy, because this server knows what macOS refused
-// and knows nothing about what the person should do about it.
-const CONTACTS_SUMMARIES = {
-	denied: "Could not read your contacts: macOS denied access to Contacts.",
+// The one sentence each outcome puts on line 1 of the envelope. It says WHAT DID NOT HAPPEN, and for
+// a denial it also NAMES the permission that is missing and the app to enable it for.
+//
+// Naming it is not inventing a remedy. Only this server can tell a denied Automation grant from a
+// denied Contacts one, so nothing upstream could reconstruct that sentence, and dropping it deletes it
+// rather than moving it somewhere better. What stays out is anything we would be guessing: no "then
+// try again", no theory about why the grant is missing.
+export const CONTACTS_SUMMARIES = {
+	denied:
+		"Could not read your contacts: macOS denied access to Contacts. " +
+		grantSentence("Contacts", "Automation > Contacts"),
 	notRunning: "Could not read your contacts: the Contacts app could not be reached.",
 	timedOut: "Could not read your contacts: Contacts did not answer in time.",
 	failed: "Could not read your contacts.",

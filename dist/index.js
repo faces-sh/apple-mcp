@@ -8186,6 +8186,15 @@ var require_run = __commonJS({
 });
 
 // utils/native.ts
+function hostAppName() {
+  const name = (process.env.APPLE_MCP_APP_NAME || "").trim();
+  return name || "this app";
+}
+function grantSentence(...permissionPaths) {
+  const [first, ...rest] = permissionPaths;
+  const tail = rest.map((p) => `, and under ${p}`).join("");
+  return `Enable ${hostAppName()} under System Settings > Privacy & Security > ${first}${tail}.`;
+}
 function isPermissionDenial(error2) {
   const msg = (error2 instanceof Error ? error2.message : String(error2)).toLowerCase();
   return msg.includes("-1743") || // errAEEventNotPermitted - Automation denied / never prompted
@@ -10887,6 +10896,7 @@ var init_phone = __esm({
 // utils/contacts.ts
 var contacts_exports = {};
 __export(contacts_exports, {
+  CONTACTS_SUMMARIES: () => CONTACTS_SUMMARIES,
   default: () => contacts_default
 });
 async function requestContactsAccess() {
@@ -11004,7 +11014,7 @@ var init_contacts = __esm({
     init_phone();
     MAX_CONTACTS = 1e3;
     CONTACTS_SUMMARIES = {
-      denied: "Could not read your contacts: macOS denied access to Contacts.",
+      denied: "Could not read your contacts: macOS denied access to Contacts. " + grantSentence("Contacts", "Automation > Contacts"),
       notRunning: "Could not read your contacts: the Contacts app could not be reached.",
       timedOut: "Could not read your contacts: Contacts did not answer in time.",
       failed: "Could not read your contacts."
@@ -11021,6 +11031,8 @@ var init_contacts = __esm({
 // utils/notes.ts
 var notes_exports = {};
 __export(notes_exports, {
+  NOTES_CREATE_SUMMARIES: () => NOTES_CREATE_SUMMARIES,
+  NOTES_SUMMARIES: () => NOTES_SUMMARIES,
   default: () => notes_default
 });
 function failIfEverythingWasSkipped(scan2, summaryPrefix) {
@@ -11295,13 +11307,13 @@ var init_notes = __esm({
     MAX_CONTENT_PREVIEW = 2e3;
     DEFAULT_FOLDER = "Claude";
     NOTES_SUMMARIES = {
-      denied: "Could not reach your notes: macOS denied access to Notes.",
+      denied: "Could not reach your notes: macOS denied access to Notes. " + grantSentence("Automation > Notes"),
       notRunning: "Could not reach your notes: the Notes app could not be reached.",
       timedOut: "Could not reach your notes: Notes did not answer in time.",
       failed: "Could not reach your notes."
     };
     NOTES_CREATE_SUMMARIES = {
-      denied: "Could not create the note: macOS denied access to Notes.",
+      denied: "Could not create the note: macOS denied access to Notes. " + grantSentence("Automation > Notes"),
       notRunning: "Could not create the note: the Notes app could not be reached.",
       timedOut: "Could not create the note: Notes did not answer in time.",
       failed: "Could not create the note."
@@ -11344,6 +11356,8 @@ var init_run_applescript = __esm({
 // utils/message.ts
 var message_exports = {};
 __export(message_exports, {
+  MESSAGES_READ_DENIED: () => MESSAGES_READ_DENIED,
+  MESSAGES_SEND_SUMMARIES: () => MESSAGES_SEND_SUMMARIES,
   default: () => message_default
 });
 import { promisify as promisify2 } from "node:util";
@@ -11695,12 +11709,12 @@ var init_message = __esm({
     execFileAsync2 = promisify2(execFile2);
     CHAT_DB = `${process.env.HOME}/Library/Messages/chat.db`;
     MESSAGES_SEND_SUMMARIES = {
-      denied: "Could not send the message: macOS denied control of Messages.",
+      denied: "Could not send the message: macOS denied control of Messages. " + grantSentence("Automation > Messages"),
       notRunning: "Could not send the message: the Messages app could not be reached.",
       timedOut: "Could not send the message: Messages did not answer in time.",
       failed: "Could not send the message."
     };
-    MESSAGES_READ_DENIED = "Could not read your message history: macOS denied access to the Messages database.";
+    MESSAGES_READ_DENIED = "Could not read your message history: macOS denied access to the Messages database. " + grantSentence("Full Disk Access");
     MESSAGES_READ_FAILED = "Could not read your message history.";
     CONFIG = {
       // Maximum messages to process (to avoid performance issues)
@@ -11724,6 +11738,9 @@ var init_message = __esm({
 // utils/reminders.ts
 var reminders_exports = {};
 __export(reminders_exports, {
+  REMINDERS_CREATE_SUMMARIES: () => REMINDERS_CREATE_SUMMARIES,
+  REMINDERS_OPEN_SUMMARIES: () => REMINDERS_OPEN_SUMMARIES,
+  REMINDERS_SUMMARIES: () => REMINDERS_SUMMARIES,
   default: () => reminders_default
 });
 async function requestRemindersAccess() {
@@ -12029,19 +12046,19 @@ var init_reminders = __esm({
     MAX_REMINDERS = 1e3;
     MAX_LISTS = 1e3;
     REMINDERS_SUMMARIES = {
-      denied: "Could not reach your reminders: macOS denied access to Reminders.",
+      denied: "Could not reach your reminders: macOS denied access to Reminders. " + grantSentence("Reminders", "Automation > Reminders"),
       notRunning: "Could not reach your reminders: the Reminders app could not be reached.",
       timedOut: "Could not reach your reminders: Reminders did not answer in time.",
       failed: "Could not reach your reminders."
     };
     REMINDERS_CREATE_SUMMARIES = {
-      denied: "Could not create the reminder: macOS denied access to Reminders.",
+      denied: "Could not create the reminder: macOS denied access to Reminders. " + grantSentence("Reminders", "Automation > Reminders"),
       notRunning: "Could not create the reminder: the Reminders app could not be reached.",
       timedOut: "Could not create the reminder: Reminders did not answer in time.",
       failed: "Could not create the reminder."
     };
     REMINDERS_OPEN_SUMMARIES = {
-      denied: "Could not open Reminders: macOS denied access to Reminders.",
+      denied: "Could not open Reminders: macOS denied access to Reminders. " + grantSentence("Reminders", "Automation > Reminders"),
       notRunning: "Could not open Reminders: the Reminders app could not be reached.",
       timedOut: "Could not open Reminders: Reminders did not answer in time.",
       failed: "Could not open Reminders."
@@ -12061,6 +12078,9 @@ var init_reminders = __esm({
 // utils/calendar.ts
 var calendar_exports = {};
 __export(calendar_exports, {
+  CALENDAR_CREATE_SUMMARIES: () => CALENDAR_CREATE_SUMMARIES,
+  CALENDAR_OPEN_SUMMARIES: () => CALENDAR_OPEN_SUMMARIES,
+  CALENDAR_SUMMARIES: () => CALENDAR_SUMMARIES,
   default: () => calendar_default
 });
 function parseDate(value, label) {
@@ -12376,19 +12396,19 @@ var init_calendar = __esm({
     LIST_WINDOW_DAYS = 7;
     SEARCH_WINDOW_DAYS = 30;
     CALENDAR_SUMMARIES = {
-      denied: "Could not read your calendar: macOS denied access to Calendar.",
+      denied: "Could not read your calendar: macOS denied access to Calendar. " + grantSentence("Calendars", "Automation > Calendar"),
       notRunning: "Could not read your calendar: the Calendar app could not be reached.",
       timedOut: "Could not read your calendar: Calendar did not answer in time.",
       failed: "Could not read your calendar."
     };
     CALENDAR_OPEN_SUMMARIES = {
-      denied: "Could not open the event: macOS denied access to Calendar.",
+      denied: "Could not open the event: macOS denied access to Calendar. " + grantSentence("Calendars", "Automation > Calendar"),
       notRunning: "Could not open the event: the Calendar app could not be reached.",
       timedOut: "Could not open the event: Calendar did not answer in time.",
       failed: "Could not open the event."
     };
     CALENDAR_CREATE_SUMMARIES = {
-      denied: "Could not create the event: macOS denied access to Calendar.",
+      denied: "Could not create the event: macOS denied access to Calendar. " + grantSentence("Calendars", "Automation > Calendar"),
       notRunning: "Could not create the event: the Calendar app could not be reached.",
       timedOut: "Could not create the event: Calendar did not answer in time.",
       failed: "Could not create the event."

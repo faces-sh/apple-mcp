@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 import { access } from "node:fs/promises";
 import {
 	ToolFailure,
+	grantSentence,
 	isPermissionDenial,
 	throwAppleFailure,
 	escapeAppleScriptString,
@@ -18,17 +19,26 @@ import { handleCandidates } from "./phone";
 const execFileAsync = promisify(execFile);
 const CHAT_DB = `${process.env.HOME}/Library/Messages/chat.db`;
 
-// The one sentence each outcome puts on line 1 of the envelope. It says WHAT DID NOT HAPPEN and
-// stops: the envelope spec forbids inventing a remedy, because this server knows what macOS refused
-// and knows nothing about what the person should do about it.
-const MESSAGES_SEND_SUMMARIES = {
-	denied: "Could not send the message: macOS denied control of Messages.",
+// The one sentence each outcome puts on line 1 of the envelope. It says WHAT DID NOT HAPPEN, and for
+// a denial it also NAMES the permission that is missing and the app to enable it for.
+//
+// Naming it is not inventing a remedy. Only this server can tell a denied Automation grant from a
+// denied Contacts one, so nothing upstream could reconstruct that sentence, and dropping it deletes it
+// rather than moving it somewhere better. What stays out is anything we would be guessing: no "then
+// try again", no theory about why the grant is missing.
+export const MESSAGES_SEND_SUMMARIES = {
+	denied:
+		"Could not send the message: macOS denied control of Messages. " +
+		grantSentence("Automation > Messages"),
 	notRunning: "Could not send the message: the Messages app could not be reached.",
 	timedOut: "Could not send the message: Messages did not answer in time.",
 	failed: "Could not send the message.",
 };
-const MESSAGES_READ_DENIED =
-	"Could not read your message history: macOS denied access to the Messages database.";
+// Reading chat.db is the ONE thing here that needs Full Disk Access rather than Automation, and this
+// server is the only place that knows it. Say which.
+export const MESSAGES_READ_DENIED =
+	"Could not read your message history: macOS denied access to the Messages database. " +
+	grantSentence("Full Disk Access");
 const MESSAGES_READ_FAILED = "Could not read your message history.";
 
 // Configuration

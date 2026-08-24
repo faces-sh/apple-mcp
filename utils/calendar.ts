@@ -1,5 +1,10 @@
 import { run } from "@jxa/run";
-import { ToolFailure, isPermissionDenial, throwAppleFailure } from "./native";
+import {
+	ToolFailure,
+	grantSentence,
+	isPermissionDenial,
+	throwAppleFailure,
+} from "./native";
 import { rawBody } from "./failure";
 
 // We drive Calendar through JXA (@jxa/run) rather than by interpolating user input into an
@@ -17,23 +22,33 @@ const MAX_SCAN = 1000;
 const LIST_WINDOW_DAYS = 7;
 const SEARCH_WINDOW_DAYS = 30;
 
-// The one sentence each outcome puts on line 1 of the envelope. It says WHAT DID NOT HAPPEN and
-// stops: the envelope spec forbids inventing a remedy, because this server knows what macOS refused
-// and knows nothing about what the person should do about it.
-const CALENDAR_SUMMARIES = {
-	denied: "Could not read your calendar: macOS denied access to Calendar.",
+// The one sentence each outcome puts on line 1 of the envelope. It says WHAT DID NOT HAPPEN, and for
+// a denial it also NAMES the permission that is missing and the app to enable it for.
+//
+// Naming it is not inventing a remedy. Only this server can tell a denied Automation grant from a
+// denied Contacts one, so nothing upstream could reconstruct that sentence, and dropping it deletes it
+// rather than moving it somewhere better. What stays out is anything we would be guessing: no "then
+// try again", no theory about why the grant is missing.
+export const CALENDAR_SUMMARIES = {
+	denied:
+		"Could not read your calendar: macOS denied access to Calendar. " +
+		grantSentence("Calendars", "Automation > Calendar"),
 	notRunning: "Could not read your calendar: the Calendar app could not be reached.",
 	timedOut: "Could not read your calendar: Calendar did not answer in time.",
 	failed: "Could not read your calendar.",
 };
-const CALENDAR_OPEN_SUMMARIES = {
-	denied: "Could not open the event: macOS denied access to Calendar.",
+export const CALENDAR_OPEN_SUMMARIES = {
+	denied:
+		"Could not open the event: macOS denied access to Calendar. " +
+		grantSentence("Calendars", "Automation > Calendar"),
 	notRunning: "Could not open the event: the Calendar app could not be reached.",
 	timedOut: "Could not open the event: Calendar did not answer in time.",
 	failed: "Could not open the event.",
 };
-const CALENDAR_CREATE_SUMMARIES = {
-	denied: "Could not create the event: macOS denied access to Calendar.",
+export const CALENDAR_CREATE_SUMMARIES = {
+	denied:
+		"Could not create the event: macOS denied access to Calendar. " +
+		grantSentence("Calendars", "Automation > Calendar"),
 	notRunning: "Could not create the event: the Calendar app could not be reached.",
 	timedOut: "Could not create the event: Calendar did not answer in time.",
 	failed: "Could not create the event.",

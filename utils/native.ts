@@ -15,6 +15,38 @@ import { PermissionError, ToolFailure, rawBody } from "./failure";
 export { PermissionError, ToolFailure };
 
 /**
+ * The name to use when a permission sentence has to tell somebody which app to enable.
+ *
+ * Maestro passes `APPLE_MCP_APP_NAME` into this server for exactly this sentence and nothing else
+ * (see `appleConfig` in its `Sources/Models/Integration.swift`). Until now nothing here read it: the
+ * messages hardcoded "Faced", the product's PRE-RENAME name, so a denied grant told the user to
+ * enable "Faced" while the row in System Settings says "Maestro". Naming the wrong app is worse than
+ * naming none, because the user goes looking for something that is not there.
+ *
+ * Falls back to "this app" when the host did not say. Vague, and honest: the useful half of the
+ * sentence is WHICH PERMISSION, and that we always know.
+ */
+export function hostAppName(): string {
+	const name = (process.env.APPLE_MCP_APP_NAME || "").trim();
+	return name || "this app";
+}
+
+/**
+ * Name the permission that is missing, and the app to enable it for.
+ *
+ * This is a fact about the failure, not advice about the user's life. Only this server knows the call
+ * died for want of Full Disk Access rather than Automation, and nothing upstream can work that out
+ * from the outside, so leaving it unsaid deletes it rather than moving it up a layer. What stays out
+ * is anything we would be GUESSING: no "then try again", no "reconnect", no theory about why the
+ * grant is missing.
+ */
+export function grantSentence(...permissionPaths: string[]): string {
+	const [first, ...rest] = permissionPaths;
+	const tail = rest.map((p) => `, and under ${p}`).join("");
+	return `Enable ${hostAppName()} under System Settings > Privacy & Security > ${first}${tail}.`;
+}
+
+/**
  * Heuristic: does this error thrown by osascript / @jxa/run / run-applescript indicate a TCC
  * permission denial (as opposed to a transient or logic error)? AppleScript surfaces denials as
  * negative OSStatus codes; the strings vary by macOS version, so we match the stable codes plus the

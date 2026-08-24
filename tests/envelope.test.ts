@@ -10,7 +10,16 @@ import {
 	redactSecrets,
 	truncateBody,
 } from "../utils/failure";
-import { classifyAppleError, throwAppleFailure } from "../utils/native";
+import {
+	classifyAppleError,
+	grantSentence,
+	hostAppName,
+	throwAppleFailure,
+} from "../utils/native";
+
+// Set BEFORE any util module is imported: each builds its permission sentences at module load, and
+// every import of one below happens inside a test body. This is what Maestro passes in for real.
+process.env.APPLE_MCP_APP_NAME = "Maestro";
 
 // These tests exercise the failure envelope on paths that need NO Apple app and NO permission grant,
 // so they are the same on a developer's Mac, on a locked-down Mac and in CI. The JXA boundary is
@@ -101,17 +110,102 @@ describe("a TCC permission denial", () => {
 		);
 	});
 
-	test("carries no invented remedy: the server does not know what the user should do", () => {
+	test("names the app AND the specific permission, because only this server knows which", async () => {
+		const { CONTACTS_SUMMARIES } = await import("../utils/contacts");
 		const text = failureResultFrom(
-			new ToolFailure(
-				"permission_denied",
-				"Could not read your contacts: macOS denied access to Contacts.",
-			),
+			new ToolFailure("permission_denied", CONTACTS_SUMMARIES.denied),
 			"internal_error",
 			"unused",
 		).content[0].text;
-		expect(text).not.toContain("System Settings");
-		expect(text).not.toContain("try again");
+
+		// The app: Maestro passes APPLE_MCP_APP_NAME in for this sentence and nothing else. It used to
+		// be ignored, and the hardcoded name was "Faced", which is what the product was called BEFORE
+		// the rename. Sending somebody to System Settings to look for a row that is not there is worse
+		// than saying nothing.
+		expect(text).toContain("Maestro");
+		expect(text).not.toContain("Faced");
+		// The permission: Contacts, not Automation, not Full Disk Access.
+		expect(text).toContain("Contacts");
+		expect(text).toContain("System Settings");
+	});
+
+	test("still guesses nothing: no try again, no reconnect", async () => {
+		const { CONTACTS_SUMMARIES } = await import("../utils/contacts");
+		for (const sentence of Object.values(CONTACTS_SUMMARIES)) {
+			expect(sentence.toLowerCase()).not.toContain("try again");
+			expect(sentence.toLowerCase()).not.toContain("reconnect");
+			expect(sentence.toLowerCase()).not.toContain("later");
+		}
+	});
+
+	// An invariant over EVERY denial sentence in the server, so a summaries object added later cannot
+	// quietly ship without naming what is missing.
+	test("EVERY denial sentence in the server names the app and a real macOS permission", async () => {
+		const contacts = await import("../utils/contacts");
+		const notes = await import("../utils/notes");
+		const reminders = await import("../utils/reminders");
+		const calendar = await import("../utils/calendar");
+		const message = await import("../utils/message");
+
+		const denials: Array<[string, string]> = [
+			["contacts", contacts.CONTACTS_SUMMARIES.denied],
+			["notes", notes.NOTES_SUMMARIES.denied],
+			["notes create", notes.NOTES_CREATE_SUMMARIES.denied],
+			["reminders", reminders.REMINDERS_SUMMARIES.denied],
+			["reminders create", reminders.REMINDERS_CREATE_SUMMARIES.denied],
+			["reminders open", reminders.REMINDERS_OPEN_SUMMARIES.denied],
+			["calendar", calendar.CALENDAR_SUMMARIES.denied],
+			["calendar open", calendar.CALENDAR_OPEN_SUMMARIES.denied],
+			["calendar create", calendar.CALENDAR_CREATE_SUMMARIES.denied],
+			["messages send", message.MESSAGES_SEND_SUMMARIES.denied],
+			["messages read", message.MESSAGES_READ_DENIED],
+		];
+
+		// One of these is the row a person has to find in System Settings.
+		const PERMISSIONS = [
+			"Full Disk Access",
+			"Automation",
+			"Contacts",
+			"Calendars",
+			"Reminders",
+		];
+
+		expect(denials.length).toBe(11);
+		for (const [what, sentence] of denials) {
+			expect(`${what}: ${sentence}`).toContain("Maestro");
+			expect(`${what}: ${sentence}`).toContain("System Settings");
+			expect(
+				`${what}: ${PERMISSIONS.some((p) => sentence.includes(p))}`,
+			).toBe(`${what}: true`);
+			// And it still says what did not happen FIRST, before any of that.
+			expect(sentence.startsWith("Could not ")).toBe(true);
+		}
+	});
+
+	test("reading Messages names Full Disk Access, which is the one that is NOT Automation", async () => {
+		const { MESSAGES_READ_DENIED } = await import("../utils/message");
+		expect(MESSAGES_READ_DENIED).toContain("Full Disk Access");
+		expect(MESSAGES_READ_DENIED).not.toContain("Automation");
+	});
+
+	test("with no host app name the permission is still named, the app is just vague", () => {
+		const saved = process.env.APPLE_MCP_APP_NAME;
+		delete process.env.APPLE_MCP_APP_NAME;
+		try {
+			expect(hostAppName()).toBe("this app");
+			expect(grantSentence("Full Disk Access")).toBe(
+				"Enable this app under System Settings > Privacy & Security > Full Disk Access.",
+			);
+		} finally {
+			process.env.APPLE_MCP_APP_NAME = saved;
+		}
+	});
+
+	test("grantSentence names the host app and chains a second permission path", () => {
+		expect(grantSentence("Contacts", "Automation > Contacts")).toBe(
+			"Enable Maestro under System Settings > Privacy & Security > Contacts, " +
+				"and under Automation > Contacts.",
+		);
 	});
 
 	test("an app that is not running is a DIFFERENT code, because it wants a different answer", () => {
