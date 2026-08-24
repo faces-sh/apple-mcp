@@ -3,11 +3,14 @@ import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 import { access } from "node:fs/promises";
 import {
-	PermissionError,
-	rethrowIfPermissionDenied,
+	ToolFailure,
+	grantSentence,
+	isPermissionDenial,
+	throwAppleFailure,
 	escapeAppleScriptString,
 	escapeSqlString,
 } from "./native";
+import { rawBody } from "./failure";
 import { handleCandidates } from "./phone";
 
 // Run sqlite3 via execFile (argv vector, NO shell) so the chat.db path and the SQL text are never
@@ -16,12 +19,27 @@ import { handleCandidates } from "./phone";
 const execFileAsync = promisify(execFile);
 const CHAT_DB = `${process.env.HOME}/Library/Messages/chat.db`;
 
-const MESSAGES_DB_DENIED =
-	"Messages access is not granted. Reading message history needs Full Disk Access: in System " +
-	"Settings ▸ Privacy & Security ▸ Full Disk Access, enable Faced, then try again.";
-const MESSAGES_SEND_DENIED =
-	"Messages access is not granted. In System Settings ▸ Privacy & Security ▸ Automation, allow " +
-	"Faced to control Messages, then try again.";
+// The one sentence each outcome puts on line 1 of the envelope. It says WHAT DID NOT HAPPEN, and for
+// a denial it also NAMES the permission that is missing and the app to enable it for.
+//
+// Naming it is not inventing a remedy. Only this server can tell a denied Automation grant from a
+// denied Contacts one, so nothing upstream could reconstruct that sentence, and dropping it deletes it
+// rather than moving it somewhere better. What stays out is anything we would be guessing: no "then
+// try again", no theory about why the grant is missing.
+export const MESSAGES_SEND_SUMMARIES = {
+	denied:
+		"Could not send the message: macOS denied control of Messages. " +
+		grantSentence("Automation > Messages"),
+	notRunning: "Could not send the message: the Messages app could not be reached.",
+	timedOut: "Could not send the message: Messages did not answer in time.",
+	failed: "Could not send the message.",
+};
+// Reading chat.db is the ONE thing here that needs Full Disk Access rather than Automation, and this
+// server is the only place that knows it. Say which.
+export const MESSAGES_READ_DENIED =
+	"Could not read your message history: macOS denied access to the Messages database. " +
+	grantSentence("Full Disk Access");
+const MESSAGES_READ_FAILED = "Could not read your message history.";
 
 // Configuration
 const CONFIG = {
@@ -79,7 +97,7 @@ tell application "Messages"
     send "${body}" to targetBuddy
 end tell`);
 	} catch (error) {
-		rethrowIfPermissionDenied(error, MESSAGES_SEND_DENIED);
+		throwAppleFailure(error, MESSAGES_SEND_SUMMARIES);
 	}
 }
 
@@ -92,29 +110,60 @@ interface Message {
 	url?: string;
 }
 
-async function checkMessagesDBAccess(): Promise<boolean> {
-	try {
-		await access(CHAT_DB);
-		// Confirm we can actually read it (Full Disk Access), not just that the file exists.
-		await execFileAsync("sqlite3", [CHAT_DB, "SELECT 1;"]);
-		return true;
-	} catch (error) {
-		console.error(
-			`Cannot read the Messages database (${CHAT_DB}): ${
-				error instanceof Error ? error.message : String(error)
-			}`,
-		);
-		return false;
+/**
+ * Turn a failure out of sqlite3 (or out of `access`) into a typed `ToolFailure`.
+ *
+ * The distinction this draws is the whole point of the exercise. A denied Full Disk Access, a chat.db
+ * that does not exist, a chat.db that is corrupt, and a missing `sqlite3` binary are four different
+ * situations with four different answers, and the old code collapsed all four into `return false` and
+ * then reported every one of them as "grant Full Disk Access". Worse, sqlite3's own words, the only
+ * thing that could have told them apart, were written to stderr and dropped. Now the code says which
+ * of the four it was and the body carries what sqlite3 actually said, uninterpreted.
+ */
+function throwMessagesDbFailure(error: unknown, summary: string): never {
+	if (error instanceof ToolFailure) throw error;
+	const body = rawBody(error);
+	const text = body.toLowerCase();
+	const code = (error as { code?: unknown } | null)?.code;
+
+	// The Full Disk Access shape: the file is there, sqlite3 is refused when it opens it.
+	if (
+		isPermissionDenial(error) ||
+		code === "EACCES" ||
+		code === "EPERM" ||
+		text.includes("unable to open database file") ||
+		text.includes("authorization denied") ||
+		text.includes("operation not permitted")
+	) {
+		throw new ToolFailure("permission_denied", MESSAGES_READ_DENIED, body);
 	}
+	// No chat.db at all: Messages has never stored anything on this Mac.
+	if (code === "ENOENT" && !text.includes("sqlite3")) {
+		throw new ToolFailure(
+			"not_found",
+			`Could not read your message history: there is no Messages database at ${CHAT_DB}.`,
+			body,
+		);
+	}
+	throw new ToolFailure("database_error", summary, body);
 }
 
 /**
- * Verify Messages history is readable; throws PermissionError (never returns empty) when it is not,
- * so a denied Full Disk Access is surfaced rather than masquerading as "no messages".
+ * Verify Messages history is readable. Throws (never returns empty) when it is not, so a denied Full
+ * Disk Access is surfaced rather than masquerading as "no messages".
  */
 async function ensureMessagesDBAccess(): Promise<void> {
-	if (await checkMessagesDBAccess()) return;
-	throw new PermissionError(MESSAGES_DB_DENIED);
+	try {
+		await access(CHAT_DB);
+	} catch (error) {
+		throwMessagesDbFailure(error, MESSAGES_READ_FAILED);
+	}
+	try {
+		// Confirm we can actually read it (Full Disk Access), not just that the file exists.
+		await execFileAsync("sqlite3", [CHAT_DB, "SELECT 1;"]);
+	} catch (error) {
+		throwMessagesDbFailure(error, MESSAGES_READ_FAILED);
+	}
 }
 
 function decodeAttributedBody(hexString: string): { text: string; url?: string } {
@@ -202,9 +251,14 @@ function decodeAttributedBody(hexString: string): { text: string; url?: string }
 
 async function getAttachmentPaths(messageId: number): Promise<string[]> {
 	// messageId originates from the DB as a number; guard anyway before interpolation.
-	if (!Number.isInteger(messageId)) return [];
-	try {
-		const query = `
+	if (!Number.isInteger(messageId)) {
+		throw new ToolFailure(
+			"internal_error",
+			"Could not read the message attachments: the message id was not a number.",
+			String(messageId),
+		);
+	}
+	const query = `
             SELECT filename
             FROM attachment
             INNER JOIN message_attachment_join
@@ -212,17 +266,31 @@ async function getAttachmentPaths(messageId: number): Promise<string[]> {
             WHERE message_attachment_join.message_id = ${messageId}
         `;
 
-		const { stdout } = await execFileAsync("sqlite3", ["-json", CHAT_DB, query]);
+	let stdout: string;
+	try {
+		// A failure here USED TO return an empty array, which meant a message with attachments came
+		// back saying it had none: a broken query reported as a fact about the conversation. It throws
+		// now, with sqlite3's own complaint as the body.
+		({ stdout } = await execFileAsync("sqlite3", ["-json", CHAT_DB, query]));
+	} catch (error) {
+		throwMessagesDbFailure(
+			error,
+			"Could not read the message attachments.",
+		);
+	}
 
-		if (!stdout.trim()) {
-			return [];
-		}
+	// Genuinely no attachment rows. sqlite3 prints nothing for an empty result set.
+	if (!stdout.trim()) return [];
 
+	try {
 		const attachments = JSON.parse(stdout) as { filename: string }[];
 		return attachments.map((a) => a.filename).filter(Boolean);
 	} catch (error) {
-		console.error("Error getting attachments:", error);
-		return [];
+		throw new ToolFailure(
+			"database_error",
+			"Could not read the message attachments: sqlite3 returned something that is not JSON.",
+			rawBody(error),
+		);
 	}
 }
 
@@ -230,11 +298,18 @@ async function readMessages(phoneNumber: string, limit = 10): Promise<Message[]>
 	try {
 		const maxLimit = clampLimit(limit);
 
-		await ensureMessagesDBAccess(); // throws PermissionError when FDA is not granted
+		await ensureMessagesDBAccess(); // throws ToolFailure when the store is unreadable
 
 		// All handle forms (E.164 / national digits / email) to match chat.db's handle.id
 		const phoneFormats = handleCandidates(phoneNumber);
-		if (phoneFormats.length === 0) return [];
+		if (phoneFormats.length === 0) {
+			// Nothing to look up. Returning [] here said "no messages with that person", which is a
+			// claim about the conversation; the truth is that the handle was never usable.
+			throw new ToolFailure(
+				"bad_request",
+				`Could not read your messages: "${phoneNumber}" is not a usable phone number or email address.`,
+			);
+		}
 		console.error("Trying handle formats:", phoneFormats);
 
 		// Create SQL IN clause with all handle formats (each literal SQL-escaped)
@@ -292,10 +367,8 @@ async function readMessages(phoneNumber: string, limit = 10): Promise<Message[]>
 
 		return await formatMessages(messages);
 	} catch (error) {
-		if (error instanceof PermissionError) throw error;
-		// A sqlite/parse failure is a real fault — surface it, never pretend "no messages".
-		console.error("Error reading messages:", error);
-		rethrowIfPermissionDenied(error, MESSAGES_DB_DENIED);
+		// A sqlite/parse failure is a real fault: surface it, never pretend "no messages".
+		throwMessagesDbFailure(error, "Could not read your messages.");
 	}
 }
 
@@ -303,7 +376,7 @@ async function getUnreadMessages(limit = 10): Promise<Message[]> {
 	try {
 		const maxLimit = clampLimit(limit);
 
-		await ensureMessagesDBAccess(); // throws PermissionError when FDA is not granted
+		await ensureMessagesDBAccess(); // throws ToolFailure when the store is unreadable
 
 		const query = `
             SELECT
@@ -355,9 +428,7 @@ async function getUnreadMessages(limit = 10): Promise<Message[]> {
 
 		return await formatMessages(messages);
 	} catch (error) {
-		if (error instanceof PermissionError) throw error;
-		console.error("Error reading unread messages:", error);
-		rethrowIfPermissionDenied(error, MESSAGES_DB_DENIED);
+		throwMessagesDbFailure(error, "Could not read your unread messages.");
 	}
 }
 
@@ -435,15 +506,26 @@ async function scheduleMessage(
 	const delay = scheduledTime.getTime() - Date.now();
 
 	if (delay < 0) {
-		throw new Error("Cannot schedule message in the past");
+		throw new ToolFailure(
+			"bad_request",
+			"Could not schedule the message: the time given is in the past.",
+		);
 	}
 
-	// Schedule the message
+	// Schedule the message.
+	//
+	// KNOWN GAP, and it is a real one: the tool has already returned by the time this fires, so a send
+	// that fails later has no envelope to travel on and nobody is listening for one. All this can do is
+	// say so as loudly as a detached process can. Closing it properly means the schedule tool reporting
+	// back out of band, which is a change to what the tool IS and not an error path, so it is written
+	// down here rather than half-done.
 	const timeoutId = setTimeout(async () => {
 		try {
 			await sendMessage(phoneNumber, message);
 		} catch (error) {
-			console.error("Failed to send scheduled message:", error);
+			console.error(
+				`[scheduled_send_failed] The scheduled message to ${phoneNumber} was not sent.\n${rawBody(error)}`,
+			);
 		}
 	}, delay);
 
