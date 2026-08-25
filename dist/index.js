@@ -6977,1214 +6977,6 @@ var init_failure = __esm({
   }
 });
 
-// node_modules/semver/semver.js
-var require_semver = __commonJS({
-  "node_modules/semver/semver.js"(exports, module) {
-    exports = module.exports = SemVer;
-    var debug;
-    if (typeof process === "object" && process.env && process.env.NODE_DEBUG && /\bsemver\b/i.test(process.env.NODE_DEBUG)) {
-      debug = function() {
-        var args = Array.prototype.slice.call(arguments, 0);
-        args.unshift("SEMVER");
-        console.log.apply(console, args);
-      };
-    } else {
-      debug = function() {
-      };
-    }
-    exports.SEMVER_SPEC_VERSION = "2.0.0";
-    var MAX_LENGTH = 256;
-    var MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER || /* istanbul ignore next */
-    9007199254740991;
-    var MAX_SAFE_COMPONENT_LENGTH = 16;
-    var MAX_SAFE_BUILD_LENGTH = MAX_LENGTH - 6;
-    var re = exports.re = [];
-    var safeRe = exports.safeRe = [];
-    var src = exports.src = [];
-    var R = 0;
-    var LETTERDASHNUMBER = "[a-zA-Z0-9-]";
-    var safeRegexReplacements = [
-      ["\\s", 1],
-      ["\\d", MAX_LENGTH],
-      [LETTERDASHNUMBER, MAX_SAFE_BUILD_LENGTH]
-    ];
-    function makeSafeRe(value) {
-      for (var i2 = 0; i2 < safeRegexReplacements.length; i2++) {
-        var token = safeRegexReplacements[i2][0];
-        var max = safeRegexReplacements[i2][1];
-        value = value.split(token + "*").join(token + "{0," + max + "}").split(token + "+").join(token + "{1," + max + "}");
-      }
-      return value;
-    }
-    var NUMERICIDENTIFIER = R++;
-    src[NUMERICIDENTIFIER] = "0|[1-9]\\d*";
-    var NUMERICIDENTIFIERLOOSE = R++;
-    src[NUMERICIDENTIFIERLOOSE] = "\\d+";
-    var NONNUMERICIDENTIFIER = R++;
-    src[NONNUMERICIDENTIFIER] = "\\d*[a-zA-Z-]" + LETTERDASHNUMBER + "*";
-    var MAINVERSION = R++;
-    src[MAINVERSION] = "(" + src[NUMERICIDENTIFIER] + ")\\.(" + src[NUMERICIDENTIFIER] + ")\\.(" + src[NUMERICIDENTIFIER] + ")";
-    var MAINVERSIONLOOSE = R++;
-    src[MAINVERSIONLOOSE] = "(" + src[NUMERICIDENTIFIERLOOSE] + ")\\.(" + src[NUMERICIDENTIFIERLOOSE] + ")\\.(" + src[NUMERICIDENTIFIERLOOSE] + ")";
-    var PRERELEASEIDENTIFIER = R++;
-    src[PRERELEASEIDENTIFIER] = "(?:" + src[NUMERICIDENTIFIER] + "|" + src[NONNUMERICIDENTIFIER] + ")";
-    var PRERELEASEIDENTIFIERLOOSE = R++;
-    src[PRERELEASEIDENTIFIERLOOSE] = "(?:" + src[NUMERICIDENTIFIERLOOSE] + "|" + src[NONNUMERICIDENTIFIER] + ")";
-    var PRERELEASE = R++;
-    src[PRERELEASE] = "(?:-(" + src[PRERELEASEIDENTIFIER] + "(?:\\." + src[PRERELEASEIDENTIFIER] + ")*))";
-    var PRERELEASELOOSE = R++;
-    src[PRERELEASELOOSE] = "(?:-?(" + src[PRERELEASEIDENTIFIERLOOSE] + "(?:\\." + src[PRERELEASEIDENTIFIERLOOSE] + ")*))";
-    var BUILDIDENTIFIER = R++;
-    src[BUILDIDENTIFIER] = LETTERDASHNUMBER + "+";
-    var BUILD = R++;
-    src[BUILD] = "(?:\\+(" + src[BUILDIDENTIFIER] + "(?:\\." + src[BUILDIDENTIFIER] + ")*))";
-    var FULL = R++;
-    var FULLPLAIN = "v?" + src[MAINVERSION] + src[PRERELEASE] + "?" + src[BUILD] + "?";
-    src[FULL] = "^" + FULLPLAIN + "$";
-    var LOOSEPLAIN = "[v=\\s]*" + src[MAINVERSIONLOOSE] + src[PRERELEASELOOSE] + "?" + src[BUILD] + "?";
-    var LOOSE = R++;
-    src[LOOSE] = "^" + LOOSEPLAIN + "$";
-    var GTLT = R++;
-    src[GTLT] = "((?:<|>)?=?)";
-    var XRANGEIDENTIFIERLOOSE = R++;
-    src[XRANGEIDENTIFIERLOOSE] = src[NUMERICIDENTIFIERLOOSE] + "|x|X|\\*";
-    var XRANGEIDENTIFIER = R++;
-    src[XRANGEIDENTIFIER] = src[NUMERICIDENTIFIER] + "|x|X|\\*";
-    var XRANGEPLAIN = R++;
-    src[XRANGEPLAIN] = "[v=\\s]*(" + src[XRANGEIDENTIFIER] + ")(?:\\.(" + src[XRANGEIDENTIFIER] + ")(?:\\.(" + src[XRANGEIDENTIFIER] + ")(?:" + src[PRERELEASE] + ")?" + src[BUILD] + "?)?)?";
-    var XRANGEPLAINLOOSE = R++;
-    src[XRANGEPLAINLOOSE] = "[v=\\s]*(" + src[XRANGEIDENTIFIERLOOSE] + ")(?:\\.(" + src[XRANGEIDENTIFIERLOOSE] + ")(?:\\.(" + src[XRANGEIDENTIFIERLOOSE] + ")(?:" + src[PRERELEASELOOSE] + ")?" + src[BUILD] + "?)?)?";
-    var XRANGE = R++;
-    src[XRANGE] = "^" + src[GTLT] + "\\s*" + src[XRANGEPLAIN] + "$";
-    var XRANGELOOSE = R++;
-    src[XRANGELOOSE] = "^" + src[GTLT] + "\\s*" + src[XRANGEPLAINLOOSE] + "$";
-    var COERCE = R++;
-    src[COERCE] = "(?:^|[^\\d])(\\d{1," + MAX_SAFE_COMPONENT_LENGTH + "})(?:\\.(\\d{1," + MAX_SAFE_COMPONENT_LENGTH + "}))?(?:\\.(\\d{1," + MAX_SAFE_COMPONENT_LENGTH + "}))?(?:$|[^\\d])";
-    var LONETILDE = R++;
-    src[LONETILDE] = "(?:~>?)";
-    var TILDETRIM = R++;
-    src[TILDETRIM] = "(\\s*)" + src[LONETILDE] + "\\s+";
-    re[TILDETRIM] = new RegExp(src[TILDETRIM], "g");
-    safeRe[TILDETRIM] = new RegExp(makeSafeRe(src[TILDETRIM]), "g");
-    var tildeTrimReplace = "$1~";
-    var TILDE = R++;
-    src[TILDE] = "^" + src[LONETILDE] + src[XRANGEPLAIN] + "$";
-    var TILDELOOSE = R++;
-    src[TILDELOOSE] = "^" + src[LONETILDE] + src[XRANGEPLAINLOOSE] + "$";
-    var LONECARET = R++;
-    src[LONECARET] = "(?:\\^)";
-    var CARETTRIM = R++;
-    src[CARETTRIM] = "(\\s*)" + src[LONECARET] + "\\s+";
-    re[CARETTRIM] = new RegExp(src[CARETTRIM], "g");
-    safeRe[CARETTRIM] = new RegExp(makeSafeRe(src[CARETTRIM]), "g");
-    var caretTrimReplace = "$1^";
-    var CARET = R++;
-    src[CARET] = "^" + src[LONECARET] + src[XRANGEPLAIN] + "$";
-    var CARETLOOSE = R++;
-    src[CARETLOOSE] = "^" + src[LONECARET] + src[XRANGEPLAINLOOSE] + "$";
-    var COMPARATORLOOSE = R++;
-    src[COMPARATORLOOSE] = "^" + src[GTLT] + "\\s*(" + LOOSEPLAIN + ")$|^$";
-    var COMPARATOR = R++;
-    src[COMPARATOR] = "^" + src[GTLT] + "\\s*(" + FULLPLAIN + ")$|^$";
-    var COMPARATORTRIM = R++;
-    src[COMPARATORTRIM] = "(\\s*)" + src[GTLT] + "\\s*(" + LOOSEPLAIN + "|" + src[XRANGEPLAIN] + ")";
-    re[COMPARATORTRIM] = new RegExp(src[COMPARATORTRIM], "g");
-    safeRe[COMPARATORTRIM] = new RegExp(makeSafeRe(src[COMPARATORTRIM]), "g");
-    var comparatorTrimReplace = "$1$2$3";
-    var HYPHENRANGE = R++;
-    src[HYPHENRANGE] = "^\\s*(" + src[XRANGEPLAIN] + ")\\s+-\\s+(" + src[XRANGEPLAIN] + ")\\s*$";
-    var HYPHENRANGELOOSE = R++;
-    src[HYPHENRANGELOOSE] = "^\\s*(" + src[XRANGEPLAINLOOSE] + ")\\s+-\\s+(" + src[XRANGEPLAINLOOSE] + ")\\s*$";
-    var STAR = R++;
-    src[STAR] = "(<|>)?=?\\s*\\*";
-    for (i = 0; i < R; i++) {
-      debug(i, src[i]);
-      if (!re[i]) {
-        re[i] = new RegExp(src[i]);
-        safeRe[i] = new RegExp(makeSafeRe(src[i]));
-      }
-    }
-    var i;
-    exports.parse = parse4;
-    function parse4(version2, options) {
-      if (!options || typeof options !== "object") {
-        options = {
-          loose: !!options,
-          includePrerelease: false
-        };
-      }
-      if (version2 instanceof SemVer) {
-        return version2;
-      }
-      if (typeof version2 !== "string") {
-        return null;
-      }
-      if (version2.length > MAX_LENGTH) {
-        return null;
-      }
-      var r = options.loose ? safeRe[LOOSE] : safeRe[FULL];
-      if (!r.test(version2)) {
-        return null;
-      }
-      try {
-        return new SemVer(version2, options);
-      } catch (er) {
-        return null;
-      }
-    }
-    exports.valid = valid;
-    function valid(version2, options) {
-      var v = parse4(version2, options);
-      return v ? v.version : null;
-    }
-    exports.clean = clean;
-    function clean(version2, options) {
-      var s = parse4(version2.trim().replace(/^[=v]+/, ""), options);
-      return s ? s.version : null;
-    }
-    exports.SemVer = SemVer;
-    function SemVer(version2, options) {
-      if (!options || typeof options !== "object") {
-        options = {
-          loose: !!options,
-          includePrerelease: false
-        };
-      }
-      if (version2 instanceof SemVer) {
-        if (version2.loose === options.loose) {
-          return version2;
-        } else {
-          version2 = version2.version;
-        }
-      } else if (typeof version2 !== "string") {
-        throw new TypeError("Invalid Version: " + version2);
-      }
-      if (version2.length > MAX_LENGTH) {
-        throw new TypeError("version is longer than " + MAX_LENGTH + " characters");
-      }
-      if (!(this instanceof SemVer)) {
-        return new SemVer(version2, options);
-      }
-      debug("SemVer", version2, options);
-      this.options = options;
-      this.loose = !!options.loose;
-      var m = version2.trim().match(options.loose ? safeRe[LOOSE] : safeRe[FULL]);
-      if (!m) {
-        throw new TypeError("Invalid Version: " + version2);
-      }
-      this.raw = version2;
-      this.major = +m[1];
-      this.minor = +m[2];
-      this.patch = +m[3];
-      if (this.major > MAX_SAFE_INTEGER || this.major < 0) {
-        throw new TypeError("Invalid major version");
-      }
-      if (this.minor > MAX_SAFE_INTEGER || this.minor < 0) {
-        throw new TypeError("Invalid minor version");
-      }
-      if (this.patch > MAX_SAFE_INTEGER || this.patch < 0) {
-        throw new TypeError("Invalid patch version");
-      }
-      if (!m[4]) {
-        this.prerelease = [];
-      } else {
-        this.prerelease = m[4].split(".").map(function(id) {
-          if (/^[0-9]+$/.test(id)) {
-            var num = +id;
-            if (num >= 0 && num < MAX_SAFE_INTEGER) {
-              return num;
-            }
-          }
-          return id;
-        });
-      }
-      this.build = m[5] ? m[5].split(".") : [];
-      this.format();
-    }
-    SemVer.prototype.format = function() {
-      this.version = this.major + "." + this.minor + "." + this.patch;
-      if (this.prerelease.length) {
-        this.version += "-" + this.prerelease.join(".");
-      }
-      return this.version;
-    };
-    SemVer.prototype.toString = function() {
-      return this.version;
-    };
-    SemVer.prototype.compare = function(other) {
-      debug("SemVer.compare", this.version, this.options, other);
-      if (!(other instanceof SemVer)) {
-        other = new SemVer(other, this.options);
-      }
-      return this.compareMain(other) || this.comparePre(other);
-    };
-    SemVer.prototype.compareMain = function(other) {
-      if (!(other instanceof SemVer)) {
-        other = new SemVer(other, this.options);
-      }
-      return compareIdentifiers(this.major, other.major) || compareIdentifiers(this.minor, other.minor) || compareIdentifiers(this.patch, other.patch);
-    };
-    SemVer.prototype.comparePre = function(other) {
-      if (!(other instanceof SemVer)) {
-        other = new SemVer(other, this.options);
-      }
-      if (this.prerelease.length && !other.prerelease.length) {
-        return -1;
-      } else if (!this.prerelease.length && other.prerelease.length) {
-        return 1;
-      } else if (!this.prerelease.length && !other.prerelease.length) {
-        return 0;
-      }
-      var i2 = 0;
-      do {
-        var a = this.prerelease[i2];
-        var b = other.prerelease[i2];
-        debug("prerelease compare", i2, a, b);
-        if (a === void 0 && b === void 0) {
-          return 0;
-        } else if (b === void 0) {
-          return 1;
-        } else if (a === void 0) {
-          return -1;
-        } else if (a === b) {
-          continue;
-        } else {
-          return compareIdentifiers(a, b);
-        }
-      } while (++i2);
-    };
-    SemVer.prototype.inc = function(release, identifier) {
-      switch (release) {
-        case "premajor":
-          this.prerelease.length = 0;
-          this.patch = 0;
-          this.minor = 0;
-          this.major++;
-          this.inc("pre", identifier);
-          break;
-        case "preminor":
-          this.prerelease.length = 0;
-          this.patch = 0;
-          this.minor++;
-          this.inc("pre", identifier);
-          break;
-        case "prepatch":
-          this.prerelease.length = 0;
-          this.inc("patch", identifier);
-          this.inc("pre", identifier);
-          break;
-        // If the input is a non-prerelease version, this acts the same as
-        // prepatch.
-        case "prerelease":
-          if (this.prerelease.length === 0) {
-            this.inc("patch", identifier);
-          }
-          this.inc("pre", identifier);
-          break;
-        case "major":
-          if (this.minor !== 0 || this.patch !== 0 || this.prerelease.length === 0) {
-            this.major++;
-          }
-          this.minor = 0;
-          this.patch = 0;
-          this.prerelease = [];
-          break;
-        case "minor":
-          if (this.patch !== 0 || this.prerelease.length === 0) {
-            this.minor++;
-          }
-          this.patch = 0;
-          this.prerelease = [];
-          break;
-        case "patch":
-          if (this.prerelease.length === 0) {
-            this.patch++;
-          }
-          this.prerelease = [];
-          break;
-        // This probably shouldn't be used publicly.
-        // 1.0.0 "pre" would become 1.0.0-0 which is the wrong direction.
-        case "pre":
-          if (this.prerelease.length === 0) {
-            this.prerelease = [0];
-          } else {
-            var i2 = this.prerelease.length;
-            while (--i2 >= 0) {
-              if (typeof this.prerelease[i2] === "number") {
-                this.prerelease[i2]++;
-                i2 = -2;
-              }
-            }
-            if (i2 === -1) {
-              this.prerelease.push(0);
-            }
-          }
-          if (identifier) {
-            if (this.prerelease[0] === identifier) {
-              if (isNaN(this.prerelease[1])) {
-                this.prerelease = [identifier, 0];
-              }
-            } else {
-              this.prerelease = [identifier, 0];
-            }
-          }
-          break;
-        default:
-          throw new Error("invalid increment argument: " + release);
-      }
-      this.format();
-      this.raw = this.version;
-      return this;
-    };
-    exports.inc = inc;
-    function inc(version2, release, loose, identifier) {
-      if (typeof loose === "string") {
-        identifier = loose;
-        loose = void 0;
-      }
-      try {
-        return new SemVer(version2, loose).inc(release, identifier).version;
-      } catch (er) {
-        return null;
-      }
-    }
-    exports.diff = diff;
-    function diff(version1, version2) {
-      if (eq(version1, version2)) {
-        return null;
-      } else {
-        var v1 = parse4(version1);
-        var v2 = parse4(version2);
-        var prefix = "";
-        if (v1.prerelease.length || v2.prerelease.length) {
-          prefix = "pre";
-          var defaultResult = "prerelease";
-        }
-        for (var key in v1) {
-          if (key === "major" || key === "minor" || key === "patch") {
-            if (v1[key] !== v2[key]) {
-              return prefix + key;
-            }
-          }
-        }
-        return defaultResult;
-      }
-    }
-    exports.compareIdentifiers = compareIdentifiers;
-    var numeric = /^[0-9]+$/;
-    function compareIdentifiers(a, b) {
-      var anum = numeric.test(a);
-      var bnum = numeric.test(b);
-      if (anum && bnum) {
-        a = +a;
-        b = +b;
-      }
-      return a === b ? 0 : anum && !bnum ? -1 : bnum && !anum ? 1 : a < b ? -1 : 1;
-    }
-    exports.rcompareIdentifiers = rcompareIdentifiers;
-    function rcompareIdentifiers(a, b) {
-      return compareIdentifiers(b, a);
-    }
-    exports.major = major;
-    function major(a, loose) {
-      return new SemVer(a, loose).major;
-    }
-    exports.minor = minor;
-    function minor(a, loose) {
-      return new SemVer(a, loose).minor;
-    }
-    exports.patch = patch;
-    function patch(a, loose) {
-      return new SemVer(a, loose).patch;
-    }
-    exports.compare = compare;
-    function compare(a, b, loose) {
-      return new SemVer(a, loose).compare(new SemVer(b, loose));
-    }
-    exports.compareLoose = compareLoose;
-    function compareLoose(a, b) {
-      return compare(a, b, true);
-    }
-    exports.rcompare = rcompare;
-    function rcompare(a, b, loose) {
-      return compare(b, a, loose);
-    }
-    exports.sort = sort;
-    function sort(list, loose) {
-      return list.sort(function(a, b) {
-        return exports.compare(a, b, loose);
-      });
-    }
-    exports.rsort = rsort;
-    function rsort(list, loose) {
-      return list.sort(function(a, b) {
-        return exports.rcompare(a, b, loose);
-      });
-    }
-    exports.gt = gt;
-    function gt(a, b, loose) {
-      return compare(a, b, loose) > 0;
-    }
-    exports.lt = lt;
-    function lt(a, b, loose) {
-      return compare(a, b, loose) < 0;
-    }
-    exports.eq = eq;
-    function eq(a, b, loose) {
-      return compare(a, b, loose) === 0;
-    }
-    exports.neq = neq;
-    function neq(a, b, loose) {
-      return compare(a, b, loose) !== 0;
-    }
-    exports.gte = gte;
-    function gte(a, b, loose) {
-      return compare(a, b, loose) >= 0;
-    }
-    exports.lte = lte;
-    function lte(a, b, loose) {
-      return compare(a, b, loose) <= 0;
-    }
-    exports.cmp = cmp;
-    function cmp(a, op, b, loose) {
-      switch (op) {
-        case "===":
-          if (typeof a === "object")
-            a = a.version;
-          if (typeof b === "object")
-            b = b.version;
-          return a === b;
-        case "!==":
-          if (typeof a === "object")
-            a = a.version;
-          if (typeof b === "object")
-            b = b.version;
-          return a !== b;
-        case "":
-        case "=":
-        case "==":
-          return eq(a, b, loose);
-        case "!=":
-          return neq(a, b, loose);
-        case ">":
-          return gt(a, b, loose);
-        case ">=":
-          return gte(a, b, loose);
-        case "<":
-          return lt(a, b, loose);
-        case "<=":
-          return lte(a, b, loose);
-        default:
-          throw new TypeError("Invalid operator: " + op);
-      }
-    }
-    exports.Comparator = Comparator;
-    function Comparator(comp, options) {
-      if (!options || typeof options !== "object") {
-        options = {
-          loose: !!options,
-          includePrerelease: false
-        };
-      }
-      if (comp instanceof Comparator) {
-        if (comp.loose === !!options.loose) {
-          return comp;
-        } else {
-          comp = comp.value;
-        }
-      }
-      if (!(this instanceof Comparator)) {
-        return new Comparator(comp, options);
-      }
-      comp = comp.trim().split(/\s+/).join(" ");
-      debug("comparator", comp, options);
-      this.options = options;
-      this.loose = !!options.loose;
-      this.parse(comp);
-      if (this.semver === ANY) {
-        this.value = "";
-      } else {
-        this.value = this.operator + this.semver.version;
-      }
-      debug("comp", this);
-    }
-    var ANY = {};
-    Comparator.prototype.parse = function(comp) {
-      var r = this.options.loose ? safeRe[COMPARATORLOOSE] : safeRe[COMPARATOR];
-      var m = comp.match(r);
-      if (!m) {
-        throw new TypeError("Invalid comparator: " + comp);
-      }
-      this.operator = m[1];
-      if (this.operator === "=") {
-        this.operator = "";
-      }
-      if (!m[2]) {
-        this.semver = ANY;
-      } else {
-        this.semver = new SemVer(m[2], this.options.loose);
-      }
-    };
-    Comparator.prototype.toString = function() {
-      return this.value;
-    };
-    Comparator.prototype.test = function(version2) {
-      debug("Comparator.test", version2, this.options.loose);
-      if (this.semver === ANY) {
-        return true;
-      }
-      if (typeof version2 === "string") {
-        version2 = new SemVer(version2, this.options);
-      }
-      return cmp(version2, this.operator, this.semver, this.options);
-    };
-    Comparator.prototype.intersects = function(comp, options) {
-      if (!(comp instanceof Comparator)) {
-        throw new TypeError("a Comparator is required");
-      }
-      if (!options || typeof options !== "object") {
-        options = {
-          loose: !!options,
-          includePrerelease: false
-        };
-      }
-      var rangeTmp;
-      if (this.operator === "") {
-        rangeTmp = new Range(comp.value, options);
-        return satisfies(this.value, rangeTmp, options);
-      } else if (comp.operator === "") {
-        rangeTmp = new Range(this.value, options);
-        return satisfies(comp.semver, rangeTmp, options);
-      }
-      var sameDirectionIncreasing = (this.operator === ">=" || this.operator === ">") && (comp.operator === ">=" || comp.operator === ">");
-      var sameDirectionDecreasing = (this.operator === "<=" || this.operator === "<") && (comp.operator === "<=" || comp.operator === "<");
-      var sameSemVer = this.semver.version === comp.semver.version;
-      var differentDirectionsInclusive = (this.operator === ">=" || this.operator === "<=") && (comp.operator === ">=" || comp.operator === "<=");
-      var oppositeDirectionsLessThan = cmp(this.semver, "<", comp.semver, options) && ((this.operator === ">=" || this.operator === ">") && (comp.operator === "<=" || comp.operator === "<"));
-      var oppositeDirectionsGreaterThan = cmp(this.semver, ">", comp.semver, options) && ((this.operator === "<=" || this.operator === "<") && (comp.operator === ">=" || comp.operator === ">"));
-      return sameDirectionIncreasing || sameDirectionDecreasing || sameSemVer && differentDirectionsInclusive || oppositeDirectionsLessThan || oppositeDirectionsGreaterThan;
-    };
-    exports.Range = Range;
-    function Range(range, options) {
-      if (!options || typeof options !== "object") {
-        options = {
-          loose: !!options,
-          includePrerelease: false
-        };
-      }
-      if (range instanceof Range) {
-        if (range.loose === !!options.loose && range.includePrerelease === !!options.includePrerelease) {
-          return range;
-        } else {
-          return new Range(range.raw, options);
-        }
-      }
-      if (range instanceof Comparator) {
-        return new Range(range.value, options);
-      }
-      if (!(this instanceof Range)) {
-        return new Range(range, options);
-      }
-      this.options = options;
-      this.loose = !!options.loose;
-      this.includePrerelease = !!options.includePrerelease;
-      this.raw = range.trim().split(/\s+/).join(" ");
-      this.set = this.raw.split("||").map(function(range2) {
-        return this.parseRange(range2.trim());
-      }, this).filter(function(c) {
-        return c.length;
-      });
-      if (!this.set.length) {
-        throw new TypeError("Invalid SemVer Range: " + this.raw);
-      }
-      this.format();
-    }
-    Range.prototype.format = function() {
-      this.range = this.set.map(function(comps) {
-        return comps.join(" ").trim();
-      }).join("||").trim();
-      return this.range;
-    };
-    Range.prototype.toString = function() {
-      return this.range;
-    };
-    Range.prototype.parseRange = function(range) {
-      var loose = this.options.loose;
-      var hr = loose ? safeRe[HYPHENRANGELOOSE] : safeRe[HYPHENRANGE];
-      range = range.replace(hr, hyphenReplace);
-      debug("hyphen replace", range);
-      range = range.replace(safeRe[COMPARATORTRIM], comparatorTrimReplace);
-      debug("comparator trim", range, safeRe[COMPARATORTRIM]);
-      range = range.replace(safeRe[TILDETRIM], tildeTrimReplace);
-      range = range.replace(safeRe[CARETTRIM], caretTrimReplace);
-      var compRe = loose ? safeRe[COMPARATORLOOSE] : safeRe[COMPARATOR];
-      var set = range.split(" ").map(function(comp) {
-        return parseComparator(comp, this.options);
-      }, this).join(" ").split(/\s+/);
-      if (this.options.loose) {
-        set = set.filter(function(comp) {
-          return !!comp.match(compRe);
-        });
-      }
-      set = set.map(function(comp) {
-        return new Comparator(comp, this.options);
-      }, this);
-      return set;
-    };
-    Range.prototype.intersects = function(range, options) {
-      if (!(range instanceof Range)) {
-        throw new TypeError("a Range is required");
-      }
-      return this.set.some(function(thisComparators) {
-        return thisComparators.every(function(thisComparator) {
-          return range.set.some(function(rangeComparators) {
-            return rangeComparators.every(function(rangeComparator) {
-              return thisComparator.intersects(rangeComparator, options);
-            });
-          });
-        });
-      });
-    };
-    exports.toComparators = toComparators;
-    function toComparators(range, options) {
-      return new Range(range, options).set.map(function(comp) {
-        return comp.map(function(c) {
-          return c.value;
-        }).join(" ").trim().split(" ");
-      });
-    }
-    function parseComparator(comp, options) {
-      debug("comp", comp, options);
-      comp = replaceCarets(comp, options);
-      debug("caret", comp);
-      comp = replaceTildes(comp, options);
-      debug("tildes", comp);
-      comp = replaceXRanges(comp, options);
-      debug("xrange", comp);
-      comp = replaceStars(comp, options);
-      debug("stars", comp);
-      return comp;
-    }
-    function isX(id) {
-      return !id || id.toLowerCase() === "x" || id === "*";
-    }
-    function replaceTildes(comp, options) {
-      return comp.trim().split(/\s+/).map(function(comp2) {
-        return replaceTilde(comp2, options);
-      }).join(" ");
-    }
-    function replaceTilde(comp, options) {
-      var r = options.loose ? safeRe[TILDELOOSE] : safeRe[TILDE];
-      return comp.replace(r, function(_, M, m, p, pr) {
-        debug("tilde", comp, _, M, m, p, pr);
-        var ret;
-        if (isX(M)) {
-          ret = "";
-        } else if (isX(m)) {
-          ret = ">=" + M + ".0.0 <" + (+M + 1) + ".0.0";
-        } else if (isX(p)) {
-          ret = ">=" + M + "." + m + ".0 <" + M + "." + (+m + 1) + ".0";
-        } else if (pr) {
-          debug("replaceTilde pr", pr);
-          ret = ">=" + M + "." + m + "." + p + "-" + pr + " <" + M + "." + (+m + 1) + ".0";
-        } else {
-          ret = ">=" + M + "." + m + "." + p + " <" + M + "." + (+m + 1) + ".0";
-        }
-        debug("tilde return", ret);
-        return ret;
-      });
-    }
-    function replaceCarets(comp, options) {
-      return comp.trim().split(/\s+/).map(function(comp2) {
-        return replaceCaret(comp2, options);
-      }).join(" ");
-    }
-    function replaceCaret(comp, options) {
-      debug("caret", comp, options);
-      var r = options.loose ? safeRe[CARETLOOSE] : safeRe[CARET];
-      return comp.replace(r, function(_, M, m, p, pr) {
-        debug("caret", comp, _, M, m, p, pr);
-        var ret;
-        if (isX(M)) {
-          ret = "";
-        } else if (isX(m)) {
-          ret = ">=" + M + ".0.0 <" + (+M + 1) + ".0.0";
-        } else if (isX(p)) {
-          if (M === "0") {
-            ret = ">=" + M + "." + m + ".0 <" + M + "." + (+m + 1) + ".0";
-          } else {
-            ret = ">=" + M + "." + m + ".0 <" + (+M + 1) + ".0.0";
-          }
-        } else if (pr) {
-          debug("replaceCaret pr", pr);
-          if (M === "0") {
-            if (m === "0") {
-              ret = ">=" + M + "." + m + "." + p + "-" + pr + " <" + M + "." + m + "." + (+p + 1);
-            } else {
-              ret = ">=" + M + "." + m + "." + p + "-" + pr + " <" + M + "." + (+m + 1) + ".0";
-            }
-          } else {
-            ret = ">=" + M + "." + m + "." + p + "-" + pr + " <" + (+M + 1) + ".0.0";
-          }
-        } else {
-          debug("no pr");
-          if (M === "0") {
-            if (m === "0") {
-              ret = ">=" + M + "." + m + "." + p + " <" + M + "." + m + "." + (+p + 1);
-            } else {
-              ret = ">=" + M + "." + m + "." + p + " <" + M + "." + (+m + 1) + ".0";
-            }
-          } else {
-            ret = ">=" + M + "." + m + "." + p + " <" + (+M + 1) + ".0.0";
-          }
-        }
-        debug("caret return", ret);
-        return ret;
-      });
-    }
-    function replaceXRanges(comp, options) {
-      debug("replaceXRanges", comp, options);
-      return comp.split(/\s+/).map(function(comp2) {
-        return replaceXRange(comp2, options);
-      }).join(" ");
-    }
-    function replaceXRange(comp, options) {
-      comp = comp.trim();
-      var r = options.loose ? safeRe[XRANGELOOSE] : safeRe[XRANGE];
-      return comp.replace(r, function(ret, gtlt, M, m, p, pr) {
-        debug("xRange", comp, ret, gtlt, M, m, p, pr);
-        var xM = isX(M);
-        var xm = xM || isX(m);
-        var xp = xm || isX(p);
-        var anyX = xp;
-        if (gtlt === "=" && anyX) {
-          gtlt = "";
-        }
-        if (xM) {
-          if (gtlt === ">" || gtlt === "<") {
-            ret = "<0.0.0";
-          } else {
-            ret = "*";
-          }
-        } else if (gtlt && anyX) {
-          if (xm) {
-            m = 0;
-          }
-          p = 0;
-          if (gtlt === ">") {
-            gtlt = ">=";
-            if (xm) {
-              M = +M + 1;
-              m = 0;
-              p = 0;
-            } else {
-              m = +m + 1;
-              p = 0;
-            }
-          } else if (gtlt === "<=") {
-            gtlt = "<";
-            if (xm) {
-              M = +M + 1;
-            } else {
-              m = +m + 1;
-            }
-          }
-          ret = gtlt + M + "." + m + "." + p;
-        } else if (xm) {
-          ret = ">=" + M + ".0.0 <" + (+M + 1) + ".0.0";
-        } else if (xp) {
-          ret = ">=" + M + "." + m + ".0 <" + M + "." + (+m + 1) + ".0";
-        }
-        debug("xRange return", ret);
-        return ret;
-      });
-    }
-    function replaceStars(comp, options) {
-      debug("replaceStars", comp, options);
-      return comp.trim().replace(safeRe[STAR], "");
-    }
-    function hyphenReplace($0, from, fM, fm, fp, fpr, fb, to, tM, tm, tp, tpr, tb) {
-      if (isX(fM)) {
-        from = "";
-      } else if (isX(fm)) {
-        from = ">=" + fM + ".0.0";
-      } else if (isX(fp)) {
-        from = ">=" + fM + "." + fm + ".0";
-      } else {
-        from = ">=" + from;
-      }
-      if (isX(tM)) {
-        to = "";
-      } else if (isX(tm)) {
-        to = "<" + (+tM + 1) + ".0.0";
-      } else if (isX(tp)) {
-        to = "<" + tM + "." + (+tm + 1) + ".0";
-      } else if (tpr) {
-        to = "<=" + tM + "." + tm + "." + tp + "-" + tpr;
-      } else {
-        to = "<=" + to;
-      }
-      return (from + " " + to).trim();
-    }
-    Range.prototype.test = function(version2) {
-      if (!version2) {
-        return false;
-      }
-      if (typeof version2 === "string") {
-        version2 = new SemVer(version2, this.options);
-      }
-      for (var i2 = 0; i2 < this.set.length; i2++) {
-        if (testSet(this.set[i2], version2, this.options)) {
-          return true;
-        }
-      }
-      return false;
-    };
-    function testSet(set, version2, options) {
-      for (var i2 = 0; i2 < set.length; i2++) {
-        if (!set[i2].test(version2)) {
-          return false;
-        }
-      }
-      if (version2.prerelease.length && !options.includePrerelease) {
-        for (i2 = 0; i2 < set.length; i2++) {
-          debug(set[i2].semver);
-          if (set[i2].semver === ANY) {
-            continue;
-          }
-          if (set[i2].semver.prerelease.length > 0) {
-            var allowed = set[i2].semver;
-            if (allowed.major === version2.major && allowed.minor === version2.minor && allowed.patch === version2.patch) {
-              return true;
-            }
-          }
-        }
-        return false;
-      }
-      return true;
-    }
-    exports.satisfies = satisfies;
-    function satisfies(version2, range, options) {
-      try {
-        range = new Range(range, options);
-      } catch (er) {
-        return false;
-      }
-      return range.test(version2);
-    }
-    exports.maxSatisfying = maxSatisfying;
-    function maxSatisfying(versions, range, options) {
-      var max = null;
-      var maxSV = null;
-      try {
-        var rangeObj = new Range(range, options);
-      } catch (er) {
-        return null;
-      }
-      versions.forEach(function(v) {
-        if (rangeObj.test(v)) {
-          if (!max || maxSV.compare(v) === -1) {
-            max = v;
-            maxSV = new SemVer(max, options);
-          }
-        }
-      });
-      return max;
-    }
-    exports.minSatisfying = minSatisfying;
-    function minSatisfying(versions, range, options) {
-      var min = null;
-      var minSV = null;
-      try {
-        var rangeObj = new Range(range, options);
-      } catch (er) {
-        return null;
-      }
-      versions.forEach(function(v) {
-        if (rangeObj.test(v)) {
-          if (!min || minSV.compare(v) === 1) {
-            min = v;
-            minSV = new SemVer(min, options);
-          }
-        }
-      });
-      return min;
-    }
-    exports.minVersion = minVersion;
-    function minVersion(range, loose) {
-      range = new Range(range, loose);
-      var minver = new SemVer("0.0.0");
-      if (range.test(minver)) {
-        return minver;
-      }
-      minver = new SemVer("0.0.0-0");
-      if (range.test(minver)) {
-        return minver;
-      }
-      minver = null;
-      for (var i2 = 0; i2 < range.set.length; ++i2) {
-        var comparators = range.set[i2];
-        comparators.forEach(function(comparator) {
-          var compver = new SemVer(comparator.semver.version);
-          switch (comparator.operator) {
-            case ">":
-              if (compver.prerelease.length === 0) {
-                compver.patch++;
-              } else {
-                compver.prerelease.push(0);
-              }
-              compver.raw = compver.format();
-            /* fallthrough */
-            case "":
-            case ">=":
-              if (!minver || gt(minver, compver)) {
-                minver = compver;
-              }
-              break;
-            case "<":
-            case "<=":
-              break;
-            /* istanbul ignore next */
-            default:
-              throw new Error("Unexpected operation: " + comparator.operator);
-          }
-        });
-      }
-      if (minver && range.test(minver)) {
-        return minver;
-      }
-      return null;
-    }
-    exports.validRange = validRange;
-    function validRange(range, options) {
-      try {
-        return new Range(range, options).range || "*";
-      } catch (er) {
-        return null;
-      }
-    }
-    exports.ltr = ltr;
-    function ltr(version2, range, options) {
-      return outside(version2, range, "<", options);
-    }
-    exports.gtr = gtr;
-    function gtr(version2, range, options) {
-      return outside(version2, range, ">", options);
-    }
-    exports.outside = outside;
-    function outside(version2, range, hilo, options) {
-      version2 = new SemVer(version2, options);
-      range = new Range(range, options);
-      var gtfn, ltefn, ltfn, comp, ecomp;
-      switch (hilo) {
-        case ">":
-          gtfn = gt;
-          ltefn = lte;
-          ltfn = lt;
-          comp = ">";
-          ecomp = ">=";
-          break;
-        case "<":
-          gtfn = lt;
-          ltefn = gte;
-          ltfn = gt;
-          comp = "<";
-          ecomp = "<=";
-          break;
-        default:
-          throw new TypeError('Must provide a hilo val of "<" or ">"');
-      }
-      if (satisfies(version2, range, options)) {
-        return false;
-      }
-      for (var i2 = 0; i2 < range.set.length; ++i2) {
-        var comparators = range.set[i2];
-        var high = null;
-        var low = null;
-        comparators.forEach(function(comparator) {
-          if (comparator.semver === ANY) {
-            comparator = new Comparator(">=0.0.0");
-          }
-          high = high || comparator;
-          low = low || comparator;
-          if (gtfn(comparator.semver, high.semver, options)) {
-            high = comparator;
-          } else if (ltfn(comparator.semver, low.semver, options)) {
-            low = comparator;
-          }
-        });
-        if (high.operator === comp || high.operator === ecomp) {
-          return false;
-        }
-        if ((!low.operator || low.operator === comp) && ltefn(version2, low.semver)) {
-          return false;
-        } else if (low.operator === ecomp && ltfn(version2, low.semver)) {
-          return false;
-        }
-      }
-      return true;
-    }
-    exports.prerelease = prerelease;
-    function prerelease(version2, options) {
-      var parsed = parse4(version2, options);
-      return parsed && parsed.prerelease.length ? parsed.prerelease : null;
-    }
-    exports.intersects = intersects;
-    function intersects(r1, r2, options) {
-      r1 = new Range(r1, options);
-      r2 = new Range(r2, options);
-      return r1.intersects(r2);
-    }
-    exports.coerce = coerce;
-    function coerce(version2) {
-      if (version2 instanceof SemVer) {
-        return version2;
-      }
-      if (typeof version2 !== "string") {
-        return null;
-      }
-      var match = version2.match(safeRe[COERCE]);
-      if (match == null) {
-        return null;
-      }
-      return parse4(match[1] + "." + (match[2] || "0") + "." + (match[3] || "0"));
-    }
-  }
-});
-
-// node_modules/macos-version/index.js
-var require_macos_version = __commonJS({
-  "node_modules/macos-version/index.js"(exports, module) {
-    "use strict";
-    var fs = __require("fs");
-    var semver = require_semver();
-    var isMacOS = process.platform === "darwin";
-    var version2;
-    var clean = (version3) => {
-      const { length } = version3.split(".");
-      if (length === 1) {
-        return `${version3}.0.0`;
-      }
-      if (length === 2) {
-        return `${version3}.0`;
-      }
-      return version3;
-    };
-    var parseVersion = (plist) => {
-      const matches = /<key>ProductVersion<\/key>[\s]*<string>([\d.]+)<\/string>/.exec(plist);
-      if (!matches) {
-        return;
-      }
-      return matches[1].replace("10.16", "11");
-    };
-    var getVersion = () => {
-      if (!isMacOS) {
-        return;
-      }
-      if (!version2) {
-        const file = fs.readFileSync("/System/Library/CoreServices/SystemVersion.plist", "utf8");
-        const matches = parseVersion(file);
-        if (!matches) {
-          return;
-        }
-        version2 = matches;
-      }
-      if (version2) {
-        return clean(version2);
-      }
-    };
-    module.exports = getVersion;
-    module.exports.default = getVersion;
-    getVersion._parseVersion = parseVersion;
-    getVersion.isMacOS = isMacOS;
-    getVersion.is = (input) => {
-      if (!isMacOS) {
-        return false;
-      }
-      input = input.replace("10.16", "11");
-      return semver.satisfies(getVersion(), clean(input));
-    };
-    getVersion.isGreaterThanOrEqualTo = (input) => {
-      if (!isMacOS) {
-        return false;
-      }
-      input = input.replace("10.16", "11");
-      return semver.gte(getVersion(), clean(input));
-    };
-    getVersion.assert = (input) => {
-      input = input.replace("10.16", "11");
-      if (!getVersion.is(input)) {
-        throw new Error(`Requires macOS ${input}`);
-      }
-    };
-    getVersion.assertGreaterThanOrEqualTo = (input) => {
-      input = input.replace("10.16", "11");
-      if (!getVersion.isGreaterThanOrEqualTo(input)) {
-        throw new Error(`Requires macOS ${input} or later`);
-      }
-    };
-    getVersion.assertMacOS = () => {
-      if (!isMacOS) {
-        throw new Error("Requires macOS");
-      }
-    };
-  }
-});
-
-// node_modules/@jxa/run/lib/run.js
-var require_run = __commonJS({
-  "node_modules/@jxa/run/lib/run.js"(exports) {
-    "use strict";
-    Object.defineProperty(exports, "__esModule", { value: true });
-    exports.run = exports.runJXACode = void 0;
-    var execFile3 = __require("child_process").execFile;
-    var macosVersion = require_macos_version();
-    function runJXACode(jxaCode) {
-      return executeInOsa(jxaCode, []);
-    }
-    exports.runJXACode = runJXACode;
-    function run5(jxaCodeFunction) {
-      var args = [];
-      for (var _i = 1; _i < arguments.length; _i++) {
-        args[_i - 1] = arguments[_i];
-      }
-      var code = "\nObjC.import('stdlib');\nvar args = JSON.parse($.getenv('OSA_ARGS'));\nvar fn   = (".concat(jxaCodeFunction.toString(), ");\nvar out  = fn.apply(null, args);\nJSON.stringify({ result: out });\n");
-      return executeInOsa(code, args);
-    }
-    exports.run = run5;
-    var DEFAULT_MAX_BUFFER = 1e3 * 1e3 * 100;
-    function executeInOsa(code, args) {
-      return new Promise(function(resolve, reject) {
-        macosVersion.assertGreaterThanOrEqualTo("10.10");
-        var child = execFile3("/usr/bin/osascript", ["-l", "JavaScript"], {
-          env: {
-            OSA_ARGS: JSON.stringify(args)
-          },
-          maxBuffer: DEFAULT_MAX_BUFFER
-        }, function(err, stdout, stderr) {
-          if (err) {
-            return reject(err);
-          }
-          if (stderr) {
-            console.error(stderr);
-          }
-          if (!stdout) {
-            resolve(void 0);
-          }
-          try {
-            var result2 = JSON.parse(stdout.toString().trim()).result;
-            resolve(result2);
-          } catch (errorOutput) {
-            resolve(stdout.toString().trim());
-          }
-        });
-        child.stdin.write(code);
-        child.stdin.end();
-      });
-    }
-  }
-});
-
 // utils/native.ts
 function hostAppName() {
   const name = (process.env.APPLE_MCP_APP_NAME || "").trim();
@@ -10901,78 +9693,92 @@ var init_phone = __esm({
   }
 });
 
+// utils/maestro.ts
+async function ask(door, action, payload, summaries) {
+  const cfg = DOORS[door];
+  const url = (process.env[cfg.url] ?? "").trim();
+  const secret = (process.env[cfg.secret] ?? "").trim();
+  if (!url || !secret) {
+    throw new ToolFailure(
+      "app_not_running",
+      `Your ${cfg.noun} can only be read inside Maestro, which reads the store directly. There is no second way to do it that works.`
+    );
+  }
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", [cfg.header]: secret },
+      body: JSON.stringify({ action, ...payload })
+    });
+  } catch (error2) {
+    throw new ToolFailure("app_not_running", `${summaries.notRunning} (${String(error2)})`);
+  }
+  const text = await response.text();
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new ToolFailure(
+      "internal_error",
+      `Maestro answered something that is not a ${cfg.noun} answer.`,
+      `HTTP ${response.status}
+${text}`
+    );
+  }
+  if (body?.ok !== "true" && body?.ok !== true) {
+    throw new ToolFailure(body?.code ?? "internal_error", body?.reason ?? summaries.failed);
+  }
+  return body;
+}
+var DOORS;
+var init_maestro = __esm({
+  "utils/maestro.ts"() {
+    "use strict";
+    init_native();
+    DOORS = {
+      reminders: {
+        url: "MAESTRO_REMINDERS_URL",
+        secret: "MAESTRO_REMINDERS_SECRET",
+        header: "x-reminders-secret",
+        noun: "reminders"
+      },
+      contacts: {
+        url: "MAESTRO_CONTACTS_URL",
+        secret: "MAESTRO_CONTACTS_SECRET",
+        header: "x-contact-secret",
+        noun: "contacts"
+      },
+      calendar: {
+        url: "MAESTRO_CALENDAR_URL",
+        secret: "MAESTRO_CALENDAR_SECRET",
+        header: "x-calendar-secret",
+        noun: "calendar"
+      }
+    };
+  }
+});
+
 // utils/contacts.ts
 var contacts_exports = {};
 __export(contacts_exports, {
   CONTACTS_SUMMARIES: () => CONTACTS_SUMMARIES,
-  default: () => contacts_default,
-  lastScanTruncation: () => lastScanTruncation
+  default: () => contacts_default
 });
+async function getAllContacts() {
+  const body = await ask("contacts", "all", {}, CONTACTS_SUMMARIES);
+  return body.cards ?? [];
+}
 async function requestContactsAccess() {
   try {
-    await (0, import_run.run)(() => {
-      return Application("Contacts").name();
-    });
+    await getAllContacts();
     return { hasAccess: true, message: "Contacts access is granted." };
   } catch (error2) {
-    if (isPermissionDenial(error2)) {
+    if (error2 instanceof ToolFailure && error2.code === "permission_denied") {
       return { hasAccess: false, message: CONTACTS_SUMMARIES.denied };
     }
-    throwAppleFailure(error2, CONTACTS_SUMMARIES);
+    throw error2;
   }
-}
-async function getAllContacts() {
-  let columns;
-  try {
-    columns = await (0, import_run.run)(() => {
-      const app = Application("Contacts");
-      let ids = [];
-      let names = [];
-      let emails = [];
-      let phones = [];
-      for (let attempt = 0; attempt < 2; attempt++) {
-        ids = app.people.id();
-        names = app.people.name();
-        emails = app.people.emails.value();
-        phones = app.people.phones.value();
-        if (ids.length === names.length && ids.length === emails.length && ids.length === phones.length) {
-          break;
-        }
-      }
-      return { ids, names, emails, phones };
-    });
-  } catch (error2) {
-    throwAppleFailure(error2, CONTACTS_SUMMARIES);
-  }
-  assertAlignedColumns(
-    [
-      columns.ids.length,
-      columns.names.length,
-      columns.emails.length,
-      columns.phones.length
-    ],
-    "Could not read your contacts: the address book changed while it was being read."
-  );
-  const total = columns.ids.length;
-  const looked = Math.min(total, MAX_CONTACTS);
-  const out = [];
-  for (let i = 0; i < looked; i++) {
-    const phones = onlyStrings(columns.phones[i]);
-    const emails = onlyStrings(columns.emails[i]);
-    if (phones.length === 0 && emails.length === 0) continue;
-    out.push({
-      id: typeof columns.ids[i] === "string" ? columns.ids[i] : "",
-      name: typeof columns.names[i] === "string" ? columns.names[i] : "",
-      phones,
-      emails
-    });
-  }
-  lastScanTruncation = total > looked ? { shown: looked, total } : null;
-  return out;
-}
-function onlyStrings(values) {
-  if (!Array.isArray(values)) return [];
-  return values.filter((v) => typeof v === "string" && v.length > 0);
 }
 async function getAllNumbers() {
   const contacts2 = await getAllContacts();
@@ -11018,40 +9824,18 @@ async function findContacts(name) {
   const query = name.trim();
   const words = query.split(/\s+/).filter((w) => w.length >= 3);
   const terms = [query, ...words.filter((w) => w.toLowerCase() !== query.toLowerCase())];
-  let matched = [];
-  try {
-    matched = await (0, import_run.run)((needles) => {
-      const app = Application("Contacts");
-      const out = [];
-      const seen = {};
-      for (const needle of needles) {
-        let people = [];
-        try {
-          people = app.people.whose({ name: { _contains: needle } })();
-        } catch (e) {
-          continue;
-        }
-        for (const person of people) {
-          try {
-            const id = person.id();
-            if (seen[id]) continue;
-            seen[id] = true;
-            const phones = person.phones().map((p) => p.value()).filter((v) => typeof v === "string" && v.length > 0);
-            const emails = person.emails().map((e) => e.value()).filter((v) => typeof v === "string" && v.length > 0);
-            if (phones.length > 0 || emails.length > 0) {
-              out.push({ id, name: person.name(), phones, emails });
-            }
-          } catch (e) {
-          }
-        }
-        if (out.length > 0) break;
-      }
-      return out;
-    }, terms);
-  } catch (error2) {
-    throwAppleFailure(error2, CONTACTS_SUMMARIES);
+  const contacts2 = await getAllContacts();
+  const matched = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const term of terms) {
+    const needle = term.toLowerCase();
+    for (const c of contacts2) {
+      if (seen.has(c.id)) continue;
+      if (!c.name.toLowerCase().includes(needle)) continue;
+      seen.add(c.id);
+      matched.push(c);
+    }
   }
-  lastScanTruncation = null;
   return matched;
 }
 async function namesForHandles(handles) {
@@ -11086,24 +9870,21 @@ async function findContactByPhone(handle) {
   const resolved = await namesForHandles([trimmed]);
   return resolved.has(trimmed) ? resolved.get(trimmed) : null;
 }
-var import_run, MAX_CONTACTS, lastScanTruncation, CONTACTS_SUMMARIES, contacts_default;
+var CONTACTS_SUMMARIES, contacts_default;
 var init_contacts = __esm({
   "utils/contacts.ts"() {
     "use strict";
-    import_run = __toESM(require_run(), 1);
     init_native();
-    init_failure();
     init_phone();
-    MAX_CONTACTS = 5e3;
-    lastScanTruncation = null;
+    init_maestro();
     CONTACTS_SUMMARIES = {
-      denied: "Could not read your contacts: macOS denied access to Contacts. " + grantSentence("Contacts", "Automation > Contacts"),
-      notRunning: "Could not read your contacts: the Contacts app could not be reached.",
-      timedOut: "Could not read your contacts: Contacts did not answer in time.",
+      denied: "Could not read your contacts: macOS denied access to Contacts. " + grantSentence("Contacts"),
+      notRunning: "Could not read your contacts: Maestro could not be reached.",
+      timedOut: "Could not read your contacts: Maestro did not answer in time.",
       failed: "Could not read your contacts."
     };
     contacts_default = {
-      truncation: () => lastScanTruncation,
+      getAllContacts,
       getAllNumbers,
       findNumber,
       findContacts,
@@ -11111,6 +9892,1214 @@ var init_contacts = __esm({
       namesForHandles,
       requestContactsAccess
     };
+  }
+});
+
+// node_modules/semver/semver.js
+var require_semver = __commonJS({
+  "node_modules/semver/semver.js"(exports, module) {
+    exports = module.exports = SemVer;
+    var debug;
+    if (typeof process === "object" && process.env && process.env.NODE_DEBUG && /\bsemver\b/i.test(process.env.NODE_DEBUG)) {
+      debug = function() {
+        var args = Array.prototype.slice.call(arguments, 0);
+        args.unshift("SEMVER");
+        console.log.apply(console, args);
+      };
+    } else {
+      debug = function() {
+      };
+    }
+    exports.SEMVER_SPEC_VERSION = "2.0.0";
+    var MAX_LENGTH = 256;
+    var MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER || /* istanbul ignore next */
+    9007199254740991;
+    var MAX_SAFE_COMPONENT_LENGTH = 16;
+    var MAX_SAFE_BUILD_LENGTH = MAX_LENGTH - 6;
+    var re = exports.re = [];
+    var safeRe = exports.safeRe = [];
+    var src = exports.src = [];
+    var R = 0;
+    var LETTERDASHNUMBER = "[a-zA-Z0-9-]";
+    var safeRegexReplacements = [
+      ["\\s", 1],
+      ["\\d", MAX_LENGTH],
+      [LETTERDASHNUMBER, MAX_SAFE_BUILD_LENGTH]
+    ];
+    function makeSafeRe(value) {
+      for (var i2 = 0; i2 < safeRegexReplacements.length; i2++) {
+        var token = safeRegexReplacements[i2][0];
+        var max = safeRegexReplacements[i2][1];
+        value = value.split(token + "*").join(token + "{0," + max + "}").split(token + "+").join(token + "{1," + max + "}");
+      }
+      return value;
+    }
+    var NUMERICIDENTIFIER = R++;
+    src[NUMERICIDENTIFIER] = "0|[1-9]\\d*";
+    var NUMERICIDENTIFIERLOOSE = R++;
+    src[NUMERICIDENTIFIERLOOSE] = "\\d+";
+    var NONNUMERICIDENTIFIER = R++;
+    src[NONNUMERICIDENTIFIER] = "\\d*[a-zA-Z-]" + LETTERDASHNUMBER + "*";
+    var MAINVERSION = R++;
+    src[MAINVERSION] = "(" + src[NUMERICIDENTIFIER] + ")\\.(" + src[NUMERICIDENTIFIER] + ")\\.(" + src[NUMERICIDENTIFIER] + ")";
+    var MAINVERSIONLOOSE = R++;
+    src[MAINVERSIONLOOSE] = "(" + src[NUMERICIDENTIFIERLOOSE] + ")\\.(" + src[NUMERICIDENTIFIERLOOSE] + ")\\.(" + src[NUMERICIDENTIFIERLOOSE] + ")";
+    var PRERELEASEIDENTIFIER = R++;
+    src[PRERELEASEIDENTIFIER] = "(?:" + src[NUMERICIDENTIFIER] + "|" + src[NONNUMERICIDENTIFIER] + ")";
+    var PRERELEASEIDENTIFIERLOOSE = R++;
+    src[PRERELEASEIDENTIFIERLOOSE] = "(?:" + src[NUMERICIDENTIFIERLOOSE] + "|" + src[NONNUMERICIDENTIFIER] + ")";
+    var PRERELEASE = R++;
+    src[PRERELEASE] = "(?:-(" + src[PRERELEASEIDENTIFIER] + "(?:\\." + src[PRERELEASEIDENTIFIER] + ")*))";
+    var PRERELEASELOOSE = R++;
+    src[PRERELEASELOOSE] = "(?:-?(" + src[PRERELEASEIDENTIFIERLOOSE] + "(?:\\." + src[PRERELEASEIDENTIFIERLOOSE] + ")*))";
+    var BUILDIDENTIFIER = R++;
+    src[BUILDIDENTIFIER] = LETTERDASHNUMBER + "+";
+    var BUILD = R++;
+    src[BUILD] = "(?:\\+(" + src[BUILDIDENTIFIER] + "(?:\\." + src[BUILDIDENTIFIER] + ")*))";
+    var FULL = R++;
+    var FULLPLAIN = "v?" + src[MAINVERSION] + src[PRERELEASE] + "?" + src[BUILD] + "?";
+    src[FULL] = "^" + FULLPLAIN + "$";
+    var LOOSEPLAIN = "[v=\\s]*" + src[MAINVERSIONLOOSE] + src[PRERELEASELOOSE] + "?" + src[BUILD] + "?";
+    var LOOSE = R++;
+    src[LOOSE] = "^" + LOOSEPLAIN + "$";
+    var GTLT = R++;
+    src[GTLT] = "((?:<|>)?=?)";
+    var XRANGEIDENTIFIERLOOSE = R++;
+    src[XRANGEIDENTIFIERLOOSE] = src[NUMERICIDENTIFIERLOOSE] + "|x|X|\\*";
+    var XRANGEIDENTIFIER = R++;
+    src[XRANGEIDENTIFIER] = src[NUMERICIDENTIFIER] + "|x|X|\\*";
+    var XRANGEPLAIN = R++;
+    src[XRANGEPLAIN] = "[v=\\s]*(" + src[XRANGEIDENTIFIER] + ")(?:\\.(" + src[XRANGEIDENTIFIER] + ")(?:\\.(" + src[XRANGEIDENTIFIER] + ")(?:" + src[PRERELEASE] + ")?" + src[BUILD] + "?)?)?";
+    var XRANGEPLAINLOOSE = R++;
+    src[XRANGEPLAINLOOSE] = "[v=\\s]*(" + src[XRANGEIDENTIFIERLOOSE] + ")(?:\\.(" + src[XRANGEIDENTIFIERLOOSE] + ")(?:\\.(" + src[XRANGEIDENTIFIERLOOSE] + ")(?:" + src[PRERELEASELOOSE] + ")?" + src[BUILD] + "?)?)?";
+    var XRANGE = R++;
+    src[XRANGE] = "^" + src[GTLT] + "\\s*" + src[XRANGEPLAIN] + "$";
+    var XRANGELOOSE = R++;
+    src[XRANGELOOSE] = "^" + src[GTLT] + "\\s*" + src[XRANGEPLAINLOOSE] + "$";
+    var COERCE = R++;
+    src[COERCE] = "(?:^|[^\\d])(\\d{1," + MAX_SAFE_COMPONENT_LENGTH + "})(?:\\.(\\d{1," + MAX_SAFE_COMPONENT_LENGTH + "}))?(?:\\.(\\d{1," + MAX_SAFE_COMPONENT_LENGTH + "}))?(?:$|[^\\d])";
+    var LONETILDE = R++;
+    src[LONETILDE] = "(?:~>?)";
+    var TILDETRIM = R++;
+    src[TILDETRIM] = "(\\s*)" + src[LONETILDE] + "\\s+";
+    re[TILDETRIM] = new RegExp(src[TILDETRIM], "g");
+    safeRe[TILDETRIM] = new RegExp(makeSafeRe(src[TILDETRIM]), "g");
+    var tildeTrimReplace = "$1~";
+    var TILDE = R++;
+    src[TILDE] = "^" + src[LONETILDE] + src[XRANGEPLAIN] + "$";
+    var TILDELOOSE = R++;
+    src[TILDELOOSE] = "^" + src[LONETILDE] + src[XRANGEPLAINLOOSE] + "$";
+    var LONECARET = R++;
+    src[LONECARET] = "(?:\\^)";
+    var CARETTRIM = R++;
+    src[CARETTRIM] = "(\\s*)" + src[LONECARET] + "\\s+";
+    re[CARETTRIM] = new RegExp(src[CARETTRIM], "g");
+    safeRe[CARETTRIM] = new RegExp(makeSafeRe(src[CARETTRIM]), "g");
+    var caretTrimReplace = "$1^";
+    var CARET = R++;
+    src[CARET] = "^" + src[LONECARET] + src[XRANGEPLAIN] + "$";
+    var CARETLOOSE = R++;
+    src[CARETLOOSE] = "^" + src[LONECARET] + src[XRANGEPLAINLOOSE] + "$";
+    var COMPARATORLOOSE = R++;
+    src[COMPARATORLOOSE] = "^" + src[GTLT] + "\\s*(" + LOOSEPLAIN + ")$|^$";
+    var COMPARATOR = R++;
+    src[COMPARATOR] = "^" + src[GTLT] + "\\s*(" + FULLPLAIN + ")$|^$";
+    var COMPARATORTRIM = R++;
+    src[COMPARATORTRIM] = "(\\s*)" + src[GTLT] + "\\s*(" + LOOSEPLAIN + "|" + src[XRANGEPLAIN] + ")";
+    re[COMPARATORTRIM] = new RegExp(src[COMPARATORTRIM], "g");
+    safeRe[COMPARATORTRIM] = new RegExp(makeSafeRe(src[COMPARATORTRIM]), "g");
+    var comparatorTrimReplace = "$1$2$3";
+    var HYPHENRANGE = R++;
+    src[HYPHENRANGE] = "^\\s*(" + src[XRANGEPLAIN] + ")\\s+-\\s+(" + src[XRANGEPLAIN] + ")\\s*$";
+    var HYPHENRANGELOOSE = R++;
+    src[HYPHENRANGELOOSE] = "^\\s*(" + src[XRANGEPLAINLOOSE] + ")\\s+-\\s+(" + src[XRANGEPLAINLOOSE] + ")\\s*$";
+    var STAR = R++;
+    src[STAR] = "(<|>)?=?\\s*\\*";
+    for (i = 0; i < R; i++) {
+      debug(i, src[i]);
+      if (!re[i]) {
+        re[i] = new RegExp(src[i]);
+        safeRe[i] = new RegExp(makeSafeRe(src[i]));
+      }
+    }
+    var i;
+    exports.parse = parse4;
+    function parse4(version2, options) {
+      if (!options || typeof options !== "object") {
+        options = {
+          loose: !!options,
+          includePrerelease: false
+        };
+      }
+      if (version2 instanceof SemVer) {
+        return version2;
+      }
+      if (typeof version2 !== "string") {
+        return null;
+      }
+      if (version2.length > MAX_LENGTH) {
+        return null;
+      }
+      var r = options.loose ? safeRe[LOOSE] : safeRe[FULL];
+      if (!r.test(version2)) {
+        return null;
+      }
+      try {
+        return new SemVer(version2, options);
+      } catch (er) {
+        return null;
+      }
+    }
+    exports.valid = valid;
+    function valid(version2, options) {
+      var v = parse4(version2, options);
+      return v ? v.version : null;
+    }
+    exports.clean = clean;
+    function clean(version2, options) {
+      var s = parse4(version2.trim().replace(/^[=v]+/, ""), options);
+      return s ? s.version : null;
+    }
+    exports.SemVer = SemVer;
+    function SemVer(version2, options) {
+      if (!options || typeof options !== "object") {
+        options = {
+          loose: !!options,
+          includePrerelease: false
+        };
+      }
+      if (version2 instanceof SemVer) {
+        if (version2.loose === options.loose) {
+          return version2;
+        } else {
+          version2 = version2.version;
+        }
+      } else if (typeof version2 !== "string") {
+        throw new TypeError("Invalid Version: " + version2);
+      }
+      if (version2.length > MAX_LENGTH) {
+        throw new TypeError("version is longer than " + MAX_LENGTH + " characters");
+      }
+      if (!(this instanceof SemVer)) {
+        return new SemVer(version2, options);
+      }
+      debug("SemVer", version2, options);
+      this.options = options;
+      this.loose = !!options.loose;
+      var m = version2.trim().match(options.loose ? safeRe[LOOSE] : safeRe[FULL]);
+      if (!m) {
+        throw new TypeError("Invalid Version: " + version2);
+      }
+      this.raw = version2;
+      this.major = +m[1];
+      this.minor = +m[2];
+      this.patch = +m[3];
+      if (this.major > MAX_SAFE_INTEGER || this.major < 0) {
+        throw new TypeError("Invalid major version");
+      }
+      if (this.minor > MAX_SAFE_INTEGER || this.minor < 0) {
+        throw new TypeError("Invalid minor version");
+      }
+      if (this.patch > MAX_SAFE_INTEGER || this.patch < 0) {
+        throw new TypeError("Invalid patch version");
+      }
+      if (!m[4]) {
+        this.prerelease = [];
+      } else {
+        this.prerelease = m[4].split(".").map(function(id) {
+          if (/^[0-9]+$/.test(id)) {
+            var num = +id;
+            if (num >= 0 && num < MAX_SAFE_INTEGER) {
+              return num;
+            }
+          }
+          return id;
+        });
+      }
+      this.build = m[5] ? m[5].split(".") : [];
+      this.format();
+    }
+    SemVer.prototype.format = function() {
+      this.version = this.major + "." + this.minor + "." + this.patch;
+      if (this.prerelease.length) {
+        this.version += "-" + this.prerelease.join(".");
+      }
+      return this.version;
+    };
+    SemVer.prototype.toString = function() {
+      return this.version;
+    };
+    SemVer.prototype.compare = function(other) {
+      debug("SemVer.compare", this.version, this.options, other);
+      if (!(other instanceof SemVer)) {
+        other = new SemVer(other, this.options);
+      }
+      return this.compareMain(other) || this.comparePre(other);
+    };
+    SemVer.prototype.compareMain = function(other) {
+      if (!(other instanceof SemVer)) {
+        other = new SemVer(other, this.options);
+      }
+      return compareIdentifiers(this.major, other.major) || compareIdentifiers(this.minor, other.minor) || compareIdentifiers(this.patch, other.patch);
+    };
+    SemVer.prototype.comparePre = function(other) {
+      if (!(other instanceof SemVer)) {
+        other = new SemVer(other, this.options);
+      }
+      if (this.prerelease.length && !other.prerelease.length) {
+        return -1;
+      } else if (!this.prerelease.length && other.prerelease.length) {
+        return 1;
+      } else if (!this.prerelease.length && !other.prerelease.length) {
+        return 0;
+      }
+      var i2 = 0;
+      do {
+        var a = this.prerelease[i2];
+        var b = other.prerelease[i2];
+        debug("prerelease compare", i2, a, b);
+        if (a === void 0 && b === void 0) {
+          return 0;
+        } else if (b === void 0) {
+          return 1;
+        } else if (a === void 0) {
+          return -1;
+        } else if (a === b) {
+          continue;
+        } else {
+          return compareIdentifiers(a, b);
+        }
+      } while (++i2);
+    };
+    SemVer.prototype.inc = function(release, identifier) {
+      switch (release) {
+        case "premajor":
+          this.prerelease.length = 0;
+          this.patch = 0;
+          this.minor = 0;
+          this.major++;
+          this.inc("pre", identifier);
+          break;
+        case "preminor":
+          this.prerelease.length = 0;
+          this.patch = 0;
+          this.minor++;
+          this.inc("pre", identifier);
+          break;
+        case "prepatch":
+          this.prerelease.length = 0;
+          this.inc("patch", identifier);
+          this.inc("pre", identifier);
+          break;
+        // If the input is a non-prerelease version, this acts the same as
+        // prepatch.
+        case "prerelease":
+          if (this.prerelease.length === 0) {
+            this.inc("patch", identifier);
+          }
+          this.inc("pre", identifier);
+          break;
+        case "major":
+          if (this.minor !== 0 || this.patch !== 0 || this.prerelease.length === 0) {
+            this.major++;
+          }
+          this.minor = 0;
+          this.patch = 0;
+          this.prerelease = [];
+          break;
+        case "minor":
+          if (this.patch !== 0 || this.prerelease.length === 0) {
+            this.minor++;
+          }
+          this.patch = 0;
+          this.prerelease = [];
+          break;
+        case "patch":
+          if (this.prerelease.length === 0) {
+            this.patch++;
+          }
+          this.prerelease = [];
+          break;
+        // This probably shouldn't be used publicly.
+        // 1.0.0 "pre" would become 1.0.0-0 which is the wrong direction.
+        case "pre":
+          if (this.prerelease.length === 0) {
+            this.prerelease = [0];
+          } else {
+            var i2 = this.prerelease.length;
+            while (--i2 >= 0) {
+              if (typeof this.prerelease[i2] === "number") {
+                this.prerelease[i2]++;
+                i2 = -2;
+              }
+            }
+            if (i2 === -1) {
+              this.prerelease.push(0);
+            }
+          }
+          if (identifier) {
+            if (this.prerelease[0] === identifier) {
+              if (isNaN(this.prerelease[1])) {
+                this.prerelease = [identifier, 0];
+              }
+            } else {
+              this.prerelease = [identifier, 0];
+            }
+          }
+          break;
+        default:
+          throw new Error("invalid increment argument: " + release);
+      }
+      this.format();
+      this.raw = this.version;
+      return this;
+    };
+    exports.inc = inc;
+    function inc(version2, release, loose, identifier) {
+      if (typeof loose === "string") {
+        identifier = loose;
+        loose = void 0;
+      }
+      try {
+        return new SemVer(version2, loose).inc(release, identifier).version;
+      } catch (er) {
+        return null;
+      }
+    }
+    exports.diff = diff;
+    function diff(version1, version2) {
+      if (eq(version1, version2)) {
+        return null;
+      } else {
+        var v1 = parse4(version1);
+        var v2 = parse4(version2);
+        var prefix = "";
+        if (v1.prerelease.length || v2.prerelease.length) {
+          prefix = "pre";
+          var defaultResult = "prerelease";
+        }
+        for (var key in v1) {
+          if (key === "major" || key === "minor" || key === "patch") {
+            if (v1[key] !== v2[key]) {
+              return prefix + key;
+            }
+          }
+        }
+        return defaultResult;
+      }
+    }
+    exports.compareIdentifiers = compareIdentifiers;
+    var numeric = /^[0-9]+$/;
+    function compareIdentifiers(a, b) {
+      var anum = numeric.test(a);
+      var bnum = numeric.test(b);
+      if (anum && bnum) {
+        a = +a;
+        b = +b;
+      }
+      return a === b ? 0 : anum && !bnum ? -1 : bnum && !anum ? 1 : a < b ? -1 : 1;
+    }
+    exports.rcompareIdentifiers = rcompareIdentifiers;
+    function rcompareIdentifiers(a, b) {
+      return compareIdentifiers(b, a);
+    }
+    exports.major = major;
+    function major(a, loose) {
+      return new SemVer(a, loose).major;
+    }
+    exports.minor = minor;
+    function minor(a, loose) {
+      return new SemVer(a, loose).minor;
+    }
+    exports.patch = patch;
+    function patch(a, loose) {
+      return new SemVer(a, loose).patch;
+    }
+    exports.compare = compare;
+    function compare(a, b, loose) {
+      return new SemVer(a, loose).compare(new SemVer(b, loose));
+    }
+    exports.compareLoose = compareLoose;
+    function compareLoose(a, b) {
+      return compare(a, b, true);
+    }
+    exports.rcompare = rcompare;
+    function rcompare(a, b, loose) {
+      return compare(b, a, loose);
+    }
+    exports.sort = sort;
+    function sort(list, loose) {
+      return list.sort(function(a, b) {
+        return exports.compare(a, b, loose);
+      });
+    }
+    exports.rsort = rsort;
+    function rsort(list, loose) {
+      return list.sort(function(a, b) {
+        return exports.rcompare(a, b, loose);
+      });
+    }
+    exports.gt = gt;
+    function gt(a, b, loose) {
+      return compare(a, b, loose) > 0;
+    }
+    exports.lt = lt;
+    function lt(a, b, loose) {
+      return compare(a, b, loose) < 0;
+    }
+    exports.eq = eq;
+    function eq(a, b, loose) {
+      return compare(a, b, loose) === 0;
+    }
+    exports.neq = neq;
+    function neq(a, b, loose) {
+      return compare(a, b, loose) !== 0;
+    }
+    exports.gte = gte;
+    function gte(a, b, loose) {
+      return compare(a, b, loose) >= 0;
+    }
+    exports.lte = lte;
+    function lte(a, b, loose) {
+      return compare(a, b, loose) <= 0;
+    }
+    exports.cmp = cmp;
+    function cmp(a, op, b, loose) {
+      switch (op) {
+        case "===":
+          if (typeof a === "object")
+            a = a.version;
+          if (typeof b === "object")
+            b = b.version;
+          return a === b;
+        case "!==":
+          if (typeof a === "object")
+            a = a.version;
+          if (typeof b === "object")
+            b = b.version;
+          return a !== b;
+        case "":
+        case "=":
+        case "==":
+          return eq(a, b, loose);
+        case "!=":
+          return neq(a, b, loose);
+        case ">":
+          return gt(a, b, loose);
+        case ">=":
+          return gte(a, b, loose);
+        case "<":
+          return lt(a, b, loose);
+        case "<=":
+          return lte(a, b, loose);
+        default:
+          throw new TypeError("Invalid operator: " + op);
+      }
+    }
+    exports.Comparator = Comparator;
+    function Comparator(comp, options) {
+      if (!options || typeof options !== "object") {
+        options = {
+          loose: !!options,
+          includePrerelease: false
+        };
+      }
+      if (comp instanceof Comparator) {
+        if (comp.loose === !!options.loose) {
+          return comp;
+        } else {
+          comp = comp.value;
+        }
+      }
+      if (!(this instanceof Comparator)) {
+        return new Comparator(comp, options);
+      }
+      comp = comp.trim().split(/\s+/).join(" ");
+      debug("comparator", comp, options);
+      this.options = options;
+      this.loose = !!options.loose;
+      this.parse(comp);
+      if (this.semver === ANY) {
+        this.value = "";
+      } else {
+        this.value = this.operator + this.semver.version;
+      }
+      debug("comp", this);
+    }
+    var ANY = {};
+    Comparator.prototype.parse = function(comp) {
+      var r = this.options.loose ? safeRe[COMPARATORLOOSE] : safeRe[COMPARATOR];
+      var m = comp.match(r);
+      if (!m) {
+        throw new TypeError("Invalid comparator: " + comp);
+      }
+      this.operator = m[1];
+      if (this.operator === "=") {
+        this.operator = "";
+      }
+      if (!m[2]) {
+        this.semver = ANY;
+      } else {
+        this.semver = new SemVer(m[2], this.options.loose);
+      }
+    };
+    Comparator.prototype.toString = function() {
+      return this.value;
+    };
+    Comparator.prototype.test = function(version2) {
+      debug("Comparator.test", version2, this.options.loose);
+      if (this.semver === ANY) {
+        return true;
+      }
+      if (typeof version2 === "string") {
+        version2 = new SemVer(version2, this.options);
+      }
+      return cmp(version2, this.operator, this.semver, this.options);
+    };
+    Comparator.prototype.intersects = function(comp, options) {
+      if (!(comp instanceof Comparator)) {
+        throw new TypeError("a Comparator is required");
+      }
+      if (!options || typeof options !== "object") {
+        options = {
+          loose: !!options,
+          includePrerelease: false
+        };
+      }
+      var rangeTmp;
+      if (this.operator === "") {
+        rangeTmp = new Range(comp.value, options);
+        return satisfies(this.value, rangeTmp, options);
+      } else if (comp.operator === "") {
+        rangeTmp = new Range(this.value, options);
+        return satisfies(comp.semver, rangeTmp, options);
+      }
+      var sameDirectionIncreasing = (this.operator === ">=" || this.operator === ">") && (comp.operator === ">=" || comp.operator === ">");
+      var sameDirectionDecreasing = (this.operator === "<=" || this.operator === "<") && (comp.operator === "<=" || comp.operator === "<");
+      var sameSemVer = this.semver.version === comp.semver.version;
+      var differentDirectionsInclusive = (this.operator === ">=" || this.operator === "<=") && (comp.operator === ">=" || comp.operator === "<=");
+      var oppositeDirectionsLessThan = cmp(this.semver, "<", comp.semver, options) && ((this.operator === ">=" || this.operator === ">") && (comp.operator === "<=" || comp.operator === "<"));
+      var oppositeDirectionsGreaterThan = cmp(this.semver, ">", comp.semver, options) && ((this.operator === "<=" || this.operator === "<") && (comp.operator === ">=" || comp.operator === ">"));
+      return sameDirectionIncreasing || sameDirectionDecreasing || sameSemVer && differentDirectionsInclusive || oppositeDirectionsLessThan || oppositeDirectionsGreaterThan;
+    };
+    exports.Range = Range;
+    function Range(range, options) {
+      if (!options || typeof options !== "object") {
+        options = {
+          loose: !!options,
+          includePrerelease: false
+        };
+      }
+      if (range instanceof Range) {
+        if (range.loose === !!options.loose && range.includePrerelease === !!options.includePrerelease) {
+          return range;
+        } else {
+          return new Range(range.raw, options);
+        }
+      }
+      if (range instanceof Comparator) {
+        return new Range(range.value, options);
+      }
+      if (!(this instanceof Range)) {
+        return new Range(range, options);
+      }
+      this.options = options;
+      this.loose = !!options.loose;
+      this.includePrerelease = !!options.includePrerelease;
+      this.raw = range.trim().split(/\s+/).join(" ");
+      this.set = this.raw.split("||").map(function(range2) {
+        return this.parseRange(range2.trim());
+      }, this).filter(function(c) {
+        return c.length;
+      });
+      if (!this.set.length) {
+        throw new TypeError("Invalid SemVer Range: " + this.raw);
+      }
+      this.format();
+    }
+    Range.prototype.format = function() {
+      this.range = this.set.map(function(comps) {
+        return comps.join(" ").trim();
+      }).join("||").trim();
+      return this.range;
+    };
+    Range.prototype.toString = function() {
+      return this.range;
+    };
+    Range.prototype.parseRange = function(range) {
+      var loose = this.options.loose;
+      var hr = loose ? safeRe[HYPHENRANGELOOSE] : safeRe[HYPHENRANGE];
+      range = range.replace(hr, hyphenReplace);
+      debug("hyphen replace", range);
+      range = range.replace(safeRe[COMPARATORTRIM], comparatorTrimReplace);
+      debug("comparator trim", range, safeRe[COMPARATORTRIM]);
+      range = range.replace(safeRe[TILDETRIM], tildeTrimReplace);
+      range = range.replace(safeRe[CARETTRIM], caretTrimReplace);
+      var compRe = loose ? safeRe[COMPARATORLOOSE] : safeRe[COMPARATOR];
+      var set = range.split(" ").map(function(comp) {
+        return parseComparator(comp, this.options);
+      }, this).join(" ").split(/\s+/);
+      if (this.options.loose) {
+        set = set.filter(function(comp) {
+          return !!comp.match(compRe);
+        });
+      }
+      set = set.map(function(comp) {
+        return new Comparator(comp, this.options);
+      }, this);
+      return set;
+    };
+    Range.prototype.intersects = function(range, options) {
+      if (!(range instanceof Range)) {
+        throw new TypeError("a Range is required");
+      }
+      return this.set.some(function(thisComparators) {
+        return thisComparators.every(function(thisComparator) {
+          return range.set.some(function(rangeComparators) {
+            return rangeComparators.every(function(rangeComparator) {
+              return thisComparator.intersects(rangeComparator, options);
+            });
+          });
+        });
+      });
+    };
+    exports.toComparators = toComparators;
+    function toComparators(range, options) {
+      return new Range(range, options).set.map(function(comp) {
+        return comp.map(function(c) {
+          return c.value;
+        }).join(" ").trim().split(" ");
+      });
+    }
+    function parseComparator(comp, options) {
+      debug("comp", comp, options);
+      comp = replaceCarets(comp, options);
+      debug("caret", comp);
+      comp = replaceTildes(comp, options);
+      debug("tildes", comp);
+      comp = replaceXRanges(comp, options);
+      debug("xrange", comp);
+      comp = replaceStars(comp, options);
+      debug("stars", comp);
+      return comp;
+    }
+    function isX(id) {
+      return !id || id.toLowerCase() === "x" || id === "*";
+    }
+    function replaceTildes(comp, options) {
+      return comp.trim().split(/\s+/).map(function(comp2) {
+        return replaceTilde(comp2, options);
+      }).join(" ");
+    }
+    function replaceTilde(comp, options) {
+      var r = options.loose ? safeRe[TILDELOOSE] : safeRe[TILDE];
+      return comp.replace(r, function(_, M, m, p, pr) {
+        debug("tilde", comp, _, M, m, p, pr);
+        var ret;
+        if (isX(M)) {
+          ret = "";
+        } else if (isX(m)) {
+          ret = ">=" + M + ".0.0 <" + (+M + 1) + ".0.0";
+        } else if (isX(p)) {
+          ret = ">=" + M + "." + m + ".0 <" + M + "." + (+m + 1) + ".0";
+        } else if (pr) {
+          debug("replaceTilde pr", pr);
+          ret = ">=" + M + "." + m + "." + p + "-" + pr + " <" + M + "." + (+m + 1) + ".0";
+        } else {
+          ret = ">=" + M + "." + m + "." + p + " <" + M + "." + (+m + 1) + ".0";
+        }
+        debug("tilde return", ret);
+        return ret;
+      });
+    }
+    function replaceCarets(comp, options) {
+      return comp.trim().split(/\s+/).map(function(comp2) {
+        return replaceCaret(comp2, options);
+      }).join(" ");
+    }
+    function replaceCaret(comp, options) {
+      debug("caret", comp, options);
+      var r = options.loose ? safeRe[CARETLOOSE] : safeRe[CARET];
+      return comp.replace(r, function(_, M, m, p, pr) {
+        debug("caret", comp, _, M, m, p, pr);
+        var ret;
+        if (isX(M)) {
+          ret = "";
+        } else if (isX(m)) {
+          ret = ">=" + M + ".0.0 <" + (+M + 1) + ".0.0";
+        } else if (isX(p)) {
+          if (M === "0") {
+            ret = ">=" + M + "." + m + ".0 <" + M + "." + (+m + 1) + ".0";
+          } else {
+            ret = ">=" + M + "." + m + ".0 <" + (+M + 1) + ".0.0";
+          }
+        } else if (pr) {
+          debug("replaceCaret pr", pr);
+          if (M === "0") {
+            if (m === "0") {
+              ret = ">=" + M + "." + m + "." + p + "-" + pr + " <" + M + "." + m + "." + (+p + 1);
+            } else {
+              ret = ">=" + M + "." + m + "." + p + "-" + pr + " <" + M + "." + (+m + 1) + ".0";
+            }
+          } else {
+            ret = ">=" + M + "." + m + "." + p + "-" + pr + " <" + (+M + 1) + ".0.0";
+          }
+        } else {
+          debug("no pr");
+          if (M === "0") {
+            if (m === "0") {
+              ret = ">=" + M + "." + m + "." + p + " <" + M + "." + m + "." + (+p + 1);
+            } else {
+              ret = ">=" + M + "." + m + "." + p + " <" + M + "." + (+m + 1) + ".0";
+            }
+          } else {
+            ret = ">=" + M + "." + m + "." + p + " <" + (+M + 1) + ".0.0";
+          }
+        }
+        debug("caret return", ret);
+        return ret;
+      });
+    }
+    function replaceXRanges(comp, options) {
+      debug("replaceXRanges", comp, options);
+      return comp.split(/\s+/).map(function(comp2) {
+        return replaceXRange(comp2, options);
+      }).join(" ");
+    }
+    function replaceXRange(comp, options) {
+      comp = comp.trim();
+      var r = options.loose ? safeRe[XRANGELOOSE] : safeRe[XRANGE];
+      return comp.replace(r, function(ret, gtlt, M, m, p, pr) {
+        debug("xRange", comp, ret, gtlt, M, m, p, pr);
+        var xM = isX(M);
+        var xm = xM || isX(m);
+        var xp = xm || isX(p);
+        var anyX = xp;
+        if (gtlt === "=" && anyX) {
+          gtlt = "";
+        }
+        if (xM) {
+          if (gtlt === ">" || gtlt === "<") {
+            ret = "<0.0.0";
+          } else {
+            ret = "*";
+          }
+        } else if (gtlt && anyX) {
+          if (xm) {
+            m = 0;
+          }
+          p = 0;
+          if (gtlt === ">") {
+            gtlt = ">=";
+            if (xm) {
+              M = +M + 1;
+              m = 0;
+              p = 0;
+            } else {
+              m = +m + 1;
+              p = 0;
+            }
+          } else if (gtlt === "<=") {
+            gtlt = "<";
+            if (xm) {
+              M = +M + 1;
+            } else {
+              m = +m + 1;
+            }
+          }
+          ret = gtlt + M + "." + m + "." + p;
+        } else if (xm) {
+          ret = ">=" + M + ".0.0 <" + (+M + 1) + ".0.0";
+        } else if (xp) {
+          ret = ">=" + M + "." + m + ".0 <" + M + "." + (+m + 1) + ".0";
+        }
+        debug("xRange return", ret);
+        return ret;
+      });
+    }
+    function replaceStars(comp, options) {
+      debug("replaceStars", comp, options);
+      return comp.trim().replace(safeRe[STAR], "");
+    }
+    function hyphenReplace($0, from, fM, fm, fp, fpr, fb, to, tM, tm, tp, tpr, tb) {
+      if (isX(fM)) {
+        from = "";
+      } else if (isX(fm)) {
+        from = ">=" + fM + ".0.0";
+      } else if (isX(fp)) {
+        from = ">=" + fM + "." + fm + ".0";
+      } else {
+        from = ">=" + from;
+      }
+      if (isX(tM)) {
+        to = "";
+      } else if (isX(tm)) {
+        to = "<" + (+tM + 1) + ".0.0";
+      } else if (isX(tp)) {
+        to = "<" + tM + "." + (+tm + 1) + ".0";
+      } else if (tpr) {
+        to = "<=" + tM + "." + tm + "." + tp + "-" + tpr;
+      } else {
+        to = "<=" + to;
+      }
+      return (from + " " + to).trim();
+    }
+    Range.prototype.test = function(version2) {
+      if (!version2) {
+        return false;
+      }
+      if (typeof version2 === "string") {
+        version2 = new SemVer(version2, this.options);
+      }
+      for (var i2 = 0; i2 < this.set.length; i2++) {
+        if (testSet(this.set[i2], version2, this.options)) {
+          return true;
+        }
+      }
+      return false;
+    };
+    function testSet(set, version2, options) {
+      for (var i2 = 0; i2 < set.length; i2++) {
+        if (!set[i2].test(version2)) {
+          return false;
+        }
+      }
+      if (version2.prerelease.length && !options.includePrerelease) {
+        for (i2 = 0; i2 < set.length; i2++) {
+          debug(set[i2].semver);
+          if (set[i2].semver === ANY) {
+            continue;
+          }
+          if (set[i2].semver.prerelease.length > 0) {
+            var allowed = set[i2].semver;
+            if (allowed.major === version2.major && allowed.minor === version2.minor && allowed.patch === version2.patch) {
+              return true;
+            }
+          }
+        }
+        return false;
+      }
+      return true;
+    }
+    exports.satisfies = satisfies;
+    function satisfies(version2, range, options) {
+      try {
+        range = new Range(range, options);
+      } catch (er) {
+        return false;
+      }
+      return range.test(version2);
+    }
+    exports.maxSatisfying = maxSatisfying;
+    function maxSatisfying(versions, range, options) {
+      var max = null;
+      var maxSV = null;
+      try {
+        var rangeObj = new Range(range, options);
+      } catch (er) {
+        return null;
+      }
+      versions.forEach(function(v) {
+        if (rangeObj.test(v)) {
+          if (!max || maxSV.compare(v) === -1) {
+            max = v;
+            maxSV = new SemVer(max, options);
+          }
+        }
+      });
+      return max;
+    }
+    exports.minSatisfying = minSatisfying;
+    function minSatisfying(versions, range, options) {
+      var min = null;
+      var minSV = null;
+      try {
+        var rangeObj = new Range(range, options);
+      } catch (er) {
+        return null;
+      }
+      versions.forEach(function(v) {
+        if (rangeObj.test(v)) {
+          if (!min || minSV.compare(v) === 1) {
+            min = v;
+            minSV = new SemVer(min, options);
+          }
+        }
+      });
+      return min;
+    }
+    exports.minVersion = minVersion;
+    function minVersion(range, loose) {
+      range = new Range(range, loose);
+      var minver = new SemVer("0.0.0");
+      if (range.test(minver)) {
+        return minver;
+      }
+      minver = new SemVer("0.0.0-0");
+      if (range.test(minver)) {
+        return minver;
+      }
+      minver = null;
+      for (var i2 = 0; i2 < range.set.length; ++i2) {
+        var comparators = range.set[i2];
+        comparators.forEach(function(comparator) {
+          var compver = new SemVer(comparator.semver.version);
+          switch (comparator.operator) {
+            case ">":
+              if (compver.prerelease.length === 0) {
+                compver.patch++;
+              } else {
+                compver.prerelease.push(0);
+              }
+              compver.raw = compver.format();
+            /* fallthrough */
+            case "":
+            case ">=":
+              if (!minver || gt(minver, compver)) {
+                minver = compver;
+              }
+              break;
+            case "<":
+            case "<=":
+              break;
+            /* istanbul ignore next */
+            default:
+              throw new Error("Unexpected operation: " + comparator.operator);
+          }
+        });
+      }
+      if (minver && range.test(minver)) {
+        return minver;
+      }
+      return null;
+    }
+    exports.validRange = validRange;
+    function validRange(range, options) {
+      try {
+        return new Range(range, options).range || "*";
+      } catch (er) {
+        return null;
+      }
+    }
+    exports.ltr = ltr;
+    function ltr(version2, range, options) {
+      return outside(version2, range, "<", options);
+    }
+    exports.gtr = gtr;
+    function gtr(version2, range, options) {
+      return outside(version2, range, ">", options);
+    }
+    exports.outside = outside;
+    function outside(version2, range, hilo, options) {
+      version2 = new SemVer(version2, options);
+      range = new Range(range, options);
+      var gtfn, ltefn, ltfn, comp, ecomp;
+      switch (hilo) {
+        case ">":
+          gtfn = gt;
+          ltefn = lte;
+          ltfn = lt;
+          comp = ">";
+          ecomp = ">=";
+          break;
+        case "<":
+          gtfn = lt;
+          ltefn = gte;
+          ltfn = gt;
+          comp = "<";
+          ecomp = "<=";
+          break;
+        default:
+          throw new TypeError('Must provide a hilo val of "<" or ">"');
+      }
+      if (satisfies(version2, range, options)) {
+        return false;
+      }
+      for (var i2 = 0; i2 < range.set.length; ++i2) {
+        var comparators = range.set[i2];
+        var high = null;
+        var low = null;
+        comparators.forEach(function(comparator) {
+          if (comparator.semver === ANY) {
+            comparator = new Comparator(">=0.0.0");
+          }
+          high = high || comparator;
+          low = low || comparator;
+          if (gtfn(comparator.semver, high.semver, options)) {
+            high = comparator;
+          } else if (ltfn(comparator.semver, low.semver, options)) {
+            low = comparator;
+          }
+        });
+        if (high.operator === comp || high.operator === ecomp) {
+          return false;
+        }
+        if ((!low.operator || low.operator === comp) && ltefn(version2, low.semver)) {
+          return false;
+        } else if (low.operator === ecomp && ltfn(version2, low.semver)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    exports.prerelease = prerelease;
+    function prerelease(version2, options) {
+      var parsed = parse4(version2, options);
+      return parsed && parsed.prerelease.length ? parsed.prerelease : null;
+    }
+    exports.intersects = intersects;
+    function intersects(r1, r2, options) {
+      r1 = new Range(r1, options);
+      r2 = new Range(r2, options);
+      return r1.intersects(r2);
+    }
+    exports.coerce = coerce;
+    function coerce(version2) {
+      if (version2 instanceof SemVer) {
+        return version2;
+      }
+      if (typeof version2 !== "string") {
+        return null;
+      }
+      var match = version2.match(safeRe[COERCE]);
+      if (match == null) {
+        return null;
+      }
+      return parse4(match[1] + "." + (match[2] || "0") + "." + (match[3] || "0"));
+    }
+  }
+});
+
+// node_modules/macos-version/index.js
+var require_macos_version = __commonJS({
+  "node_modules/macos-version/index.js"(exports, module) {
+    "use strict";
+    var fs = __require("fs");
+    var semver = require_semver();
+    var isMacOS = process.platform === "darwin";
+    var version2;
+    var clean = (version3) => {
+      const { length } = version3.split(".");
+      if (length === 1) {
+        return `${version3}.0.0`;
+      }
+      if (length === 2) {
+        return `${version3}.0`;
+      }
+      return version3;
+    };
+    var parseVersion = (plist) => {
+      const matches = /<key>ProductVersion<\/key>[\s]*<string>([\d.]+)<\/string>/.exec(plist);
+      if (!matches) {
+        return;
+      }
+      return matches[1].replace("10.16", "11");
+    };
+    var getVersion = () => {
+      if (!isMacOS) {
+        return;
+      }
+      if (!version2) {
+        const file = fs.readFileSync("/System/Library/CoreServices/SystemVersion.plist", "utf8");
+        const matches = parseVersion(file);
+        if (!matches) {
+          return;
+        }
+        version2 = matches;
+      }
+      if (version2) {
+        return clean(version2);
+      }
+    };
+    module.exports = getVersion;
+    module.exports.default = getVersion;
+    getVersion._parseVersion = parseVersion;
+    getVersion.isMacOS = isMacOS;
+    getVersion.is = (input) => {
+      if (!isMacOS) {
+        return false;
+      }
+      input = input.replace("10.16", "11");
+      return semver.satisfies(getVersion(), clean(input));
+    };
+    getVersion.isGreaterThanOrEqualTo = (input) => {
+      if (!isMacOS) {
+        return false;
+      }
+      input = input.replace("10.16", "11");
+      return semver.gte(getVersion(), clean(input));
+    };
+    getVersion.assert = (input) => {
+      input = input.replace("10.16", "11");
+      if (!getVersion.is(input)) {
+        throw new Error(`Requires macOS ${input}`);
+      }
+    };
+    getVersion.assertGreaterThanOrEqualTo = (input) => {
+      input = input.replace("10.16", "11");
+      if (!getVersion.isGreaterThanOrEqualTo(input)) {
+        throw new Error(`Requires macOS ${input} or later`);
+      }
+    };
+    getVersion.assertMacOS = () => {
+      if (!isMacOS) {
+        throw new Error("Requires macOS");
+      }
+    };
+  }
+});
+
+// node_modules/@jxa/run/lib/run.js
+var require_run = __commonJS({
+  "node_modules/@jxa/run/lib/run.js"(exports) {
+    "use strict";
+    Object.defineProperty(exports, "__esModule", { value: true });
+    exports.run = exports.runJXACode = void 0;
+    var execFile3 = __require("child_process").execFile;
+    var macosVersion = require_macos_version();
+    function runJXACode(jxaCode) {
+      return executeInOsa(jxaCode, []);
+    }
+    exports.runJXACode = runJXACode;
+    function run4(jxaCodeFunction) {
+      var args = [];
+      for (var _i = 1; _i < arguments.length; _i++) {
+        args[_i - 1] = arguments[_i];
+      }
+      var code = "\nObjC.import('stdlib');\nvar args = JSON.parse($.getenv('OSA_ARGS'));\nvar fn   = (".concat(jxaCodeFunction.toString(), ");\nvar out  = fn.apply(null, args);\nJSON.stringify({ result: out });\n");
+      return executeInOsa(code, args);
+    }
+    exports.run = run4;
+    var DEFAULT_MAX_BUFFER = 1e3 * 1e3 * 100;
+    function executeInOsa(code, args) {
+      return new Promise(function(resolve, reject) {
+        macosVersion.assertGreaterThanOrEqualTo("10.10");
+        var child = execFile3("/usr/bin/osascript", ["-l", "JavaScript"], {
+          env: {
+            OSA_ARGS: JSON.stringify(args)
+          },
+          maxBuffer: DEFAULT_MAX_BUFFER
+        }, function(err, stdout, stderr) {
+          if (err) {
+            return reject(err);
+          }
+          if (stderr) {
+            console.error(stderr);
+          }
+          if (!stdout) {
+            resolve(void 0);
+          }
+          try {
+            var result2 = JSON.parse(stdout.toString().trim()).result;
+            resolve(result2);
+          } catch (errorOutput) {
+            resolve(stdout.toString().trim());
+          }
+        });
+        child.stdin.write(code);
+        child.stdin.end();
+      });
+    }
   }
 });
 
@@ -11134,7 +11123,7 @@ function notePreview(raw) {
 }
 async function requestNotesAccess() {
   try {
-    await (0, import_run2.run)(() => {
+    await (0, import_run.run)(() => {
       return Application("Notes").name();
     });
     return { hasAccess: true, message: "Notes access is granted." };
@@ -11148,7 +11137,7 @@ async function requestNotesAccess() {
 async function readStoreColumns() {
   let columns;
   try {
-    columns = await (0, import_run2.run)(() => {
+    columns = await (0, import_run.run)(() => {
       const Notes = Application("Notes");
       let names = [];
       let bodies = [];
@@ -11204,7 +11193,7 @@ async function createNote(title, body, folderName = DEFAULT_FOLDER) {
   const noteBody = `${title}
 ${body ?? ""}`;
   try {
-    const result2 = await (0, import_run2.run)(
+    const result2 = await (0, import_run.run)(
       (opts) => {
         const Notes = Application("Notes");
         const folderNames = Notes.folders.name();
@@ -11247,7 +11236,7 @@ ${body ?? ""}`;
 async function scanFolder(folderName) {
   let raw;
   try {
-    raw = await (0, import_run2.run)(
+    raw = await (0, import_run.run)(
       (opts) => {
         const Notes = Application("Notes");
         const folderNames = Notes.folders.name();
@@ -11342,11 +11331,11 @@ async function getNotesByDateRange(folderName, fromDate, toDate, limit = 20) {
   });
   return { success: true, notes: filtered.slice(0, Math.max(0, limit)) };
 }
-var import_run2, MAX_NOTES, MAX_CONTENT_PREVIEW, DEFAULT_FOLDER, lastNotesTruncation, NOTES_SUMMARIES, NOTES_CREATE_SUMMARIES, notes_default;
+var import_run, MAX_NOTES, MAX_CONTENT_PREVIEW, DEFAULT_FOLDER, lastNotesTruncation, NOTES_SUMMARIES, NOTES_CREATE_SUMMARIES, notes_default;
 var init_notes = __esm({
   "utils/notes.ts"() {
     "use strict";
-    import_run2 = __toESM(require_run(), 1);
+    import_run = __toESM(require_run(), 1);
     init_native();
     MAX_NOTES = 5e3;
     MAX_CONTENT_PREVIEW = 2e3;
@@ -11790,52 +11779,12 @@ __export(reminders_exports, {
   REMINDERS_SUMMARIES: () => REMINDERS_SUMMARIES,
   default: () => reminders_default
 });
-async function ask(action, payload = {}) {
-  if (!BROKER_URL || !BROKER_SECRET) {
-    throw new ToolFailure(
-      "app_not_running",
-      "Reminders is only available inside Maestro, which reads the store directly. Scripting the Reminders app takes minutes per reminder, so there is no second way to do it."
-    );
-  }
-  let response;
-  try {
-    response = await fetch(BROKER_URL, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-reminders-secret": BROKER_SECRET
-      },
-      body: JSON.stringify({ action, ...payload })
-    });
-  } catch (error2) {
-    throw new ToolFailure(
-      "app_not_running",
-      `Could not reach Maestro to read your reminders: ${String(error2)}`
-    );
-  }
-  const text = await response.text();
-  let body;
-  try {
-    body = JSON.parse(text);
-  } catch {
-    throw new ToolFailure(
-      "internal_error",
-      "Maestro answered something that is not a reminders answer.",
-      `HTTP ${response.status}
-${text}`
-    );
-  }
-  if (body?.ok !== "true" && body?.ok !== true) {
-    throw new ToolFailure(
-      body?.code ?? "internal_error",
-      body?.reason ?? REMINDERS_SUMMARIES.failed
-    );
-  }
-  return body;
+async function ask2(action, payload = {}) {
+  return ask("reminders", action, payload, REMINDERS_SUMMARIES);
 }
 async function requestRemindersAccess() {
   try {
-    await ask("lists");
+    await ask2("lists");
     return { hasAccess: true, message: "Reminders access is granted." };
   } catch (error2) {
     if (error2 instanceof ToolFailure && error2.code === "permission_denied") {
@@ -11845,7 +11794,7 @@ async function requestRemindersAccess() {
   }
 }
 async function scan(opts) {
-  const body = await ask("scan", {
+  const body = await ask2("scan", {
     search: opts.search ?? null,
     listId: opts.listId ?? null
   });
@@ -11855,7 +11804,7 @@ async function scan(opts) {
   };
 }
 async function getAllLists() {
-  const body = await ask("lists");
+  const body = await ask2("lists");
   return body.lists ?? [];
 }
 async function getAllReminders() {
@@ -11874,7 +11823,7 @@ async function openReminder(searchText) {
     );
   }
   try {
-    await (0, import_run3.run)(() => {
+    await (0, import_run2.run)(() => {
       Application("Reminders").activate();
       return true;
     });
@@ -11893,7 +11842,7 @@ async function createReminder(name, listName, notes2, dueDate) {
       "Could not create the reminder: no name was given."
     );
   }
-  const body = await ask("create", {
+  const body = await ask2("create", {
     name,
     listName: listName ?? null,
     notes: notes2 ?? null,
@@ -11917,14 +11866,13 @@ async function getRemindersFromListById(listId, props) {
   }
   return result2.items;
 }
-var import_run3, BROKER_URL, BROKER_SECRET, REMINDERS_SUMMARIES, REMINDERS_CREATE_SUMMARIES, REMINDERS_OPEN_SUMMARIES, reminders_default;
+var import_run2, REMINDERS_SUMMARIES, REMINDERS_CREATE_SUMMARIES, REMINDERS_OPEN_SUMMARIES, reminders_default;
 var init_reminders = __esm({
   "utils/reminders.ts"() {
     "use strict";
-    import_run3 = __toESM(require_run(), 1);
+    import_run2 = __toESM(require_run(), 1);
     init_native();
-    BROKER_URL = (process.env.MAESTRO_REMINDERS_URL ?? "").trim();
-    BROKER_SECRET = (process.env.MAESTRO_REMINDERS_SECRET ?? "").trim();
+    init_maestro();
     REMINDERS_SUMMARIES = {
       denied: "Could not reach your reminders: macOS denied access to Reminders. " + grantSentence("Reminders"),
       notRunning: "Could not reach your reminders: Maestro could not be reached.",
@@ -11962,7 +11910,7 @@ __export(calendar_exports, {
   CALENDAR_OPEN_SUMMARIES: () => CALENDAR_OPEN_SUMMARIES,
   CALENDAR_SUMMARIES: () => CALENDAR_SUMMARIES,
   default: () => calendar_default,
-  lastWindowTruncation: () => lastWindowTruncation
+  lastWindowTotal: () => lastWindowTotal
 });
 function parseDate(value, label) {
   const d = new Date(value);
@@ -11992,114 +11940,38 @@ function resolveWindow(fromDate, toDate, defaultDays) {
   }
   return { fromMs: from.getTime(), toMs: to.getTime() };
 }
+async function ask3(action, payload = {}) {
+  return ask("calendar", action, payload, CALENDAR_SUMMARIES);
+}
 async function requestCalendarAccess() {
   try {
-    await (0, import_run4.run)(() => Application("Calendar").name());
+    await ask3("calendars");
     return { hasAccess: true, message: "Calendar access is granted." };
   } catch (error2) {
-    if (isPermissionDenial(error2)) {
+    if (error2 instanceof ToolFailure && error2.code === "permission_denied") {
       return { hasAccess: false, message: CALENDAR_SUMMARIES.denied };
     }
-    throwAppleFailure(error2, CALENDAR_SUMMARIES);
+    throw error2;
   }
 }
-async function findWindow(fromMs, toMs) {
-  const scan2 = await (0, import_run4.run)(
-    (args) => {
-      const C = Application("Calendar");
-      const calendarNames = C.calendars.name();
-      const slots = [];
-      let visited = 0;
-      let skippedCalendars = 0;
-      let firstError = "";
-      for (let ci = 0; ci < calendarNames.length; ci++) {
-        visited++;
-        try {
-          const starts = C.calendars[ci].events.startDate();
-          for (let ei = 0; ei < starts.length; ei++) {
-            const d = starts[ei];
-            const ms = d && typeof d.getTime === "function" ? d.getTime() : NaN;
-            if (Number.isNaN(ms) || ms < args.fromMs || ms > args.toMs) continue;
-            slots.push({ ci, ei, startMs: ms });
-          }
-        } catch (badCalendar) {
-          skippedCalendars++;
-          if (!firstError) firstError = String(badCalendar);
-        }
-      }
-      return { calendarNames, slots, visited, skippedCalendars, firstError };
-    },
-    { fromMs, toMs }
-  );
-  if (scan2.visited > 0 && scan2.skippedCalendars === scan2.visited) {
-    throw new ToolFailure(
-      "applescript_error",
-      `Could not read your calendar: all ${scan2.visited} calendars failed to read.`,
-      rawBody(scan2.firstError)
-    );
-  }
-  return scan2;
-}
-async function readSlots(slots, calendarNames, fromMs, toMs, limit, search) {
-  const read = await (0, import_run4.run)(
-    (args) => {
-      const C = Application("Calendar");
-      const out = [];
-      for (let k = 0; k < args.slots.length && out.length < args.limit; k++) {
-        const slot = args.slots[k];
-        try {
-          const ev = C.calendars[slot.ci].events[slot.ei];
-          const start = ev.startDate();
-          const startMs = start ? start.getTime() : NaN;
-          if (Number.isNaN(startMs) || startMs < args.fromMs || startMs > args.toMs) continue;
-          const title = ev.summary() || "";
-          const location = ev.location() || null;
-          const notes2 = ev.description() || null;
-          if (args.search) {
-            const hay = (title + " " + (location || "") + " " + (notes2 || "")).toLowerCase();
-            if (hay.indexOf(args.search) === -1) continue;
-          }
-          const end = ev.endDate();
-          out.push({
-            id: ev.uid(),
-            title,
-            startDate: start.toISOString(),
-            endDate: end ? end.toISOString() : "",
-            location,
-            calendarName: args.calendarNames[slot.ci],
-            notes: notes2
-          });
-        } catch (_badEvent) {
-        }
-      }
-      return { items: out };
-    },
-    { slots, calendarNames, fromMs, toMs, limit, search }
-  );
-  return read.items;
-}
-async function scanWindow(fromMs, toMs, limit, search) {
-  const { calendarNames, slots } = await findWindow(fromMs, toMs);
-  slots.sort((a, b) => a.startMs - b.startMs);
-  const considered = slots.slice(0, MAX_SCAN);
-  if (considered.length === 0) {
-    lastWindowTruncation = null;
-    return [];
-  }
-  const items = await readSlots(considered, calendarNames, fromMs, toMs, limit, search);
-  lastWindowTruncation = slots.length > considered.length && items.length < limit ? { examined: considered.length } : null;
-  return items;
+async function windowEvents(fromMs, toMs, limit, search) {
+  const body = await ask3("events", {
+    from: new Date(fromMs).toISOString(),
+    to: new Date(toMs).toISOString(),
+    search: search || null,
+    limit: Math.max(0, limit)
+  });
+  const events = body.events ?? [];
+  const total = typeof body.total === "number" ? body.total : events.length;
+  lastWindowTotal = total > events.length ? { shown: events.length, total } : null;
+  return events;
 }
 async function getEvents(limit = 10, fromDate, toDate) {
   const { fromMs, toMs } = resolveWindow(fromDate, toDate, LIST_WINDOW_DAYS);
-  try {
-    return await scanWindow(fromMs, toMs, Math.max(1, limit), "");
-  } catch (error2) {
-    throwAppleFailure(error2, CALENDAR_SUMMARIES);
-  }
+  return windowEvents(fromMs, toMs, Math.max(1, limit), "");
 }
 async function searchEvents(searchText, limit = 10, fromDate, toDate) {
-  const needle = (searchText ?? "").trim().toLowerCase();
+  const needle = (searchText ?? "").trim();
   if (needle === "") {
     throw new ToolFailure(
       "bad_request",
@@ -12107,11 +11979,7 @@ async function searchEvents(searchText, limit = 10, fromDate, toDate) {
     );
   }
   const { fromMs, toMs } = resolveWindow(fromDate, toDate, SEARCH_WINDOW_DAYS);
-  try {
-    return await scanWindow(fromMs, toMs, Math.max(1, limit), needle);
-  } catch (error2) {
-    throwAppleFailure(error2, CALENDAR_SUMMARIES);
-  }
+  return windowEvents(fromMs, toMs, Math.max(1, limit), needle);
 }
 async function openEvent(eventId) {
   const id = (eventId ?? "").trim();
@@ -12121,66 +11989,17 @@ async function openEvent(eventId) {
       "Could not open the event: no event ID was given."
     );
   }
+  const body = await ask("calendar", "event", { id }, CALENDAR_OPEN_SUMMARIES);
+  const found = body.event;
   try {
-    const found = await (0, import_run4.run)(
-      (args) => {
-        const C = Application("Calendar");
-        const calNames = C.calendars.name();
-        let skippedCalendars = 0;
-        let firstError = "";
-        for (let ci = 0; ci < calNames.length; ci++) {
-          try {
-            const uids = C.calendars[ci].events.uid();
-            const index = uids.indexOf(args.id);
-            if (index < 0) continue;
-            const ev = C.calendars[ci].events[index];
-            let title = "";
-            try {
-              title = ev.summary() || "";
-            } catch (_noTitle) {
-            }
-            C.activate();
-            return {
-              found: true,
-              title,
-              skippedCalendars,
-              firstError,
-              visited: calNames.length
-            };
-          } catch (badCalendar) {
-            skippedCalendars++;
-            if (!firstError) firstError = String(badCalendar);
-          }
-        }
-        return {
-          found: false,
-          title: "",
-          skippedCalendars,
-          firstError,
-          visited: calNames.length
-        };
-      },
-      { id }
-    );
-    if (found.visited > 0 && found.skippedCalendars === found.visited) {
-      throw new ToolFailure(
-        "applescript_error",
-        `Could not open the event: all ${found.visited} calendars failed to read.`,
-        rawBody(found.firstError)
-      );
-    }
-    if (!found.found) {
-      throw new ToolFailure(
-        "not_found",
-        `Could not open the event: no event has the ID "${id}".`
-      );
-    }
-    return {
-      message: found.title ? `Opened Calendar at "${found.title}".` : "Opened Calendar at the event."
-    };
+    await (0, import_run3.run)(() => {
+      Application("Calendar").activate();
+      return true;
+    });
   } catch (error2) {
     throwAppleFailure(error2, CALENDAR_OPEN_SUMMARIES);
   }
+  return { message: `Opened Calendar. Found event: ${found.title}` };
 }
 async function createEvent(title, startDate, endDate, location, notes2, isAllDay = false, calendarName) {
   if (!title || title.trim() === "") {
@@ -12192,87 +12011,33 @@ async function createEvent(title, startDate, endDate, location, notes2, isAllDay
   if (!startDate || !endDate) {
     throw new ToolFailure(
       "bad_request",
-      "Could not create the event: a start date and an end date are both required."
+      "Could not create the event: a start and an end time are both needed."
     );
   }
-  const start = parseDate(startDate, "startDate");
-  const end = parseDate(endDate, "endDate");
-  if (!isAllDay && end.getTime() <= start.getTime()) {
-    throw new ToolFailure(
-      "bad_request",
-      "Could not create the event: the end date is not after the start date."
-    );
-  }
-  try {
-    const result2 = await (0, import_run4.run)(
-      (args) => {
-        const C = Application("Calendar");
-        let cal = null;
-        if (args.calendarName) {
-          try {
-            const named = C.calendars.byName(args.calendarName);
-            named.name();
-            cal = named;
-          } catch (_notFound) {
-            cal = null;
-          }
-          if (!cal) return { error: "calendar_not_found" };
-        } else {
-          const all = C.calendars();
-          if (all.length === 0) return { error: "no_calendars" };
-          cal = all[0];
-        }
-        const props = {
-          summary: args.title,
-          startDate: new Date(args.startMs),
-          endDate: new Date(args.endMs),
-          alldayEvent: args.isAllDay
-        };
-        if (args.location) props.location = args.location;
-        if (args.notes) props.description = args.notes;
-        const ev = C.Event(props);
-        cal.events.push(ev);
-        return { uid: ev.uid(), calendarName: cal.name() };
-      },
-      {
-        title: title.trim(),
-        startMs: start.getTime(),
-        endMs: end.getTime(),
-        location: location ?? "",
-        notes: notes2 ?? "",
-        isAllDay: !!isAllDay,
-        calendarName: calendarName ?? ""
-      }
-    );
-    if ("error" in result2) {
-      if (result2.error === "calendar_not_found") {
-        throw new ToolFailure(
-          "not_found",
-          `Could not create the event: there is no calendar named "${calendarName}".`
-        );
-      }
-      throw new ToolFailure(
-        "not_found",
-        "Could not create the event: there are no calendars to create it in."
-      );
-    }
-    return {
-      message: `Event "${title.trim()}" created in "${result2.calendarName}".`,
-      eventId: result2.uid
-    };
-  } catch (error2) {
-    throwAppleFailure(error2, CALENDAR_CREATE_SUMMARIES);
-  }
+  parseDate(startDate, "startDate");
+  parseDate(endDate, "endDate");
+  const body = await ask("calendar", "create", {
+    title,
+    start: startDate,
+    end: endDate,
+    location: location ?? null,
+    notes: notes2 ?? null,
+    isAllDay,
+    calendarName: calendarName ?? null
+  }, CALENDAR_CREATE_SUMMARIES);
+  const made = body.event;
+  return {
+    message: `Created "${made.title}" in "${made.calendarName}".`,
+    eventId: made.id
+  };
 }
-var import_run4, MAX_SCAN, lastWindowTruncation, LIST_WINDOW_DAYS, SEARCH_WINDOW_DAYS, CALENDAR_SUMMARIES, CALENDAR_OPEN_SUMMARIES, CALENDAR_CREATE_SUMMARIES, calendar, calendar_default;
+var import_run3, LIST_WINDOW_DAYS, SEARCH_WINDOW_DAYS, CALENDAR_SUMMARIES, CALENDAR_OPEN_SUMMARIES, CALENDAR_CREATE_SUMMARIES, lastWindowTotal, calendar, calendar_default;
 var init_calendar = __esm({
   "utils/calendar.ts"() {
     "use strict";
-    import_run4 = __toESM(require_run(), 1);
+    import_run3 = __toESM(require_run(), 1);
     init_native();
-    init_failure();
-    MAX_SCAN = 1e3;
-    lastWindowTruncation = null;
+    init_maestro();
     LIST_WINDOW_DAYS = 7;
     SEARCH_WINDOW_DAYS = 30;
     CALENDAR_SUMMARIES = {
@@ -12293,8 +12058,9 @@ var init_calendar = __esm({
       timedOut: "Could not create the event: Calendar did not answer in time.",
       failed: "Could not create the event."
     };
+    lastWindowTotal = null;
     calendar = {
-      truncation: () => lastWindowTruncation,
+      truncation: () => lastWindowTotal,
       searchEvents,
       openEvent,
       getEvents,
@@ -12344,6 +12110,20 @@ ${mine.map(line).join("\n")}`);
   return `${header}
 
 ${sections.join("\n\n")}`;
+}
+
+// utils/contacts-render.ts
+function contactLine(c) {
+  const ways = [...c.emails, ...c.phones];
+  return ways.length > 0 ? `${c.name}: ${ways.join(", ")}` : `${c.name}: (no email or phone on the card)`;
+}
+function contactsIndex(cards) {
+  if (cards.length === 0) {
+    return "No contacts found in the address book.";
+  }
+  return `Found ${cards.length} contacts:
+
+${cards.map(contactLine).join("\n")}`;
 }
 
 // node_modules/zod/v4/core/core.js
@@ -19635,15 +19415,10 @@ var ENABLED_APPS = (() => {
 function isAppEnabled(toolName) {
   return ENABLED_APPS === null || ENABLED_APPS.has(toolName.toLowerCase());
 }
-function contactsTruncationNote(cut) {
-  return cut ? `
-
-(Only the first ${cut.shown} of ${cut.total} contacts were looked at, so this may be incomplete.)` : "";
-}
 function calendarTruncationNote(cut) {
   return cut ? `
 
-(Stopped after the first ${cut.examined} events in this window, so this may be incomplete.)` : "";
+(Showing ${cut.shown} of ${cut.total} in that window. Ask for a bigger limit or a narrower window.)` : "";
 }
 function notesTruncationNote(cut, what) {
   return cut ? `
@@ -19790,7 +19565,6 @@ function initServer() {
             const contactsModule = await loadModule("contacts");
             if (args.name) {
               const found = await contactsModule.findContacts(args.name);
-              const partial2 = contactsTruncationNote(contactsModule.truncation());
               const lines = found.map((c) => {
                 const parts = [];
                 if (c.emails.length > 0) parts.push(c.emails.join(", "));
@@ -19801,36 +19575,15 @@ function initServer() {
                 content: [
                   {
                     type: "text",
-                    text: lines.length ? lines.join("\n") + partial2 : `No contact found for "${args.name}". Try a different name or use no name parameter to list all contacts.${partial2}`
+                    text: lines.length ? lines.join("\n") : `No contact found for "${args.name}". Try a different name or use no name parameter to list all contacts.`
                   }
                 ],
                 isError: false
               };
             } else {
-              const allNumbers = await contactsModule.getAllNumbers();
-              const partial2 = contactsTruncationNote(contactsModule.truncation());
-              const contactCount = Object.keys(allNumbers).length;
-              if (contactCount === 0) {
-                return {
-                  content: [
-                    {
-                      type: "text",
-                      text: `No contacts found in the address book.${partial2}`
-                    }
-                  ],
-                  isError: false
-                };
-              }
-              const formattedContacts = Object.entries(allNumbers).filter(([_, phones]) => phones.length > 0).map(([name2, phones]) => `${name2}: ${phones.join(", ")}`);
+              const all = await contactsModule.getAllContacts();
               return {
-                content: [
-                  {
-                    type: "text",
-                    text: formattedContacts.length > 0 ? `Found ${contactCount} contacts:
-
-${formattedContacts.join("\n")}${partial2}` : `Found contacts but none have phone numbers. Try searching by name to see more details.${partial2}`
-                  }
-                ],
+                content: [{ type: "text", text: contactsIndex(all) }],
                 isError: false
               };
             }

@@ -3,6 +3,7 @@ import {
 	remindersDetail,
 	remindersIndex,
 } from "./utils/reminders-render";
+import { contactsIndex } from "./utils/contacts-render";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 
 /// How much of each note a LIST shows. A list is an index, not the content: returning every body in
@@ -41,14 +42,11 @@ function isAppEnabled(toolName: string): boolean {
 // A SHORT ANSWER MUST NEVER BE MISTAKEN FOR THE WHOLE ANSWER. Both of these caps used to bite in
 // silence, which made "not found" and "not looked at" the same sentence. Null means the cap did not
 // bite and nothing is added.
-function contactsTruncationNote(cut: { shown: number; total: number } | null): string {
+/** A limit that shortened the answer is SAID, never implied: "10 of 34" and "10" are different facts,
+ *  and the second invites a reader to conclude there were ten. */
+function calendarTruncationNote(cut: { shown: number; total: number } | null): string {
 	return cut
-		? `\n\n(Only the first ${cut.shown} of ${cut.total} contacts were looked at, so this may be incomplete.)`
-		: "";
-}
-function calendarTruncationNote(cut: { examined: number } | null): string {
-	return cut
-		? `\n\n(Stopped after the first ${cut.examined} events in this window, so this may be incomplete.)`
+		? `\n\n(Showing ${cut.shown} of ${cut.total} in that window. Ask for a bigger limit or a narrower window.)`
 		: "";
 }
 function notesTruncationNote(
@@ -282,7 +280,6 @@ function initServer() {
 							// A "not found" must never be silently a "not looked at": if the scan hit its
 							// cap, say so, because the person searched for may be one of the ones it did
 							// not reach. This was invisible for 647 of 1,647 cards on a real Mac.
-							const partial = contactsTruncationNote(contactsModule.truncation());
 							const lines = found.map((c) => {
 								const parts = [];
 								if (c.emails.length > 0) parts.push(c.emails.join(", "));
@@ -294,56 +291,18 @@ function initServer() {
 									{
 										type: "text",
 										text: lines.length
-											? lines.join("\n") + partial
-											: `No contact found for "${args.name}". Try a different name or use no name parameter to list all contacts.${partial}`,
+											? lines.join("\n")
+											: `No contact found for "${args.name}". Try a different name or use no name parameter to list all contacts.`,
 									},
 								],
 								isError: false,
 							};
 						} else {
-							const allNumbers = await contactsModule.getAllNumbers();
-							// The cap bites HERE too, and this branch used to say nothing about it: a list
-							// of "all" contacts that was really the first n of them, with no way to tell.
-							const partial = contactsTruncationNote(contactsModule.truncation());
-							const contactCount = Object.keys(allNumbers).length;
-
-							if (contactCount === 0) {
-								// Nothing FAILED to get here: a denial, an unreachable app and a broken read
-								// all throw out of getAllNumbers first. (The old text hedged with "make sure
-								// you have granted access to Contacts", which invited a reader to treat an
-								// empty result as a permission problem it is not.)
-								//
-								// But empty is not always the whole story, and this is the one place it can
-								// SOUND like it. `partial` is the difference between an address book with
-								// nobody in it and a cap that stopped before it reached anybody with a phone
-								// number, and saying "No contacts found in the address book" for the second
-								// is the exact failure this note exists to prevent. Caught by forcing the cap
-								// down to 5 and reading what the server actually returned.
-								return {
-									content: [
-										{
-											type: "text",
-											text: `No contacts found in the address book.${partial}`,
-										},
-									],
-									isError: false,
-								};
-							}
-
-							const formattedContacts = Object.entries(allNumbers)
-								.filter(([_, phones]) => phones.length > 0)
-								.map(([name, phones]) => `${name}: ${phones.join(", ")}`);
-
+							// EVERY CARD, with the emails as well as the phones. See utils/contacts-render.ts
+							// for what this used to do and why it was wrong.
+							const all = await contactsModule.getAllContacts();
 							return {
-								content: [
-									{
-										type: "text",
-										text:
-											formattedContacts.length > 0
-												? `Found ${contactCount} contacts:\n\n${formattedContacts.join("\n")}${partial}`
-												: `Found contacts but none have phone numbers. Try searching by name to see more details.${partial}`,
-									},
-								],
+								content: [{ type: "text", text: contactsIndex(all) }],
 								isError: false,
 							};
 						}

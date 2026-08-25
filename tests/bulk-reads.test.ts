@@ -26,121 +26,146 @@ mock.module("@jxa/run", () => ({
 	},
 }));
 
+// Reminders, contacts and calendar are read by MAESTRO now, through EventKit and the Contacts framework,
+// so for those three the boundary under test is the loopback call rather than the Apple Event. Same rule,
+// one layer out: ask ONCE for what you need, and never once per item.
+process.env.MAESTRO_CONTACTS_URL = "http://127.0.0.1:0/contacts";
+process.env.MAESTRO_CONTACTS_SECRET = "test";
+process.env.MAESTRO_CALENDAR_URL = "http://127.0.0.1:0/calendar";
+process.env.MAESTRO_CALENDAR_SECRET = "test";
+
+/** What Maestro answers next, and every ask, so a test can count the crossings. */
+let askImpl: (body: any) => unknown = () => {
+	throw new Error("no Maestro implementation set for this test");
+};
+let askCalls: { action: string; body: any }[] = [];
+
+const askingMaestro = (async (_url: any, init: any) => {
+	const body = JSON.parse(init.body);
+	askCalls.push({ action: body.action, body });
+	return {
+		status: 200,
+		text: async () => JSON.stringify({ ok: "true", ...(askImpl(body) as object) }),
+	};
+}) as unknown as typeof fetch;
+globalThis.fetch = askingMaestro;
+
 const calendar = (await import("../utils/calendar")).default;
 const contacts = (await import("../utils/contacts")).default;
 const notes = (await import("../utils/notes")).default;
 
 beforeEach(() => {
 	runCalls = [];
+	askCalls = [];
+	// Reinstated every time, so a test that installs its own answer cannot leak into the next one.
+	globalThis.fetch = askingMaestro;
 });
 
 const DAY = 24 * 60 * 60 * 1000;
 const BASE = Date.UTC(2026, 5, 1);
 const iso = (ms: number) => new Date(ms).toISOString();
 
-describe("the next events come from the whole account, in time order", () => {
-	// THE BUG THIS PINS DOWN. The scan used to fill `limit` one calendar at a time and stop as soon as
-	// it was full, so "the next 5 events" meant "5 events out of whichever calendars happen to come
-	// first". On a real account that answered with five French public holidays while a work calendar
-	// with earlier meetings in the same window was never opened at all.
+describe("the calendar window is asked for once, and reported honestly", () => {
+	// THE BUG THIS USED TO PIN DOWN. The scan filled `limit` one calendar at a time and stopped as soon
+	// as it was full, so "the next 5 events" meant "5 events out of whichever calendars came first". On
+	// a real account it answered with five French public holidays while a work calendar holding earlier
+	// meetings in the same window was never opened.
 	//
-	// Pass 1 hands back slots in calendar order, which is why the sort in `scanWindow` is the fix and
-	// why deleting that one line brings the bug back: the first calendar fills the answer again.
-	function twoCalendars() {
-		// Calendar 0 holds the LATE events, calendar 1 the early ones, and neither is internally sorted.
-		const slots = [
-			{ ci: 0, ei: 0, startMs: BASE + 40 * DAY },
-			{ ci: 0, ei: 1, startMs: BASE + 42 * DAY },
-			{ ci: 0, ei: 2, startMs: BASE + 41 * DAY },
-			{ ci: 1, ei: 0, startMs: BASE + 2 * DAY },
-			{ ci: 1, ei: 1, startMs: BASE + 1 * DAY },
-		];
-		let passTwo: any = null;
-		runImpl = (_fn, args) => {
-			if (runCalls.length === 1) {
-				return {
-					calendarNames: ["Holidays", "Work"],
-					slots,
-					visited: 2,
-					skippedCalendars: 0,
-					firstError: "",
-				};
-			}
-			passTwo = args;
-			return {
-				items: args.slots.slice(0, args.limit).map((s: any) => ({
-					id: `e${s.ci}-${s.ei}`,
-					title: `event ${s.ci}-${s.ei}`,
-					startDate: iso(s.startMs),
-					endDate: iso(s.startMs + 3600000),
-					location: null,
-					calendarName: args.calendarNames[s.ci],
-					notes: null,
-				})),
-			};
-		};
-		return { get passTwo() { return passTwo; } };
-	}
+	// That property now lives in Swift, where the sorting does: see `CalendarOrderTests.swift`, which
+	// fails with exactly the old symptom if the cut is taken before the sort. It is NOT tested twice.
+	// What is still on this side of the wire is everything below: one ask per call, the window that was
+	// asked for, and a short answer that says it is short.
+	const EVENTS = [
+		{ id: "1", title: "board meeting", startDate: iso(BASE), endDate: iso(BASE + 3600_000),
+			calendarName: "Work" },
+		{ id: "2", title: "standup", startDate: iso(BASE + DAY), endDate: iso(BASE + DAY + 3600_000),
+			calendarName: "Work" },
+	];
 
-	test("two events asked for are the two EARLIEST, from the calendar listed second", async () => {
-		twoCalendars();
-		const events = await calendar.getEvents(2, iso(BASE), iso(BASE + 365 * DAY));
+	test("one call is ONE ask, with the window and the limit on it", async () => {
+		askImpl = () => ({ events: EVENTS, total: 2 });
+		const got = await calendar.getEvents(5, iso(BASE), iso(BASE + 7 * DAY));
 
-		expect(events.map((e) => e.calendarName)).toEqual(["Work", "Work"]);
-		expect(events.map((e) => e.startDate)).toEqual([
-			iso(BASE + 1 * DAY),
-			iso(BASE + 2 * DAY),
-		]);
+		expect(askCalls.length).toBe(1);
+		expect(askCalls[0].action).toBe("events");
+		expect(askCalls[0].body.from).toBe(iso(BASE));
+		expect(askCalls[0].body.to).toBe(iso(BASE + 7 * DAY));
+		expect(askCalls[0].body.limit).toBe(5);
+		expect(got.map((e) => e.title)).toEqual(["board meeting", "standup"]);
 	});
 
-	test("the details are read in time order, so a cut anywhere is still the earliest n", async () => {
-		const probe = twoCalendars();
-		await calendar.getEvents(2, iso(BASE), iso(BASE + 365 * DAY));
-
-		const order = probe.passTwo.slots.map((s: any) => s.startMs);
-		expect(order).toEqual([...order].sort((a: number, b: number) => a - b));
-		// And within one calendar too: 42 days out must not be read before 41.
-		expect(order).toEqual([
-			BASE + 1 * DAY,
-			BASE + 2 * DAY,
-			BASE + 40 * DAY,
-			BASE + 41 * DAY,
-			BASE + 42 * DAY,
-		]);
+	test("the order Maestro sent is the order returned, untouched", async () => {
+		// Re-sorting here would be a second opinion about the same question, and the two would disagree
+		// the first time one of them changed.
+		askImpl = () => ({ events: [EVENTS[1], EVENTS[0]], total: 2 });
+		const got = await calendar.getEvents(5);
+		expect(got.map((e) => e.title)).toEqual(["standup", "board meeting"]);
 	});
 
-	test("finding the window is ONE crossing per pass, not one per event", async () => {
-		twoCalendars();
-		await calendar.getEvents(2, iso(BASE), iso(BASE + 365 * DAY));
-		// One to find where the events are, one to read what they say. Five events in the window.
-		expect(runCalls.length).toBe(2);
+	test("a limit that cut the answer is SAID, not implied", async () => {
+		askImpl = () => ({ events: [EVENTS[0]], total: 34 });
+		await calendar.getEvents(1);
+		expect(calendar.truncation()).toEqual({ shown: 1, total: 34 });
 	});
 
-	test("an empty window never opens the second pass at all", async () => {
-		runImpl = () => ({
-			calendarNames: ["Holidays"],
-			slots: [],
-			visited: 1,
-			skippedCalendars: 0,
-			firstError: "",
-		});
-		const events = await calendar.getEvents(5, iso(BASE), iso(BASE + DAY));
-		expect(events).toEqual([]);
-		expect(runCalls.length).toBe(1);
+	test("an answer that was not cut says nothing", async () => {
+		askImpl = () => ({ events: EVENTS, total: 2 });
+		await calendar.getEvents(10);
+		expect(calendar.truncation()).toBeNull();
+	});
+
+	test("a search with no text is a search that was never made", async () => {
+		let thrown: unknown;
+		try {
+			await calendar.searchEvents("   ");
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).toBeInstanceOf(ToolFailure);
+		expect((thrown as ToolFailure).code).toBe("bad_request");
+		expect(askCalls.length).toBe(0);
+	});
+
+	test("an empty window is empty, and is still only one ask", async () => {
+		askImpl = () => ({ events: [], total: 0 });
+		expect(await calendar.getEvents(5)).toEqual([]);
+		expect(askCalls.length).toBe(1);
+	});
+
+	test("a failed read FAILS rather than reporting an empty diary", async () => {
+		globalThis.fetch = (async () => ({
+			status: 200,
+			text: async () =>
+				JSON.stringify({ ok: "false", code: "permission_denied", reason: "no calendar access" }),
+		})) as unknown as typeof fetch;
+
+		let thrown: unknown;
+		try {
+			await calendar.getEvents(5);
+		} catch (error) {
+			thrown = error;
+		}
+		// Denied is not empty is not broke. An empty diary is a thing somebody might act on.
+		expect(thrown).toBeInstanceOf(ToolFailure);
+		expect((thrown as ToolFailure).code).toBe("permission_denied");
 	});
 });
 
 describe("a batch of handles is ONE read of the address book", () => {
 	// THE BUG THIS PINS DOWN. `unread` mapped over the messages and asked for a contact name per
-	// message, and nothing here caches, so every message read the whole address book over Apple Events
-	// on its own. Two unread messages measured 305.9s, of which the sqlite query that finds them was
-	// 0.05s: the entire call was two address books being read to put two names on two lines.
-	const BOOK = {
-		ids: ["A:ABPerson", "B:ABPerson", "C:ABPerson", "D:ABPerson"],
-		names: ["Ada Lovelace", "Bruno Rossi", "Chidi Anagonye", "Nobody Useful"],
-		emails: [["ada@example.com"], [], ["chidi@example.com", "CHIDI@work.example"], []],
-		phones: [[], ["+39 333 1234567"], ["+1 (415) 555-0142"], []],
-	};
+	// message, and nothing here caches, so every message read the whole address book on its own. Two
+	// unread messages measured 305.9s, of which the sqlite query that finds them was 0.05s: the entire
+	// call was two address books being read to put two names on two lines.
+	//
+	// The read moved into Maestro, so a crossing is now a loopback ask rather than an Apple Event. The
+	// property is unchanged and so is the arithmetic: one read for the batch, not one per handle.
+	const CARDS = [
+		{ id: "A:ABPerson", name: "Ada Lovelace", emails: ["ada@example.com"], phones: [] },
+		{ id: "B:ABPerson", name: "Bruno Rossi", emails: [], phones: ["+39 333 1234567"] },
+		{ id: "C:ABPerson", name: "Chidi Anagonye",
+			emails: ["chidi@example.com", "CHIDI@work.example"], phones: ["+1 (415) 555-0142"] },
+		{ id: "D:ABPerson", name: "Nobody Useful", emails: [], phones: [] },
+	];
 	const HANDLES = [
 		"ada@example.com",
 		"+393331234567",
@@ -151,10 +176,11 @@ describe("a batch of handles is ONE read of the address book", () => {
 	];
 
 	test("six handles cost one crossing, and resolve to the right people", async () => {
-		runImpl = () => BOOK;
+		askImpl = () => ({ cards: CARDS });
 		const resolved = await contacts.namesForHandles(HANDLES);
 
-		expect(runCalls.length).toBe(1);
+		expect(askCalls.length).toBe(1);
+		expect(askCalls[0].action).toBe("all");
 		expect(resolved.get("ada@example.com")).toBe("Ada Lovelace");
 		expect(resolved.get("+393331234567")).toBe("Bruno Rossi");
 		expect(resolved.get("+14155550142")).toBe("Chidi Anagonye");
@@ -165,55 +191,91 @@ describe("a batch of handles is ONE read of the address book", () => {
 
 	test("the batch answers exactly what asking one at a time answered, at a sixth of the cost",
 		async () => {
-			runImpl = () => BOOK;
+			askImpl = () => ({ cards: CARDS });
 			const resolved = await contacts.namesForHandles(HANDLES);
-			const batchCrossings = runCalls.length;
+			const batchCrossings = askCalls.length;
 
-			runCalls = [];
+			askCalls = [];
 			for (const handle of HANDLES) {
 				const one = await contacts.findContactByPhone(handle);
 				expect(one).toBe(resolved.get(handle) ?? null);
 			}
 			// The parity check above is the point; this is what it used to COST to get it.
-			expect(runCalls.length).toBe(HANDLES.length);
+			expect(askCalls.length).toBe(HANDLES.length);
 			expect(batchCrossings).toBe(1);
 		});
 
 	test("no handles worth resolving never opens Contacts", async () => {
-		runImpl = () => BOOK;
+		askImpl = () => ({ cards: CARDS });
 		const resolved = await contacts.namesForHandles(["", "   "]);
 		expect(resolved.size).toBe(0);
-		expect(runCalls.length).toBe(0);
+		expect(askCalls.length).toBe(0);
 	});
 
 	test("a card with neither a number nor an address is not a contact anyone can be told about",
 		async () => {
-			runImpl = () => BOOK;
+			// It is still IN the address book, and `getAllContacts` still returns it, because a name
+			// with nothing attached answers "do I know a Nobody Useful". What it cannot be is the answer
+			// to a HANDLE, because there is no handle on it to match.
+			askImpl = () => ({ cards: CARDS });
+			expect((await contacts.getAllContacts()).map((c) => c.name)).toContain("Nobody Useful");
+
+			askCalls = [];
+			askImpl = () => ({ cards: CARDS });
 			const all = await contacts.getAllNumbers();
 			expect(Object.keys(all)).toEqual(["Bruno Rossi", "Chidi Anagonye"]);
 		});
 
-	test("columns that disagree FAIL, rather than filing one person's number under another's name",
-		async () => {
-			// A card added between two of the four reads shifts everything after it by one. Reporting
-			// that is worse than reporting nothing: it is a wrong fact about somebody's address book.
-			runImpl = () => ({
-				ids: BOOK.ids,
-				names: BOOK.names,
-				emails: BOOK.emails,
-				phones: [...BOOK.phones, ["+15555555555"]],
-			});
-			let thrown: unknown;
-			try {
-				await contacts.getAllNumbers();
-			} catch (error) {
-				thrown = error;
-			}
-			expect(thrown).toBeInstanceOf(ToolFailure);
-			expect((thrown as ToolFailure).code).toBe("applescript_error");
-			expect((thrown as ToolFailure).summary).toContain("changed while it was being read");
-			expect((thrown as ToolFailure).body).toContain("4, 4, 4, 5");
+	test("a search is one read of the book, whatever it is asked", async () => {
+		// The version this replaces handed each search term to Contacts as its own `whose` query, so a
+		// two-word name cost three round trips. One fetch of 1,645 cards takes 0.79s, which is less than
+		// one of those cost, so the filtering came home.
+		askImpl = () => ({ cards: CARDS });
+		const found = await contacts.findContacts("Chidi Anagonye");
+		expect(askCalls.length).toBe(1);
+		expect(found.map((c) => c.name)).toEqual(["Chidi Anagonye"]);
+	});
+
+	test("the whole query outranks a single word of it", async () => {
+		askImpl = () => ({
+			cards: [
+				{ id: "1", name: "Rossi Catering", emails: ["hi@rossi.example"], phones: [] },
+				...CARDS,
+			],
 		});
+		const found = await contacts.findContacts("Bruno Rossi");
+		// "Bruno Rossi" matches one card; "Rossi" alone also matches the caterer. Somebody who typed
+		// the full name gets that person first.
+		expect(found[0].name).toBe("Bruno Rossi");
+		expect(found.map((c) => c.name)).toContain("Rossi Catering");
+	});
+
+	test("a denial from Maestro is a denial here, in its own words", async () => {
+		askImpl = () => {
+			throw new Error("unused");
+		};
+		globalThis.fetch = (async () => ({
+			status: 200,
+			text: async () =>
+				JSON.stringify({
+					ok: "false",
+					code: "permission_denied",
+					reason: "Maestro does not have permission to read your contacts.",
+				}),
+		})) as unknown as typeof fetch;
+
+		let thrown: unknown;
+		try {
+			await contacts.getAllContacts();
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).toBeInstanceOf(ToolFailure);
+		// Denied is not empty. An empty address book and a refused one are different facts, and the
+		// code travels whole rather than being re-worded on the way through.
+		expect((thrown as ToolFailure).code).toBe("permission_denied");
+		expect((thrown as ToolFailure).summary).toContain("permission");
+	});
 });
 
 describe("notes are read a column at a time", () => {
