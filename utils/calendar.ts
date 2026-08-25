@@ -15,8 +15,36 @@ import { rawBody } from "./failure";
 // Events, so the Automation (kTCCServiceAppleEvents) permission applies: a denial surfaces as a thrown
 // error which we convert to a typed ToolFailure (Faces charter #2: denied is not empty is not broke).
 
-// Maximum events to scan in a single pass (guards against pathological calendars / wide windows).
+// Maximum events to read details for in a single pass (guards against pathological calendars).
 const MAX_SCAN = 1000;
+
+/** Set when a scan stopped at MAX_SCAN before it had filled the caller's limit. Read by the caller so
+ *  a short answer can say it is short. Null when the cap did not bite. */
+export let lastWindowTruncation: { examined: number } | null = null;
+
+// CALENDAR IS NOT NOTES, AND THIS WAS MEASURED BEFORE IT WAS WRITTEN.
+//
+// Everywhere else in this server the fix for a slow read is to ask the collection for one property in
+// one Apple Event (`Notes.notes.plaintext()` returns 3.5 MB of note bodies in 0.24s, against ~1s PER
+// NOTE one at a time). Calendar does not behave that way. Measured against this Mac's 315 events:
+//
+//     cal.events.summary() on a 107-event calendar      ~2.2s   ONE bulk event
+//     C.calendars.events.startDate(), all 7 at once      8.0s   ONE bulk event, 315 events
+//     per-calendar events.startDate(), seven of them     7.5s   SEVEN bulk events, same 315
+//
+// Those last two are the tell: asking once and asking seven times cost the same, so what Calendar
+// charges for is the EVENT, not the round trip. It is roughly 24ms per event to read one property
+// whichever way you ask, and a bulk column pays that for every event in the calendar whether or not
+// the event is wanted. So pulling six bulk columns per calendar (42 Apple Events, 50.2s measured over
+// this account) is SLOWER than reading six properties off the handful of events actually in the
+// window. Bulk is used for exactly the reads that have to touch every event anyway: the calendar
+// names, and every event's start time.
+//
+// Calendar's latency also DRIFTS, badly: the same 6-property read of the same 20 events measured 15.8s
+// and 10.7s minutes apart, and one probe put a single property read at 21ms where another put it at
+// 147ms. Anything tuned against one run of this app is tuned against noise, which is why there is no
+// threshold or heuristic anywhere below, and why the before/after numbers in the commit come from
+// alternating the old scan and the new one inside a single run.
 
 // Default look-ahead windows (days) when the caller does not pin a date range.
 const LIST_WINDOW_DAYS = 7;
@@ -122,115 +150,49 @@ async function requestCalendarAccess(): Promise<{
 	}
 }
 
+/** Where one event in the window sits: which calendar, which index in it, and when it starts. */
+type WindowSlot = { ci: number; ei: number; startMs: number };
+
+/** What pass 1 found, plus the bookkeeping that tells an empty diary from an unreadable one. */
+type WindowScan = {
+	calendarNames: string[];
+	slots: WindowSlot[];
+	visited: number;
+	skippedCalendars: number;
+	firstError: string;
+};
+
 /**
- * Bounded scan of every calendar for events whose START falls in [fromMs, toMs], optionally filtered
- * by a (pre-lowercased) substring across title/location/notes. Returns up to `limit` events.
+ * PASS 1, WHERE AND NOT WHAT. One bulk read of every event's start time per calendar, which is the one
+ * read that has to touch every event anyway.
  *
- * Performance: we ask Calendar to pre-filter with a `whose` date predicate (fast); if a calendar
- * rejects the predicate we fall back to enumerating its events, and JS re-checks the window either
- * way. Each calendar and each event is guarded so one unreadable item can't abort the whole scan.
- * A genuine TCC denial throws at `Application("Calendar")` BEFORE the loop, so it propagates here
- * (not swallowed by the per-item guards) and is converted to a ToolFailure by the caller.
+ * It replaces the `whose` date predicate and its enumeration fallback. The predicate cost the same
+ * (Calendar evaluates it event by event on its own side, ~25ms an event either way) and the JS window
+ * check had to re-check its answer regardless, so two code paths were being maintained for one result.
+ *
+ * A genuine TCC denial throws at `Application("Calendar")` before the loop, so it propagates rather
+ * than being swallowed by the per-calendar guard.
  */
-async function scanWindow(
-	fromMs: number,
-	toMs: number,
-	limit: number,
-	search: string,
-): Promise<CalEvent[]> {
+async function findWindow(fromMs: number, toMs: number): Promise<WindowScan> {
 	const scan = (await run(
-		(args: {
-			fromMs: number;
-			toMs: number;
-			limit: number;
-			search: string;
-			cap: number;
-		}) => {
+		(args: { fromMs: number; toMs: number }) => {
+			// ONE event for every calendar's name, rather than one per calendar.
 			const C = Application("Calendar");
-			const from = new Date(args.fromMs);
-			const to = new Date(args.toMs);
-			const out: {
-				id: string;
-				title: string;
-				startDate: string;
-				endDate: string;
-				location: string | null;
-				calendarName: string;
-				notes: string | null;
-			}[] = [];
-			let scanned = 0;
+			const calendarNames = C.calendars.name() as string[];
+			const slots: { ci: number; ei: number; startMs: number }[] = [];
 			let visited = 0;
 			let skippedCalendars = 0;
 			let firstError = "";
 
-			const cals = C.calendars();
-			for (let ci = 0; ci < cals.length && out.length < args.limit; ci++) {
+			for (let ci = 0; ci < calendarNames.length; ci++) {
 				visited++;
 				try {
-					const cal = cals[ci];
-					const calName = cal.name();
-
-					// Prefer Calendar's own date predicate; fall back to a full enumeration if the
-					// `whose` query is rejected (the JS window check below makes both paths correct).
-					let evs: unknown[];
-					try {
-						evs = (cal.events as any)
-							.whose({
-								_and: [
-									{ startDate: { _greaterThanEquals: from } },
-									{ startDate: { _lessThanEquals: to } },
-								],
-							})();
-					} catch (_predicateUnsupported) {
-						evs = cal.events();
-					}
-
-					for (
-						let ei = 0;
-						ei < evs.length && out.length < args.limit && scanned < args.cap;
-						ei++
-					) {
-						scanned++;
-						try {
-							const ev = evs[ei] as any;
-
-							const start = ev.startDate();
-							const end = ev.endDate();
-							const startMs = start ? start.getTime() : NaN;
-							// Window filter on start time (covers the full-enumeration fallback).
-							if (!Number.isNaN(startMs) && (startMs < args.fromMs || startMs > args.toMs)) {
-								continue;
-							}
-
-							const title = ev.summary() || "";
-							const location = ev.location() || null;
-							// Calendar event notes live in the `description` property (there is no
-							// `notes` property on a Calendar event).
-							const notes = ev.description() || null;
-
-							if (args.search) {
-								const hay = (
-									title +
-									" " +
-									(location || "") +
-									" " +
-									(notes || "")
-								).toLowerCase();
-								if (hay.indexOf(args.search) === -1) continue;
-							}
-
-							out.push({
-								id: ev.uid(),
-								title,
-								startDate: start ? start.toISOString() : "",
-								endDate: end ? end.toISOString() : "",
-								location,
-								calendarName: calName,
-								notes,
-							});
-						} catch (_badEvent) {
-							// Skip an individual unreadable event; do not abort the whole scan.
-						}
+					const starts = C.calendars[ci].events.startDate() as (Date | null)[];
+					for (let ei = 0; ei < starts.length; ei++) {
+						const d = starts[ei];
+						const ms = d && typeof d.getTime === "function" ? d.getTime() : NaN;
+						if (Number.isNaN(ms) || ms < args.fromMs || ms > args.toMs) continue;
+						slots.push({ ci, ei, startMs: ms });
 					}
 				} catch (badCalendar) {
 					// Skip a calendar we can't enumerate; a real TCC denial would have thrown above.
@@ -240,15 +202,10 @@ async function scanWindow(
 					if (!firstError) firstError = String(badCalendar);
 				}
 			}
-			return { items: out, visited, skippedCalendars, firstError };
+			return { calendarNames, slots, visited, skippedCalendars, firstError };
 		},
-		{ fromMs, toMs, limit, search, cap: MAX_SCAN },
-	)) as {
-		items: CalEvent[];
-		visited: number;
-		skippedCalendars: number;
-		firstError: string;
-	};
+		{ fromMs, toMs },
+	)) as WindowScan;
 
 	if (scan.visited > 0 && scan.skippedCalendars === scan.visited) {
 		throw new ToolFailure(
@@ -257,7 +214,129 @@ async function scanWindow(
 			rawBody(scan.firstError),
 		);
 	}
-	return scan.items;
+	return scan;
+}
+
+/**
+ * PASS 2, WHAT, for as far along the given order as the answer needs. Six property reads on an event
+ * that is going to be returned, four on one a search rejects, and none at all on the rest.
+ *
+ * `slots` arrives in the order the answer should come back in, and the result keeps that order.
+ */
+async function readSlots(
+	slots: WindowSlot[],
+	calendarNames: string[],
+	fromMs: number,
+	toMs: number,
+	limit: number,
+	search: string,
+): Promise<CalEvent[]> {
+	const read = (await run(
+		(args: {
+			slots: WindowSlot[];
+			calendarNames: string[];
+			fromMs: number;
+			toMs: number;
+			limit: number;
+			search: string;
+		}) => {
+			const C = Application("Calendar");
+			const out: {
+				id: string;
+				title: string;
+				startDate: string;
+				endDate: string;
+				location: string | null;
+				calendarName: string;
+				notes: string | null;
+			}[] = [];
+
+			for (let k = 0; k < args.slots.length && out.length < args.limit; k++) {
+				const slot = args.slots[k];
+				try {
+					const ev = C.calendars[slot.ci].events[slot.ei] as any;
+
+					// Read the start again off the event itself rather than trusting the index pass 1
+					// handed over: if the calendar changed in between, every field returned here still
+					// describes ONE event, and the window is re-checked against what it now says.
+					const start = ev.startDate();
+					const startMs = start ? start.getTime() : NaN;
+					if (Number.isNaN(startMs) || startMs < args.fromMs || startMs > args.toMs) continue;
+
+					const title = ev.summary() || "";
+					const location = ev.location() || null;
+					// Calendar event notes live in the `description` property (there is no
+					// `notes` property on a Calendar event).
+					const notes = ev.description() || null;
+
+					if (args.search) {
+						const hay = (
+							title +
+							" " +
+							(location || "") +
+							" " +
+							(notes || "")
+						).toLowerCase();
+						if (hay.indexOf(args.search) === -1) continue;
+					}
+
+					const end = ev.endDate();
+					out.push({
+						id: ev.uid(),
+						title,
+						startDate: start.toISOString(),
+						endDate: end ? end.toISOString() : "",
+						location,
+						calendarName: args.calendarNames[slot.ci],
+						notes,
+					});
+				} catch (_badEvent) {
+					// Skip an individual unreadable event; do not abort the whole scan.
+				}
+			}
+			return { items: out };
+		},
+		{ slots, calendarNames, fromMs, toMs, limit, search },
+	)) as { items: CalEvent[] };
+
+	return read.items;
+}
+
+/**
+ * Every event in the account whose START falls in [fromMs, toMs], optionally filtered by a
+ * (pre-lowercased) substring across title/location/notes, IN START ORDER, cut to `limit`.
+ *
+ * THE WHOLE WINDOW FIRST, THEN SORTED, THEN CUT, and the sort lives here rather than inside a JXA
+ * script so it can be tested without a Mac. This used to fill `limit` calendar by calendar and stop,
+ * so "the next 5 events" meant "5 events from whichever calendars come first". On this Mac, asking for
+ * the next 5 over a year answered with five events from ONE calendar, in that calendar's own storage
+ * order (07:00 listed after 12:30 on the same day), and never opened the others at all. The window
+ * belongs to the account, not to a calendar.
+ */
+async function scanWindow(
+	fromMs: number,
+	toMs: number,
+	limit: number,
+	search: string,
+): Promise<CalEvent[]> {
+	const { calendarNames, slots } = await findWindow(fromMs, toMs);
+
+	slots.sort((a, b) => a.startMs - b.startMs);
+	// The cap bounds the DETAIL reads, and it cannot change a list answer: the events are already in
+	// start order, so the first MAX_SCAN of them contain the first `limit` of them. It can only bite on
+	// a search whose matches all sit past the cap, and when it does, the caller says so.
+	const considered = slots.slice(0, MAX_SCAN);
+	if (considered.length === 0) {
+		lastWindowTruncation = null;
+		return [];
+	}
+
+	const items = await readSlots(considered, calendarNames, fromMs, toMs, limit, search);
+	lastWindowTruncation =
+		slots.length > considered.length && items.length < limit
+			? { examined: considered.length }
+			: null;
+	return items;
 }
 
 /**
@@ -319,61 +398,37 @@ async function openEvent(eventId: string): Promise<{ message: string }> {
 
 	try {
 		const found = (await run(
-			(args: { id: string; cap: number }) => {
+			(args: { id: string }) => {
 				const C = Application("Calendar");
-				const cals = C.calendars();
-				let scanned = 0;
+				// ONE event for every calendar's name, then ONE for every uid in a calendar. The uid
+				// scan used to run only as a fallback when the `whose` predicate found nothing, which
+				// is precisely what happens for an id that does not exist, and it read the uid off one
+				// event at a time: a miss walked up to 1,000 events one Apple Event each. Reading the
+				// column costs one event per calendar whether it hits or misses.
+				const calNames = C.calendars.name();
 				let skippedCalendars = 0;
 				let firstError = "";
-				for (let ci = 0; ci < cals.length; ci++) {
+				for (let ci = 0; ci < calNames.length; ci++) {
 					try {
-						const cal = cals[ci];
+						const uids = C.calendars[ci].events.uid() as string[];
+						const index = uids.indexOf(args.id);
+						if (index < 0) continue;
 
-						let matches: unknown[];
+						const ev = C.calendars[ci].events[index] as any;
+						let title = "";
 						try {
-							matches = (cal.events as any)
-								.whose({ uid: { _equals: args.id } })();
-						} catch (_predicateUnsupported) {
-							matches = [];
+							title = ev.summary() || "";
+						} catch (_noTitle) {
+							// title is best-effort
 						}
-
-						if (matches.length === 0) {
-							// Fallback: bounded manual scan for the uid in this calendar.
-							const evs = cal.events();
-							for (
-								let ei = 0;
-								ei < evs.length && scanned < args.cap;
-								ei++
-							) {
-								scanned++;
-								try {
-									if ((evs[ei] as any).uid() === args.id) {
-										matches = [evs[ei]];
-										break;
-									}
-								} catch (_badEvent) {
-									// skip unreadable event
-								}
-							}
-						}
-
-						if (matches.length > 0) {
-							const ev = matches[0] as any;
-							let title = "";
-							try {
-								title = ev.summary() || "";
-							} catch (_noTitle) {
-								// title is best-effort
-							}
-							C.activate();
-							return {
-								found: true,
-								title,
-								skippedCalendars,
-								firstError,
-								visited: cals.length,
-							};
-						}
+						C.activate();
+						return {
+							found: true,
+							title,
+							skippedCalendars,
+							firstError,
+							visited: calNames.length,
+						};
 					} catch (badCalendar) {
 						// Skip a calendar we can't enumerate, but count it: "no event with that ID"
 						// must not be how a calendar we could not open at all gets reported.
@@ -381,9 +436,15 @@ async function openEvent(eventId: string): Promise<{ message: string }> {
 						if (!firstError) firstError = String(badCalendar);
 					}
 				}
-				return { found: false, title: "", skippedCalendars, firstError, visited: cals.length };
+				return {
+					found: false,
+					title: "",
+					skippedCalendars,
+					firstError,
+					visited: calNames.length,
+				};
 			},
-			{ id, cap: MAX_SCAN },
+			{ id },
 		)) as {
 			found: boolean;
 			title: string;
@@ -538,6 +599,7 @@ async function createEvent(
 }
 
 const calendar = {
+	truncation: () => lastWindowTruncation,
 	searchEvents,
 	openEvent,
 	getEvents,

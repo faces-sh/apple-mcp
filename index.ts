@@ -28,6 +28,26 @@ function isAppEnabled(toolName: string): boolean {
 	return ENABLED_APPS === null || ENABLED_APPS.has(toolName.toLowerCase());
 }
 
+// A SHORT ANSWER MUST NEVER BE MISTAKEN FOR THE WHOLE ANSWER. Both of these caps used to bite in
+// silence, which made "not found" and "not looked at" the same sentence. Null means the cap did not
+// bite and nothing is added.
+function contactsTruncationNote(cut: { shown: number; total: number } | null): string {
+	return cut
+		? `\n\n(Only the first ${cut.shown} of ${cut.total} contacts were looked at, so this may be incomplete.)`
+		: "";
+}
+function calendarTruncationNote(cut: { examined: number } | null): string {
+	return cut
+		? `\n\n(Stopped after the first ${cut.examined} events in this window, so this may be incomplete.)`
+		: "";
+}
+function notesTruncationNote(
+	cut: { shown: number; total: number } | null,
+	what: string,
+): string {
+	return cut ? `\n\n(Showing ${cut.shown} of ${cut.total} ${what}.)` : "";
+}
+
 // Safe mode implementation - lazy loading of modules
 let useEagerLoading = true;
 let loadingTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -252,10 +272,7 @@ function initServer() {
 							// A "not found" must never be silently a "not looked at": if the scan hit its
 							// cap, say so, because the person searched for may be one of the ones it did
 							// not reach. This was invisible for 647 of 1,647 cards on a real Mac.
-							const cut = contactsModule.truncation();
-							const partial = cut
-								? `\n\n(Only ${cut.scanned} of ${cut.total} contacts could be scanned, so this may be incomplete.)`
-								: "";
+							const partial = contactsTruncationNote(contactsModule.truncation());
 							const lines = found.map((c) => {
 								const parts = [];
 								if (c.emails.length > 0) parts.push(c.emails.join(", "));
@@ -275,6 +292,9 @@ function initServer() {
 							};
 						} else {
 							const allNumbers = await contactsModule.getAllNumbers();
+							// The cap bites HERE too, and this branch used to say nothing about it: a list
+							// of "all" contacts that was really the first n of them, with no way to tell.
+							const partial = contactsTruncationNote(contactsModule.truncation());
 							const contactCount = Object.keys(allNumbers).length;
 
 							if (contactCount === 0) {
@@ -301,8 +321,8 @@ function initServer() {
 										type: "text",
 										text:
 											formattedContacts.length > 0
-												? `Found ${contactCount} contacts:\n\n${formattedContacts.join("\n")}`
-												: "Found contacts but none have phone numbers. Try searching by name to see more details.",
+												? `Found ${contactCount} contacts:\n\n${formattedContacts.join("\n")}${partial}`
+												: `Found contacts but none have phone numbers. Try searching by name to see more details.${partial}`,
 									},
 								],
 								isError: false,
@@ -340,6 +360,9 @@ function initServer() {
 								}
 
 								const foundNotes = await notesModule.findNote(args.searchText);
+								// A search now reads the WHOLE store, so a short answer is a short answer
+								// and not the first thousand notes. When the RESULT is trimmed, say so.
+								const trimmed = notesTruncationNote(notesModule.truncation(), "matching notes");
 								return {
 									content: [
 										{
@@ -347,7 +370,7 @@ function initServer() {
 											text: foundNotes.length
 												? foundNotes
 														.map((note) => `${note.name}:\n${note.content}`)
-														.join("\n\n")
+														.join("\n\n") + trimmed
 												: `No notes found for "${args.searchText}"`,
 										},
 									],
@@ -357,6 +380,7 @@ function initServer() {
 
 							case "list": {
 								const allNotes = await notesModule.getAllNotes();
+								const trimmed = notesTruncationNote(notesModule.truncation(), "notes");
 								return {
 									content: [
 										{
@@ -364,7 +388,7 @@ function initServer() {
 											text: allNotes.length
 												? allNotes
 														.map((note) => `${note.name}:\n${note.content}`)
-														.join("\n\n")
+														.join("\n\n") + trimmed
 												: "No notes exist.",
 										},
 									],
@@ -508,25 +532,24 @@ function initServer() {
 									args.limit,
 								);
 
-								// Look up contact names for all messages
+								// Look up contact names for all messages, in ONE pass over the address book.
+								//
+								// This used to be a `Promise.all` that asked for a name PER MESSAGE, and
+								// nothing here caches, so each of those read all 1,647 cards over Apple
+								// Events on its own. `{"operation":"unread","limit":2}` measured 306.0s,
+								// of which the sqlite query that finds the messages was 0.05s: the whole
+								// call was two address books being read to put two names on two lines.
 								const contactsModule = await loadModule("contacts");
-								const messagesWithNames = await Promise.all(
-									messages.map(async (msg) => {
-										// Only look up names for messages not from me
-										if (!msg.is_from_me) {
-											const contactName =
-												await contactsModule.findContactByPhone(msg.sender);
-											return {
-												...msg,
-												displayName: contactName || msg.sender, // Use contact name if found, otherwise use phone/email
-											};
-										}
-										return {
-											...msg,
-											displayName: "Me",
-										};
-									}),
-								);
+								const senders = messages
+									.filter((msg) => !msg.is_from_me)
+									.map((msg) => msg.sender);
+								const names = await contactsModule.namesForHandles(senders);
+								const messagesWithNames = messages.map((msg) => {
+									if (msg.is_from_me) return { ...msg, displayName: "Me" };
+									const contactName = names.get((msg.sender ?? "").trim());
+									// Contact name if there is one, otherwise the phone/email itself.
+									return { ...msg, displayName: contactName || msg.sender };
+								});
 
 								return {
 									content: [
@@ -707,6 +730,7 @@ function initServer() {
 									toDate,
 								);
 
+								const trimmed = calendarTruncationNote(calendarModule.truncation());
 								return {
 									content: [
 										{
@@ -722,8 +746,8 @@ function initServer() {
 																	`ID: ${event.id}\n` +
 																	`${event.notes ? `Notes: ${event.notes}\n` : ""}`,
 															)
-															.join("\n\n")}`
-													: `No events found matching "${searchText}".`,
+															.join("\n\n")}${trimmed}`
+													: `No events found matching "${searchText}".${trimmed}`,
 										},
 									],
 									isError: false,
@@ -756,6 +780,7 @@ function initServer() {
 								const endDateText = toDate
 									? new Date(toDate).toLocaleDateString()
 									: "next 7 days";
+								const trimmed = calendarTruncationNote(calendarModule.truncation());
 
 								return {
 									content: [
@@ -771,8 +796,8 @@ function initServer() {
 																	`Calendar: ${event.calendarName}\n` +
 																	`ID: ${event.id}`,
 															)
-															.join("\n\n")}`
-													: `No events found from ${startDateText} to ${endDateText}.`,
+															.join("\n\n")}${trimmed}`
+													: `No events found from ${startDateText} to ${endDateText}.${trimmed}`,
 										},
 									],
 									isError: false,

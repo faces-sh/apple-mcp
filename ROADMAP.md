@@ -21,6 +21,15 @@ gateable via `APPLE_MCP_ENABLED_APPS`.
   reinstating, research whether a better Maps MCP / data source exists; if we only want an
   "open in Maps" actuator (search/directions), that can come back as a small, honest JXA module.
 
+- **Reminders is slow and JXA cannot fix it.** Notes, Contacts and Calendar were all made fast by
+  asking a COLLECTION for a property in one Apple Event instead of asking each item n times (see
+  `utils/notes.ts`). Reminders does not answer to that. Measured on this Mac: `Reminders.lists.name()`
+  for 50 lists took **18.7s**, ONE reminder's `name()` took **31.0s**, and the bulk
+  `lists[0].reminders.name()` for 15 reminders took **32.1s**. Bulk and single cost the same because
+  the cost is the app waking its store, not the round trip, and there is no shape of JXA call that
+  avoids it. Making the reminders tools usable needs a native EventKit path, which is its own piece of
+  work and not a refactor of this file.
+
 - **Web search** — dropped permanently. The upstream `utils/web-search.ts` puppeteered Safari to
   scrape Google (brittle, intrusive, CAPTCHA-prone) and was already dead code. Faced uses a dedicated
   web-fetch / websearch capability instead.

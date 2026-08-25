@@ -1,11 +1,11 @@
 import { run } from "@jxa/run";
 import {
 	ToolFailure,
+	assertAlignedColumns,
 	grantSentence,
 	isPermissionDenial,
 	throwAppleFailure,
 } from "./native";
-import { rawBody } from "./failure";
 
 // We drive Notes through JXA (@jxa/run) rather than by interpolating user input into an AppleScript
 // source string. JXA returns REAL JS objects/arrays (so there is no "string return treated as array"
@@ -14,13 +14,57 @@ import { rawBody } from "./failure";
 // Events, so the same Automation (kTCCServiceAppleEvents) permission applies: a denial surfaces as a
 // thrown error which we convert to a typed ToolFailure (charter #2: denied is not empty is not broke).
 
-// Maximum notes to scan in any one pass (guards against pathological note stores).
-const MAX_NOTES = 1000;
+// ONE APPLE EVENT PER PROPERTY, NOT PER NOTE. This is the whole shape of every read below, and it is
+// worth stating once because the obvious code does the opposite.
+//
+// The cost of talking to Notes is the NUMBER of Apple Events, not the volume of data. Measured on a
+// real store of 3,152 notes:
+//
+//     Notes.notes.name()          0.20s   3,152 titles, ONE event
+//     Notes.notes.plaintext()     0.24s   3.5 MB of bodies, ONE event
+//     note.name() + note.plaintext(), one note at a time    1.08s PER NOTE
+//
+// So a loop that walks notes and asks each one for its title and body costs 1.08s x n, and asking the
+// collection for all titles then all bodies costs 0.44s for the entire store. That is 0.44s against
+// roughly 3,400s, and it is not a tuning difference: one is n round trips, the other is two.
+//
+// The same fact governs the folder scan, which pulled four properties per note (2.25s/note measured,
+// 51.8s for a 29-note folder) and now pulls four arrays for the whole folder in one pass.
+//
+// WHAT THIS COSTS: the old loops guarded each note individually, so one unreadable note lost only
+// itself. A collection read is a single event, so there is no per-note granularity left to skip with.
+// A value Notes will not give is `missing value`, which arrives as a non-string and is coerced exactly
+// the way the per-note path coerced a bad read (`noteName`, `notePreview` below). A read that fails
+// OUTRIGHT now fails the call, loudly and verbatim, instead of returning a partial store as if it were
+// the whole one. Password-protected notes are the case worth knowing about here and this store has
+// none of them (0 of 3,152), so what a locked note does under a collection read is NOT something
+// anybody has measured; treat it as open.
+
+// Maximum notes RETURNED in any one pass.
+//
+// RAISED FROM 1000, and the truncation is now REPORTED rather than silent, for the same reason the
+// contacts cap was: 1000 was not a pathological note store, it was smaller than this one. A real Mac
+// here holds 3,152 notes, so 2,152 of them were invisible to every list AND every search, and the scan
+// took the FIRST n, which means a note the user could see in Notes simply was not there when they asked
+// for it. "No notes found" was indistinguishable from "not looked at".
+//
+// The cap now bounds the RESULT, not the reach: the bulk read always sees the whole store, so a search
+// searches all of it and only the returned list is trimmed. What must never happen again is losing
+// notes QUIETLY, so when the cap bites, the answer says so.
+const MAX_NOTES = 5000;
 // Per-note content cap for list/search previews. plaintext() can be very large; we return generous
 // but bounded content so a single note can't blow up the response.
 const MAX_CONTENT_PREVIEW = 2000;
 // Folder used when the caller does not name one.
 const DEFAULT_FOLDER = "Claude";
+
+/** How many notes the last read returned, and how many there were to return. Read by the caller so a
+ *  short answer can say whether it is the whole answer. Null once the cap stops biting. */
+export let lastNotesTruncation: { shown: number; total: number } | null = null;
+
+function recordTruncation(shown: number, total: number): void {
+	lastNotesTruncation = total > shown ? { shown, total } : null;
+}
 
 // The one sentence each outcome puts on line 1 of the envelope. It says WHAT DID NOT HAPPEN, and for
 // a denial it also NAMES the permission that is missing and the app to enable it for.
@@ -68,40 +112,27 @@ type FolderNotesResult = {
 	message?: string;
 };
 
-// Raw shapes returned across the JXA boundary (JSON-serialized; Dates arrive as epoch millis).
-type RawNote = { name: string; content: string };
-/** A bounded scan plus the bookkeeping that lets an all-failed pass be told apart from an empty one. */
-type RawScan = {
-	items: RawNote[];
-	attempted: number;
-	skipped: number;
-	firstError: string;
+/** Aligned columns for a set of notes: `names[i]` and `bodies[i]` describe the same note. */
+type NoteColumns = { names: unknown[]; bodies: unknown[] };
+/** The same, plus the two timestamps (epoch millis, or null where Notes had none). */
+type FolderColumns = NoteColumns & {
+	found: boolean;
+	created: (number | null)[];
+	modified: (number | null)[];
 };
 
-/**
- * Fail when a scan touched notes and could not read a single one.
- *
- * Skipping an individual unreadable note is right: one bad note must not lose the other nine hundred.
- * But if every note we touched threw, "[]" is not an empty Notes library, it is a broken read reported
- * as a fact about the user's data, and that is exactly the swallowed failure the envelope spec exists
- * to stop. So the scan counts its skips and keeps the first thing Notes said, and an all-skipped pass
- * fails loudly with that verbatim.
- */
-function failIfEverythingWasSkipped(scan: RawScan, summaryPrefix: string): void {
-	if (scan.attempted > 0 && scan.skipped === scan.attempted) {
-		throw new ToolFailure(
-			"applescript_error",
-			`${summaryPrefix}: all ${scan.attempted} notes failed to read.`,
-			rawBody(scan.firstError),
-		);
-	}
+/** A title Notes could not give us is still a note, and it is what the per-note loop called it. */
+function noteName(raw: unknown): string {
+	return typeof raw === "string" && raw ? raw : "Untitled Note";
 }
-type RawFolderNote = {
-	name: string;
-	content: string;
-	creationDate: number | null;
-	modificationDate: number | null;
-};
+
+/** A body Notes would not give us reads as empty, bounded either way. */
+function notePreview(raw: unknown): string {
+	const text = typeof raw === "string" ? raw : "";
+	return text.length > MAX_CONTENT_PREVIEW
+		? text.slice(0, MAX_CONTENT_PREVIEW) + "…"
+		: text;
+}
 
 /** Probe Notes access. Returns access state; never masks a non-permission failure. */
 async function requestNotesAccess(): Promise<{
@@ -125,100 +156,82 @@ async function requestNotesAccess(): Promise<{
 }
 
 /**
+ * Every title and every body in the store, as two aligned columns, in two Apple Events.
+ *
+ * The columns cross the boundary WHOLE, and the trimming and the matching happen in TypeScript, where
+ * they can be tested without a Mac. That is a deliberate choice about where the payload sits: @jxa/run
+ * pipes the script's JSON through osascript's stdout with a 100 MB ceiling, and the whole of this store
+ * is 3.5 MB, so there is room by a factor of thirty. A store big enough to breach it fails LOUDLY on
+ * the buffer, which is the right answer; it never comes back quietly short.
+ *
+ * Trimming inside the script would bound the payload, and it would also mean a search could only see
+ * the first 2,000 characters of a note, which is not what the per-note loop did.
+ */
+async function readStoreColumns(): Promise<NoteColumns> {
+	let columns: NoteColumns;
+	try {
+		columns = (await run(() => {
+			const Notes = Application("Notes");
+			let names: unknown[] = [];
+			let bodies: unknown[] = [];
+			// Retaken once if the store moves between the two events; see assertAlignedColumns.
+			for (let attempt = 0; attempt < 2; attempt++) {
+				names = Notes.notes.name();
+				bodies = Notes.notes.plaintext();
+				if (names.length === bodies.length) break;
+			}
+			return { names, bodies };
+		})) as NoteColumns;
+	} catch (error) {
+		throwAppleFailure(error, NOTES_SUMMARIES);
+	}
+	assertAlignedColumns(
+		[columns.names.length, columns.bodies.length],
+		"Could not read your notes: the note store changed while it was being read.",
+	);
+	return columns;
+}
+
+/**
  * All notes across every folder, with name and a (bounded) plaintext preview. Empty array is a
  * genuine authorized-but-empty result; a permission denial throws a ToolFailure instead.
  */
 async function getAllNotes(): Promise<Note[]> {
-	let scan: RawScan;
-	try {
-		scan = (await run(
-			(opts: { max: number; maxLen: number }) => {
-				const Notes = Application("Notes");
-				const all = Notes.notes();
-				const out: { name: string; content: string }[] = [];
-				const count = Math.min(all.length, opts.max);
-				let skipped = 0;
-				let firstError = "";
-				for (let i = 0; i < count; i++) {
-					try {
-						const note = all[i];
-						const rawName = note.name();
-						let content = note.plaintext();
-						content = typeof content === "string" ? content : "";
-						if (content.length > opts.maxLen) {
-							content = content.slice(0, opts.maxLen) + "…";
-						}
-						out.push({
-							name: typeof rawName === "string" && rawName ? rawName : "Untitled Note",
-							content,
-						});
-					} catch (_e) {
-						// Skip an individual unreadable note; do not abort the whole scan.
-						skipped++;
-						if (!firstError) firstError = String(_e);
-					}
-				}
-				return { items: out, attempted: count, skipped, firstError };
-			},
-			{ max: MAX_NOTES, maxLen: MAX_CONTENT_PREVIEW },
-		)) as RawScan;
-	} catch (error) {
-		throwAppleFailure(error, NOTES_SUMMARIES);
+	const { names, bodies } = await readStoreColumns();
+	const total = names.length;
+	const count = Math.min(total, MAX_NOTES);
+	const out: Note[] = [];
+	for (let i = 0; i < count; i++) {
+		out.push({ name: noteName(names[i]), content: notePreview(bodies[i]) });
 	}
-
-	failIfEverythingWasSkipped(scan, "Could not list your notes");
-	return scan.items.map((n) => ({ name: n.name, content: n.content }));
+	recordTruncation(count, total);
+	return out;
 }
 
 /**
- * Notes whose title or body contains `searchText` (case-insensitive). Matching happens inside the
- * JXA pass using the *passed argument* (never interpolated source), so it is injection-safe and only
- * transfers the hits. Empty array = no match; a permission denial throws a ToolFailure.
+ * Notes whose title or body contains `searchText` (case-insensitive). The whole store is read in two
+ * Apple Events and matched here, so the search sees EVERY note rather than the first thousand.
+ * Empty array = no match; a permission denial throws a ToolFailure.
+ *
+ * Matching in JS rather than with a `whose` clause is measured, not assumed. Both find the same 14
+ * notes for the same needle on this store, and `Notes.notes.whose({ plaintext: { _contains: needle } })`
+ * took 2.51s against 0.49s for reading both columns and matching here. The predicate also cannot see a
+ * title, so it would have to be run twice and merged to answer the question this one answers.
  */
 async function findNote(searchText: string): Promise<Note[]> {
 	if (!searchText || searchText.trim() === "") return [];
 
-	let scan: RawScan;
-	try {
-		scan = (await run(
-			(opts: { search: string; max: number; maxLen: number }) => {
-				const Notes = Application("Notes");
-				const all = Notes.notes();
-				const out: { name: string; content: string }[] = [];
-				const needle = opts.search.toLowerCase();
-				const count = Math.min(all.length, opts.max);
-				let skipped = 0;
-				let firstError = "";
-				for (let i = 0; i < count; i++) {
-					try {
-						const note = all[i];
-						const rawName = note.name();
-						const rawPlain = note.plaintext();
-						const name = typeof rawName === "string" ? rawName : "";
-						const plain = typeof rawPlain === "string" ? rawPlain : "";
-						const haystack = (name + "\n" + plain).toLowerCase();
-						if (haystack.indexOf(needle) === -1) continue;
-						let content = plain;
-						if (content.length > opts.maxLen) {
-							content = content.slice(0, opts.maxLen) + "…";
-						}
-						out.push({ name: name || "Untitled Note", content });
-					} catch (_e) {
-						// Skip an individual unreadable note; do not abort the whole scan.
-						skipped++;
-						if (!firstError) firstError = String(_e);
-					}
-				}
-				return { items: out, attempted: count, skipped, firstError };
-			},
-			{ search: searchText, max: MAX_NOTES, maxLen: MAX_CONTENT_PREVIEW },
-		)) as RawScan;
-	} catch (error) {
-		throwAppleFailure(error, NOTES_SUMMARIES);
+	const { names, bodies } = await readStoreColumns();
+	const needle = searchText.toLowerCase();
+	const hits: Note[] = [];
+	for (let i = 0; i < names.length; i++) {
+		const name = typeof names[i] === "string" ? (names[i] as string) : "";
+		const body = typeof bodies[i] === "string" ? (bodies[i] as string) : "";
+		if ((name + "\n" + body).toLowerCase().indexOf(needle) === -1) continue;
+		hits.push({ name: name || "Untitled Note", content: notePreview(body) });
 	}
-
-	failIfEverythingWasSkipped(scan, "Could not search your notes");
-	return scan.items.map((n) => ({ name: n.name, content: n.content }));
+	recordTruncation(Math.min(hits.length, MAX_NOTES), hits.length);
+	return hits.slice(0, MAX_NOTES);
 }
 
 /**
@@ -248,22 +261,26 @@ async function createNote(
 			(opts: { folderName: string; body: string }) => {
 				const Notes = Application("Notes");
 
-				// Locate the target folder by name (exact match on the passed argument).
-				let folder: unknown = null;
-				const folders = Notes.folders();
-				for (let i = 0; i < folders.length; i++) {
-					try {
-						if (folders[i].name() === opts.folderName) {
-							folder = folders[i];
-							break;
-						}
-					} catch (_e) {
-						// Skip an unreadable folder.
+				// Locate the target folder by name. ONE Apple Event for every folder name, then an
+				// index into the collection: 0.004s against 0.798s for asking each of this Mac's 45
+				// folders its own name, which is work done before a note can even start being written.
+				// Both find the same folder at the same index; verified by creating a note in a new
+				// folder, a second in the same folder once it existed, reading them back, and deleting
+				// the lot.
+				const folderNames = Notes.folders.name();
+				let index = -1;
+				for (let i = 0; i < folderNames.length; i++) {
+					if (folderNames[i] === opts.folderName) {
+						index = i;
+						break;
 					}
 				}
 
 				let createdFolder = false;
-				if (!folder) {
+				let folder: unknown;
+				if (index >= 0) {
+					folder = Notes.folders[index];
+				} else {
 					folder = Notes.make({
 						new: "folder",
 						withProperties: { name: opts.folderName },
@@ -300,93 +317,83 @@ async function createNote(
  * Scan a single folder by name. Returns `{ found, notes }` with each note's bounded content plus its
  * creation/modification timestamps (epoch millis). `found: false` means the folder genuinely does not
  * exist; a permission denial throws a ToolFailure.
+ *
+ * Five Apple Events, whatever the folder holds: the folder names, then four property columns. It used
+ * to be one event per folder to find the folder plus four per note, which measured 51.8s for a folder
+ * of 29 notes.
  */
 async function scanFolder(
 	folderName: string,
 ): Promise<{ found: boolean; notes: Note[] }> {
+	let raw: FolderColumns;
 	try {
-		const raw = (await run(
-			(opts: { folderName: string; max: number; maxLen: number }) => {
+		raw = (await run(
+			(opts: { folderName: string }) => {
 				const Notes = Application("Notes");
 
-				let folder: unknown = null;
-				const folders = Notes.folders();
-				for (let i = 0; i < folders.length; i++) {
-					try {
-						if (folders[i].name() === opts.folderName) {
-							folder = folders[i];
-							break;
-						}
-					} catch (_e) {
-						// Skip an unreadable folder.
+				const folderNames = Notes.folders.name();
+				let index = -1;
+				for (let i = 0; i < folderNames.length; i++) {
+					if (folderNames[i] === opts.folderName) {
+						index = i;
+						break;
 					}
 				}
-				if (!folder) return { found: false, notes: [] };
+				if (index < 0) {
+					return { found: false, names: [], bodies: [], created: [], modified: [] };
+				}
 
-				const folderNotes = (folder as { notes: () => unknown[] }).notes();
-				const out: {
-					name: string;
-					content: string;
-					creationDate: number | null;
-					modificationDate: number | null;
-				}[] = [];
-				const count = Math.min(folderNotes.length, opts.max);
-				for (let i = 0; i < count; i++) {
-					try {
-						const note = folderNotes[i] as {
-							name: () => string;
-							plaintext: () => string;
-							creationDate: () => Date | null;
-							modificationDate: () => Date | null;
-						};
-						const rawName = note.name();
-						let content = note.plaintext();
-						content = typeof content === "string" ? content : "";
-						if (content.length > opts.maxLen) {
-							content = content.slice(0, opts.maxLen) + "…";
-						}
-						let created: number | null = null;
-						let modified: number | null = null;
-						try {
-							const d = note.creationDate();
-							created = d ? d.getTime() : null;
-						} catch (_e) {
-							// Leave creation date absent.
-						}
-						try {
-							const d = note.modificationDate();
-							modified = d ? d.getTime() : null;
-						} catch (_e) {
-							// Leave modification date absent.
-						}
-						out.push({
-							name: typeof rawName === "string" && rawName ? rawName : "Untitled Note",
-							content,
-							creationDate: created,
-							modificationDate: modified,
-						});
-					} catch (_e) {
-						// Skip an individual unreadable note; do not abort the whole scan.
+				const folder = Notes.folders[index];
+				const toMillis = (values: (Date | null)[]) =>
+					values.map((d) => (d && typeof d.getTime === "function" ? d.getTime() : null));
+
+				let names: unknown[] = [];
+				let bodies: unknown[] = [];
+				let created: (number | null)[] = [];
+				let modified: (number | null)[] = [];
+				// Retaken once if the folder moves between the events; see assertAlignedColumns.
+				for (let attempt = 0; attempt < 2; attempt++) {
+					names = folder.notes.name();
+					bodies = folder.notes.plaintext();
+					created = toMillis(folder.notes.creationDate());
+					modified = toMillis(folder.notes.modificationDate());
+					if (
+						names.length === bodies.length &&
+						names.length === created.length &&
+						names.length === modified.length
+					) {
+						break;
 					}
 				}
-				return { found: true, notes: out };
+				return { found: true, names, bodies, created, modified };
 			},
-			{ folderName, max: MAX_NOTES, maxLen: MAX_CONTENT_PREVIEW },
-		)) as { found: boolean; notes: RawFolderNote[] };
-
-		return {
-			found: raw.found,
-			notes: raw.notes.map((n) => ({
-				name: n.name,
-				content: n.content,
-				creationDate: n.creationDate != null ? new Date(n.creationDate) : undefined,
-				modificationDate:
-					n.modificationDate != null ? new Date(n.modificationDate) : undefined,
-			})),
-		};
+			{ folderName },
+		)) as FolderColumns;
 	} catch (error) {
 		throwAppleFailure(error, NOTES_SUMMARIES);
 	}
+
+	if (!raw.found) return { found: false, notes: [] };
+
+	assertAlignedColumns(
+		[raw.names.length, raw.bodies.length, raw.created.length, raw.modified.length],
+		`Could not read your notes: the folder "${folderName}" changed while it was being read.`,
+	);
+
+	const total = raw.names.length;
+	const count = Math.min(total, MAX_NOTES);
+	const notes: Note[] = [];
+	for (let i = 0; i < count; i++) {
+		notes.push({
+			name: noteName(raw.names[i]),
+			content: notePreview(raw.bodies[i]),
+			creationDate: raw.created[i] != null ? new Date(raw.created[i] as number) : undefined,
+			modificationDate:
+				raw.modified[i] != null ? new Date(raw.modified[i] as number) : undefined,
+		});
+	}
+	recordTruncation(count, total);
+	return { found: true, notes };
 }
 
 /** All notes in a named folder. success:false (with message) only when the folder does not exist. */
@@ -451,6 +458,7 @@ async function getNotesByDateRange(
 }
 
 export default {
+	truncation: () => lastNotesTruncation,
 	getAllNotes,
 	findNote,
 	createNote,
