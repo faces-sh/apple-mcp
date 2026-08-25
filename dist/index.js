@@ -11790,173 +11790,73 @@ __export(reminders_exports, {
   REMINDERS_SUMMARIES: () => REMINDERS_SUMMARIES,
   default: () => reminders_default
 });
+async function ask(action, payload = {}) {
+  if (!BROKER_URL || !BROKER_SECRET) {
+    throw new ToolFailure(
+      "app_not_running",
+      "Reminders is only available inside Maestro, which reads the store directly. Scripting the Reminders app takes minutes per reminder, so there is no second way to do it."
+    );
+  }
+  let response;
+  try {
+    response = await fetch(BROKER_URL, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-reminders-secret": BROKER_SECRET
+      },
+      body: JSON.stringify({ action, ...payload })
+    });
+  } catch (error2) {
+    throw new ToolFailure(
+      "app_not_running",
+      `Could not reach Maestro to read your reminders: ${String(error2)}`
+    );
+  }
+  const text = await response.text();
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new ToolFailure(
+      "internal_error",
+      "Maestro answered something that is not a reminders answer.",
+      `HTTP ${response.status}
+${text}`
+    );
+  }
+  if (body?.ok !== "true" && body?.ok !== true) {
+    throw new ToolFailure(
+      body?.code ?? "internal_error",
+      body?.reason ?? REMINDERS_SUMMARIES.failed
+    );
+  }
+  return body;
+}
 async function requestRemindersAccess() {
   try {
-    await (0, import_run3.run)(() => {
-      return Application("Reminders").name();
-    });
+    await ask("lists");
     return { hasAccess: true, message: "Reminders access is granted." };
   } catch (error2) {
-    if (isPermissionDenial(error2)) {
+    if (error2 instanceof ToolFailure && error2.code === "permission_denied") {
       return { hasAccess: false, message: REMINDERS_SUMMARIES.denied };
     }
-    throwAppleFailure(error2, REMINDERS_SUMMARIES);
+    throw error2;
   }
 }
 async function scan(opts) {
-  let scanned;
-  try {
-    const result2 = await (0, import_run3.run)(
-      (args) => {
-        const { search, listId, max, maxLists } = args;
-        const R = Application("Reminders");
-        const needle = search ? String(search).toLowerCase() : null;
-        const read = (r, listName) => {
-          const name = String(r.name());
-          let body = "";
-          try {
-            const b = r.body();
-            body = b ? String(b) : "";
-          } catch (e) {
-          }
-          let completed = false;
-          try {
-            completed = !!r.completed();
-          } catch (e) {
-          }
-          let dueDate = null;
-          try {
-            const d = r.dueDate();
-            if (d) dueDate = d.toISOString();
-          } catch (e) {
-          }
-          let id;
-          try {
-            id = String(r.id());
-          } catch (e) {
-          }
-          return { name, id, body, completed, dueDate, listName };
-        };
-        let lists;
-        let skippedLists = 0;
-        let firstError = "";
-        if (listId) {
-          const all = R.lists();
-          let target = null;
-          for (let i = 0; i < all.length; i++) {
-            try {
-              if (String(all[i].id()) === String(listId)) {
-                target = all[i];
-                break;
-              }
-            } catch (e) {
-            }
-          }
-          if (!target)
-            return {
-              items: [],
-              listNotFound: true,
-              listCount: 0,
-              skippedLists: 0,
-              firstError: ""
-            };
-          lists = [target];
-        } else {
-          lists = R.lists();
-        }
-        const items = [];
-        const listCap = Math.min(lists.length, maxLists);
-        for (let li = 0; li < listCap; li++) {
-          let listName;
-          let rems;
-          try {
-            const list = lists[li];
-            listName = String(list.name());
-            rems = list.reminders();
-          } catch (e) {
-            skippedLists++;
-            if (!firstError) firstError = String(e);
-            continue;
-          }
-          for (let ri = 0; ri < rems.length; ri++) {
-            if (items.length >= max)
-              return {
-                items,
-                listNotFound: false,
-                listCount: listCap,
-                skippedLists,
-                firstError
-              };
-            try {
-              const rec = read(rems[ri], listName);
-              if (needle) {
-                const hay = (rec.name + " " + (rec.body || "")).toLowerCase();
-                if (hay.indexOf(needle) === -1) continue;
-              }
-              items.push(rec);
-            } catch (e) {
-            }
-          }
-        }
-        return {
-          items,
-          listNotFound: false,
-          listCount: listCap,
-          skippedLists,
-          firstError
-        };
-      },
-      {
-        search: opts.search ?? null,
-        listId: opts.listId ?? null,
-        max: MAX_REMINDERS,
-        maxLists: MAX_LISTS
-      }
-    );
-    scanned = result2;
-  } catch (error2) {
-    throwAppleFailure(error2, REMINDERS_SUMMARIES);
-  }
-  if (scanned.listCount > 0 && scanned.skippedLists === scanned.listCount) {
-    throw new ToolFailure(
-      "applescript_error",
-      `Could not read your reminders: all ${scanned.listCount} lists failed to read.`,
-      rawBody(scanned.firstError)
-    );
-  }
-  return { items: scanned.items, listNotFound: scanned.listNotFound };
+  const body = await ask("scan", {
+    search: opts.search ?? null,
+    listId: opts.listId ?? null
+  });
+  return {
+    items: body.items ?? [],
+    listNotFound: body.listNotFound === true
+  };
 }
 async function getAllLists() {
-  let scanned;
-  try {
-    scanned = await (0, import_run3.run)((max) => {
-      const R = Application("Reminders");
-      const all = R.lists();
-      const out = [];
-      const count = Math.min(all.length, max);
-      let skipped = 0;
-      let firstError = "";
-      for (let i = 0; i < count; i++) {
-        try {
-          out.push({ id: String(all[i].id()), name: String(all[i].name()) });
-        } catch (e) {
-          skipped++;
-          if (!firstError) firstError = String(e);
-        }
-      }
-      return { items: out, attempted: count, skipped, firstError };
-    }, MAX_LISTS);
-  } catch (error2) {
-    throwAppleFailure(error2, REMINDERS_SUMMARIES);
-  }
-  if (scanned.attempted > 0 && scanned.skipped === scanned.attempted) {
-    throw new ToolFailure(
-      "applescript_error",
-      `Could not list your reminder lists: all ${scanned.attempted} lists failed to read.`,
-      rawBody(scanned.firstError)
-    );
-  }
-  return scanned.items;
+  const body = await ask("lists");
+  return body.lists ?? [];
 }
 async function getAllReminders() {
   return (await scan({})).items;
@@ -11993,79 +11893,13 @@ async function createReminder(name, listName, notes2, dueDate) {
       "Could not create the reminder: no name was given."
     );
   }
-  try {
-    const created = await (0, import_run3.run)(
-      (args) => {
-        const R = Application("Reminders");
-        R.activate();
-        let list;
-        if (args.listName) {
-          const all = R.lists();
-          for (let i = 0; i < all.length; i++) {
-            try {
-              if (String(all[i].name()) === args.listName) {
-                list = all[i];
-                break;
-              }
-            } catch (e) {
-            }
-          }
-          if (!list) {
-            list = R.List({ name: args.listName });
-            R.lists.push(list);
-          }
-        } else {
-          list = R.defaultList();
-        }
-        const props = {
-          name: args.name
-        };
-        if (args.notes) props.body = args.notes;
-        if (args.dueDate) props.dueDate = new Date(args.dueDate);
-        const rem = R.Reminder(props);
-        list.reminders.push(rem);
-        let id;
-        try {
-          id = String(rem.id());
-        } catch (e) {
-        }
-        let body = "";
-        try {
-          const b = rem.body();
-          body = b ? String(b) : "";
-        } catch (e) {
-        }
-        let completed = false;
-        try {
-          completed = !!rem.completed();
-        } catch (e) {
-        }
-        let due = null;
-        try {
-          const d = rem.dueDate();
-          if (d) due = d.toISOString();
-        } catch (e) {
-        }
-        return {
-          name: String(rem.name()),
-          id,
-          body,
-          completed,
-          dueDate: due,
-          listName: String(list.name())
-        };
-      },
-      {
-        name,
-        listName: listName ?? null,
-        notes: notes2 ?? null,
-        dueDate: dueDate ?? null
-      }
-    );
-    return created;
-  } catch (error2) {
-    throwAppleFailure(error2, REMINDERS_CREATE_SUMMARIES);
-  }
+  const body = await ask("create", {
+    name,
+    listName: listName ?? null,
+    notes: notes2 ?? null,
+    dueDate: dueDate ?? null
+  });
+  return body.reminder;
 }
 async function getRemindersFromListById(listId, props) {
   if (!listId || listId.trim() === "") {
@@ -12083,25 +11917,24 @@ async function getRemindersFromListById(listId, props) {
   }
   return result2.items;
 }
-var import_run3, MAX_REMINDERS, MAX_LISTS, REMINDERS_SUMMARIES, REMINDERS_CREATE_SUMMARIES, REMINDERS_OPEN_SUMMARIES, reminders_default;
+var import_run3, BROKER_URL, BROKER_SECRET, REMINDERS_SUMMARIES, REMINDERS_CREATE_SUMMARIES, REMINDERS_OPEN_SUMMARIES, reminders_default;
 var init_reminders = __esm({
   "utils/reminders.ts"() {
     "use strict";
     import_run3 = __toESM(require_run(), 1);
     init_native();
-    init_failure();
-    MAX_REMINDERS = 1e3;
-    MAX_LISTS = 1e3;
+    BROKER_URL = (process.env.MAESTRO_REMINDERS_URL ?? "").trim();
+    BROKER_SECRET = (process.env.MAESTRO_REMINDERS_SECRET ?? "").trim();
     REMINDERS_SUMMARIES = {
-      denied: "Could not reach your reminders: macOS denied access to Reminders. " + grantSentence("Reminders", "Automation > Reminders"),
-      notRunning: "Could not reach your reminders: the Reminders app could not be reached.",
-      timedOut: "Could not reach your reminders: Reminders did not answer in time.",
+      denied: "Could not reach your reminders: macOS denied access to Reminders. " + grantSentence("Reminders"),
+      notRunning: "Could not reach your reminders: Maestro could not be reached.",
+      timedOut: "Could not reach your reminders: Maestro did not answer in time.",
       failed: "Could not reach your reminders."
     };
     REMINDERS_CREATE_SUMMARIES = {
-      denied: "Could not create the reminder: macOS denied access to Reminders. " + grantSentence("Reminders", "Automation > Reminders"),
-      notRunning: "Could not create the reminder: the Reminders app could not be reached.",
-      timedOut: "Could not create the reminder: Reminders did not answer in time.",
+      denied: "Could not create the reminder: macOS denied access to Reminders. " + grantSentence("Reminders"),
+      notRunning: "Could not create the reminder: Maestro could not be reached.",
+      timedOut: "Could not create the reminder: Maestro did not answer in time.",
       failed: "Could not create the reminder."
     };
     REMINDERS_OPEN_SUMMARIES = {
@@ -12471,6 +12304,47 @@ var init_calendar = __esm({
     calendar_default = calendar;
   }
 });
+
+// utils/reminders-render.ts
+function remindersDue(dueDate) {
+  if (!dueDate) return "";
+  const at = new Date(dueDate);
+  return Number.isNaN(at.getTime()) ? "" : ` (due ${at.toLocaleString()})`;
+}
+function remindersDetail(r) {
+  return `${r.name}${remindersDue(r.dueDate)}${r.completed ? " [done]" : ""}
+List: ${r.listName || "Unknown"}
+` + (r.body ? `Notes: ${r.body}
+` : "") + `ID: ${r.id ?? "unknown"}`;
+}
+function remindersIndex(lists, all) {
+  const todo = all.filter((r) => !r.completed).length;
+  const header = `${lists.length} lists, ${all.length} reminders: ${todo} to do, ${all.length - todo} done. Names only. For a reminder's notes, search for it by name.`;
+  const byList = /* @__PURE__ */ new Map();
+  for (const r of all) {
+    const key = r.listName || "Unknown";
+    const bucket = byList.get(key);
+    if (bucket) bucket.push(r);
+    else byList.set(key, [r]);
+  }
+  const line = (r) => `- ${r.completed ? "[done] " : ""}${r.name}${remindersDue(r.dueDate)}`;
+  const sections = lists.map((l) => {
+    const mine = byList.get(l.name) ?? [];
+    byList.delete(l.name);
+    const open = mine.filter((r) => !r.completed);
+    const done = mine.filter((r) => r.completed);
+    const body = mine.length ? [...open, ...done].map(line).join("\n") : "(empty)";
+    return `## ${l.name}  [ID: ${l.id}]
+${body}`;
+  });
+  for (const [name, mine] of byList) {
+    sections.push(`## ${name}
+${mine.map(line).join("\n")}`);
+  }
+  return `${header}
+
+${sections.join("\n\n")}`;
+}
 
 // node_modules/zod/v4/core/core.js
 var NEVER = Object.freeze({
@@ -20184,11 +20058,9 @@ ${msg.content}`
                 content: [
                   {
                     type: "text",
-                    text: `Found ${lists.length} lists and ${allReminders.length} reminders.`
+                    text: remindersIndex(lists, allReminders)
                   }
                 ],
-                lists,
-                reminders: allReminders,
                 isError: false
               };
             } else if (operation === "search") {
@@ -20200,10 +20072,11 @@ ${msg.content}`
                 content: [
                   {
                     type: "text",
-                    text: results.length > 0 ? `Found ${results.length} reminders matching "${searchText}".` : `No reminders found matching "${searchText}".`
+                    text: results.length > 0 ? `Found ${results.length} reminders matching "${searchText}":
+
+` + results.map(remindersDetail).join("\n\n") : `No reminders found matching "${searchText}".`
                   }
                 ],
-                reminders: results,
                 isError: false
               };
             } else if (operation === "open") {
@@ -20231,11 +20104,10 @@ ${msg.content}`
                 content: [
                   {
                     type: "text",
-                    text: `Created reminder "${result2.name}" ${listName ? `in list "${listName}"` : ""}.`
+                    text: `Created reminder "${result2.name}" in list "${result2.listName}".`
                   }
                 ],
                 success: true,
-                reminder: result2,
                 isError: false
               };
             } else if (operation === "listById") {
@@ -20248,10 +20120,11 @@ ${msg.content}`
                 content: [
                   {
                     type: "text",
-                    text: results.length > 0 ? `Found ${results.length} reminders in list with ID "${listId}".` : `No reminders found in list with ID "${listId}".`
+                    text: results.length > 0 ? `Found ${results.length} reminders in that list:
+
+` + results.map(remindersDetail).join("\n\n") : "That list has no reminders in it."
                   }
                 ],
-                reminders: results,
                 isError: false
               };
             }
