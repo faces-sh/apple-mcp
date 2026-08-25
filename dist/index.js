@@ -19938,7 +19938,10 @@ function initServer() {
               if (contactCount === 0) {
                 return {
                   content: [
-                    { type: "text", text: "No contacts found in the address book." }
+                    {
+                      type: "text",
+                      text: `No contacts found in the address book.${partial2}`
+                    }
                   ],
                   isError: false
                 };

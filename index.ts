@@ -298,14 +298,23 @@ function initServer() {
 							const contactCount = Object.keys(allNumbers).length;
 
 							if (contactCount === 0) {
-								// A genuine empty address book, and nothing else: every way this call could
-								// have FAILED (a denial, an unreachable app, an all-unreadable scan) throws
-								// out of getAllNumbers before we get here. The old text hedged with "make
-								// sure you have granted access to Contacts", which invited a reader to treat
-								// an empty result as a permission problem it is not.
+								// Nothing FAILED to get here: a denial, an unreachable app and a broken read
+								// all throw out of getAllNumbers first. (The old text hedged with "make sure
+								// you have granted access to Contacts", which invited a reader to treat an
+								// empty result as a permission problem it is not.)
+								//
+								// But empty is not always the whole story, and this is the one place it can
+								// SOUND like it. `partial` is the difference between an address book with
+								// nobody in it and a cap that stopped before it reached anybody with a phone
+								// number, and saying "No contacts found in the address book" for the second
+								// is the exact failure this note exists to prevent. Caught by forcing the cap
+								// down to 5 and reading what the server actually returned.
 								return {
 									content: [
-										{ type: "text", text: "No contacts found in the address book." },
+										{
+											type: "text",
+											text: `No contacts found in the address book.${partial}`,
+										},
 									],
 									isError: false,
 								};
