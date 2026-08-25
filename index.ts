@@ -237,14 +237,38 @@ function initServer() {
 						const contactsModule = await loadModule("contacts");
 
 						if (args.name) {
-							const numbers = await contactsModule.findNumber(args.name);
+							// WHOLE CONTACTS, emails included, and the card's stable id with them.
+							//
+							// This used to call `findNumber`, which goes through `getAllNumbers` and so
+							// skips every contact with no phone number and returns only the phones. A
+							// caller asking Contacts for somebody's EMAIL therefore got nothing back: not
+							// a wrong address, no address, from the one source that reliably has it.
+							//
+							// The id is `CNContact.identifier` (JXA's `person.id()` returns the same
+							// "UUID:ABPerson" string), so a caller can act on the card afterwards: it is
+							// what lets Maestro remember which address somebody chose, keyed on something
+							// a rename cannot break and two people of the same name cannot collide on.
+							const found = await contactsModule.findContacts(args.name);
+							// A "not found" must never be silently a "not looked at": if the scan hit its
+							// cap, say so, because the person searched for may be one of the ones it did
+							// not reach. This was invisible for 647 of 1,647 cards on a real Mac.
+							const cut = contactsModule.truncation();
+							const partial = cut
+								? `\n\n(Only ${cut.scanned} of ${cut.total} contacts could be scanned, so this may be incomplete.)`
+								: "";
+							const lines = found.map((c) => {
+								const parts = [];
+								if (c.emails.length > 0) parts.push(c.emails.join(", "));
+								if (c.phones.length > 0) parts.push(c.phones.join(", "));
+								return `${c.name} [${c.id}]: ${parts.join(" | ")}`;
+							});
 							return {
 								content: [
 									{
 										type: "text",
-										text: numbers.length
-											? `${args.name}: ${numbers.join(", ")}`
-											: `No contact found for "${args.name}". Try a different name or use no name parameter to list all contacts.`,
+										text: lines.length
+											? lines.join("\n") + partial
+											: `No contact found for "${args.name}". Try a different name or use no name parameter to list all contacts.${partial}`,
 									},
 								],
 								isError: false,

@@ -10897,7 +10897,8 @@ var init_phone = __esm({
 var contacts_exports = {};
 __export(contacts_exports, {
   CONTACTS_SUMMARIES: () => CONTACTS_SUMMARIES,
-  default: () => contacts_default
+  default: () => contacts_default,
+  lastScanTruncation: () => lastScanTruncation
 });
 async function requestContactsAccess() {
   try {
@@ -10920,6 +10921,7 @@ async function getAllContacts() {
       const people = app.people();
       const out = [];
       const count = Math.min(people.length, max);
+      const total = people.length;
       let skipped = 0;
       let firstError = "";
       for (let i = 0; i < count; i++) {
@@ -10928,14 +10930,14 @@ async function getAllContacts() {
           const phones = person.phones().map((p) => p.value()).filter((v) => typeof v === "string" && v.length > 0);
           const emails = person.emails().map((e) => e.value()).filter((v) => typeof v === "string" && v.length > 0);
           if (phones.length > 0 || emails.length > 0) {
-            out.push({ name: person.name(), phones, emails });
+            out.push({ id: person.id(), name: person.name(), phones, emails });
           }
         } catch (e) {
           skipped++;
           if (!firstError) firstError = String(e);
         }
       }
-      return { items: out, attempted: count, skipped, firstError };
+      return { items: out, attempted: count, skipped, firstError, total };
     }, MAX_CONTACTS);
   } catch (error2) {
     throwAppleFailure(error2, CONTACTS_SUMMARIES);
@@ -10947,6 +10949,7 @@ async function getAllContacts() {
       rawBody(scan2.firstError)
     );
   }
+  lastScanTruncation = scan2.total > scan2.attempted ? { scanned: scan2.attempted, total: scan2.total } : null;
   return scan2.items;
 }
 async function getAllNumbers() {
@@ -10988,6 +10991,47 @@ async function findNumber(name) {
   }
   return [];
 }
+async function findContacts(name) {
+  if (!name || name.trim() === "") return [];
+  const query = name.trim();
+  const words = query.split(/\s+/).filter((w) => w.length >= 3);
+  const terms = [query, ...words.filter((w) => w.toLowerCase() !== query.toLowerCase())];
+  let matched = [];
+  try {
+    matched = await (0, import_run.run)((needles) => {
+      const app = Application("Contacts");
+      const out = [];
+      const seen = {};
+      for (const needle of needles) {
+        let people = [];
+        try {
+          people = app.people.whose({ name: { _contains: needle } })();
+        } catch (e) {
+          continue;
+        }
+        for (const person of people) {
+          try {
+            const id = person.id();
+            if (seen[id]) continue;
+            seen[id] = true;
+            const phones = person.phones().map((p) => p.value()).filter((v) => typeof v === "string" && v.length > 0);
+            const emails = person.emails().map((e) => e.value()).filter((v) => typeof v === "string" && v.length > 0);
+            if (phones.length > 0 || emails.length > 0) {
+              out.push({ id, name: person.name(), phones, emails });
+            }
+          } catch (e) {
+          }
+        }
+        if (out.length > 0) break;
+      }
+      return out;
+    }, terms);
+  } catch (error2) {
+    throwAppleFailure(error2, CONTACTS_SUMMARIES);
+  }
+  lastScanTruncation = null;
+  return matched;
+}
 async function findContactByPhone(handle) {
   if (!handle || handle.trim() === "") return null;
   const trimmed = handle.trim();
@@ -11004,7 +11048,7 @@ async function findContactByPhone(handle) {
   }
   return null;
 }
-var import_run, MAX_CONTACTS, CONTACTS_SUMMARIES, contacts_default;
+var import_run, MAX_CONTACTS, lastScanTruncation, CONTACTS_SUMMARIES, contacts_default;
 var init_contacts = __esm({
   "utils/contacts.ts"() {
     "use strict";
@@ -11012,7 +11056,8 @@ var init_contacts = __esm({
     init_native();
     init_failure();
     init_phone();
-    MAX_CONTACTS = 1e3;
+    MAX_CONTACTS = 5e3;
+    lastScanTruncation = null;
     CONTACTS_SUMMARIES = {
       denied: "Could not read your contacts: macOS denied access to Contacts. " + grantSentence("Contacts", "Automation > Contacts"),
       notRunning: "Could not read your contacts: the Contacts app could not be reached.",
@@ -11020,8 +11065,10 @@ var init_contacts = __esm({
       failed: "Could not read your contacts."
     };
     contacts_default = {
+      truncation: () => lastScanTruncation,
       getAllNumbers,
       findNumber,
+      findContacts,
       findContactByPhone,
       requestContactsAccess
     };
@@ -19851,12 +19898,22 @@ function initServer() {
           try {
             const contactsModule = await loadModule("contacts");
             if (args.name) {
-              const numbers = await contactsModule.findNumber(args.name);
+              const found = await contactsModule.findContacts(args.name);
+              const cut = contactsModule.truncation();
+              const partial2 = cut ? `
+
+(Only ${cut.scanned} of ${cut.total} contacts could be scanned, so this may be incomplete.)` : "";
+              const lines = found.map((c) => {
+                const parts = [];
+                if (c.emails.length > 0) parts.push(c.emails.join(", "));
+                if (c.phones.length > 0) parts.push(c.phones.join(", "));
+                return `${c.name} [${c.id}]: ${parts.join(" | ")}`;
+              });
               return {
                 content: [
                   {
                     type: "text",
-                    text: numbers.length ? `${args.name}: ${numbers.join(", ")}` : `No contact found for "${args.name}". Try a different name or use no name parameter to list all contacts.`
+                    text: lines.length ? lines.join("\n") + partial2 : `No contact found for "${args.name}". Try a different name or use no name parameter to list all contacts.${partial2}`
                   }
                 ],
                 isError: false
