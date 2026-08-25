@@ -8230,6 +8230,14 @@ function escapeAppleScriptString(value) {
 function escapeSqlString(value) {
   return value.replace(/'/g, "''");
 }
+function assertAlignedColumns(lengths, summary) {
+  if (lengths.every((n) => n === lengths[0])) return;
+  throw new ToolFailure(
+    "applescript_error",
+    summary,
+    rawBody(`property columns came back with different lengths: ${lengths.join(", ")}`)
+  );
+}
 function phoneDigits(value) {
   return value.replace(/\D/g, "");
 }
@@ -10914,43 +10922,57 @@ async function requestContactsAccess() {
   }
 }
 async function getAllContacts() {
-  let scan2;
+  let columns;
   try {
-    scan2 = await (0, import_run.run)((max) => {
+    columns = await (0, import_run.run)(() => {
       const app = Application("Contacts");
-      const people = app.people();
-      const out = [];
-      const count = Math.min(people.length, max);
-      const total = people.length;
-      let skipped = 0;
-      let firstError = "";
-      for (let i = 0; i < count; i++) {
-        try {
-          const person = people[i];
-          const phones = person.phones().map((p) => p.value()).filter((v) => typeof v === "string" && v.length > 0);
-          const emails = person.emails().map((e) => e.value()).filter((v) => typeof v === "string" && v.length > 0);
-          if (phones.length > 0 || emails.length > 0) {
-            out.push({ id: person.id(), name: person.name(), phones, emails });
-          }
-        } catch (e) {
-          skipped++;
-          if (!firstError) firstError = String(e);
+      let ids = [];
+      let names = [];
+      let emails = [];
+      let phones = [];
+      for (let attempt = 0; attempt < 2; attempt++) {
+        ids = app.people.id();
+        names = app.people.name();
+        emails = app.people.emails.value();
+        phones = app.people.phones.value();
+        if (ids.length === names.length && ids.length === emails.length && ids.length === phones.length) {
+          break;
         }
       }
-      return { items: out, attempted: count, skipped, firstError, total };
-    }, MAX_CONTACTS);
+      return { ids, names, emails, phones };
+    });
   } catch (error2) {
     throwAppleFailure(error2, CONTACTS_SUMMARIES);
   }
-  if (scan2.attempted > 0 && scan2.skipped === scan2.attempted) {
-    throw new ToolFailure(
-      "applescript_error",
-      `Could not read your contacts: all ${scan2.attempted} contacts failed to read.`,
-      rawBody(scan2.firstError)
-    );
+  assertAlignedColumns(
+    [
+      columns.ids.length,
+      columns.names.length,
+      columns.emails.length,
+      columns.phones.length
+    ],
+    "Could not read your contacts: the address book changed while it was being read."
+  );
+  const total = columns.ids.length;
+  const looked = Math.min(total, MAX_CONTACTS);
+  const out = [];
+  for (let i = 0; i < looked; i++) {
+    const phones = onlyStrings(columns.phones[i]);
+    const emails = onlyStrings(columns.emails[i]);
+    if (phones.length === 0 && emails.length === 0) continue;
+    out.push({
+      id: typeof columns.ids[i] === "string" ? columns.ids[i] : "",
+      name: typeof columns.names[i] === "string" ? columns.names[i] : "",
+      phones,
+      emails
+    });
   }
-  lastScanTruncation = scan2.total > scan2.attempted ? { scanned: scan2.attempted, total: scan2.total } : null;
-  return scan2.items;
+  lastScanTruncation = total > looked ? { shown: looked, total } : null;
+  return out;
+}
+function onlyStrings(values) {
+  if (!Array.isArray(values)) return [];
+  return values.filter((v) => typeof v === "string" && v.length > 0);
 }
 async function getAllNumbers() {
   const contacts2 = await getAllContacts();
@@ -11032,21 +11054,37 @@ async function findContacts(name) {
   lastScanTruncation = null;
   return matched;
 }
+async function namesForHandles(handles) {
+  const wanted = Array.from(
+    new Set(handles.map((h) => (h ?? "").trim()).filter((h) => h.length > 0))
+  );
+  const resolved = /* @__PURE__ */ new Map();
+  if (wanted.length === 0) return resolved;
+  const contacts2 = await getAllContacts();
+  const emailTargets = /* @__PURE__ */ new Map();
+  const phoneTargets = [];
+  for (const handle of wanted) {
+    if (isEmailHandle(handle)) emailTargets.set(handle.toLowerCase(), handle);
+    else phoneTargets.push(handle);
+  }
+  for (const c of contacts2) {
+    for (const email2 of c.emails) {
+      const handle = emailTargets.get(email2.toLowerCase());
+      if (handle !== void 0 && !resolved.has(handle)) resolved.set(handle, c.name);
+    }
+    for (const handle of phoneTargets) {
+      if (resolved.has(handle)) continue;
+      if (c.phones.some((num) => phonesMatch(num, handle))) resolved.set(handle, c.name);
+    }
+    if (resolved.size === wanted.length) break;
+  }
+  return resolved;
+}
 async function findContactByPhone(handle) {
   if (!handle || handle.trim() === "") return null;
   const trimmed = handle.trim();
-  const contacts2 = await getAllContacts();
-  if (isEmailHandle(trimmed)) {
-    const target = trimmed.toLowerCase();
-    for (const c of contacts2) {
-      if (c.emails.some((e) => e.toLowerCase() === target)) return c.name;
-    }
-    return null;
-  }
-  for (const c of contacts2) {
-    if (c.phones.some((num) => phonesMatch(num, trimmed))) return c.name;
-  }
-  return null;
+  const resolved = await namesForHandles([trimmed]);
+  return resolved.has(trimmed) ? resolved.get(trimmed) : null;
 }
 var import_run, MAX_CONTACTS, lastScanTruncation, CONTACTS_SUMMARIES, contacts_default;
 var init_contacts = __esm({
@@ -11070,6 +11108,7 @@ var init_contacts = __esm({
       findNumber,
       findContacts,
       findContactByPhone,
+      namesForHandles,
       requestContactsAccess
     };
   }
@@ -11080,16 +11119,18 @@ var notes_exports = {};
 __export(notes_exports, {
   NOTES_CREATE_SUMMARIES: () => NOTES_CREATE_SUMMARIES,
   NOTES_SUMMARIES: () => NOTES_SUMMARIES,
-  default: () => notes_default
+  default: () => notes_default,
+  lastNotesTruncation: () => lastNotesTruncation
 });
-function failIfEverythingWasSkipped(scan2, summaryPrefix) {
-  if (scan2.attempted > 0 && scan2.skipped === scan2.attempted) {
-    throw new ToolFailure(
-      "applescript_error",
-      `${summaryPrefix}: all ${scan2.attempted} notes failed to read.`,
-      rawBody(scan2.firstError)
-    );
-  }
+function recordTruncation(shown, total) {
+  lastNotesTruncation = total > shown ? { shown, total } : null;
+}
+function noteName(raw) {
+  return typeof raw === "string" && raw ? raw : "Untitled Note";
+}
+function notePreview(raw) {
+  const text = typeof raw === "string" ? raw : "";
+  return text.length > MAX_CONTENT_PREVIEW ? text.slice(0, MAX_CONTENT_PREVIEW) + "\u2026" : text;
 }
 async function requestNotesAccess() {
   try {
@@ -11104,86 +11145,53 @@ async function requestNotesAccess() {
     throwAppleFailure(error2, NOTES_SUMMARIES);
   }
 }
-async function getAllNotes() {
-  let scan2;
+async function readStoreColumns() {
+  let columns;
   try {
-    scan2 = await (0, import_run2.run)(
-      (opts) => {
-        const Notes = Application("Notes");
-        const all = Notes.notes();
-        const out = [];
-        const count = Math.min(all.length, opts.max);
-        let skipped = 0;
-        let firstError = "";
-        for (let i = 0; i < count; i++) {
-          try {
-            const note = all[i];
-            const rawName = note.name();
-            let content = note.plaintext();
-            content = typeof content === "string" ? content : "";
-            if (content.length > opts.maxLen) {
-              content = content.slice(0, opts.maxLen) + "\u2026";
-            }
-            out.push({
-              name: typeof rawName === "string" && rawName ? rawName : "Untitled Note",
-              content
-            });
-          } catch (_e) {
-            skipped++;
-            if (!firstError) firstError = String(_e);
-          }
-        }
-        return { items: out, attempted: count, skipped, firstError };
-      },
-      { max: MAX_NOTES, maxLen: MAX_CONTENT_PREVIEW }
-    );
+    columns = await (0, import_run2.run)(() => {
+      const Notes = Application("Notes");
+      let names = [];
+      let bodies = [];
+      for (let attempt = 0; attempt < 2; attempt++) {
+        names = Notes.notes.name();
+        bodies = Notes.notes.plaintext();
+        if (names.length === bodies.length) break;
+      }
+      return { names, bodies };
+    });
   } catch (error2) {
     throwAppleFailure(error2, NOTES_SUMMARIES);
   }
-  failIfEverythingWasSkipped(scan2, "Could not list your notes");
-  return scan2.items.map((n) => ({ name: n.name, content: n.content }));
+  assertAlignedColumns(
+    [columns.names.length, columns.bodies.length],
+    "Could not read your notes: the note store changed while it was being read."
+  );
+  return columns;
+}
+async function getAllNotes() {
+  const { names, bodies } = await readStoreColumns();
+  const total = names.length;
+  const count = Math.min(total, MAX_NOTES);
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    out.push({ name: noteName(names[i]), content: notePreview(bodies[i]) });
+  }
+  recordTruncation(count, total);
+  return out;
 }
 async function findNote(searchText) {
   if (!searchText || searchText.trim() === "") return [];
-  let scan2;
-  try {
-    scan2 = await (0, import_run2.run)(
-      (opts) => {
-        const Notes = Application("Notes");
-        const all = Notes.notes();
-        const out = [];
-        const needle = opts.search.toLowerCase();
-        const count = Math.min(all.length, opts.max);
-        let skipped = 0;
-        let firstError = "";
-        for (let i = 0; i < count; i++) {
-          try {
-            const note = all[i];
-            const rawName = note.name();
-            const rawPlain = note.plaintext();
-            const name = typeof rawName === "string" ? rawName : "";
-            const plain = typeof rawPlain === "string" ? rawPlain : "";
-            const haystack = (name + "\n" + plain).toLowerCase();
-            if (haystack.indexOf(needle) === -1) continue;
-            let content = plain;
-            if (content.length > opts.maxLen) {
-              content = content.slice(0, opts.maxLen) + "\u2026";
-            }
-            out.push({ name: name || "Untitled Note", content });
-          } catch (_e) {
-            skipped++;
-            if (!firstError) firstError = String(_e);
-          }
-        }
-        return { items: out, attempted: count, skipped, firstError };
-      },
-      { search: searchText, max: MAX_NOTES, maxLen: MAX_CONTENT_PREVIEW }
-    );
-  } catch (error2) {
-    throwAppleFailure(error2, NOTES_SUMMARIES);
+  const { names, bodies } = await readStoreColumns();
+  const needle = searchText.toLowerCase();
+  const hits = [];
+  for (let i = 0; i < names.length; i++) {
+    const name = typeof names[i] === "string" ? names[i] : "";
+    const body = typeof bodies[i] === "string" ? bodies[i] : "";
+    if ((name + "\n" + body).toLowerCase().indexOf(needle) === -1) continue;
+    hits.push({ name: name || "Untitled Note", content: notePreview(body) });
   }
-  failIfEverythingWasSkipped(scan2, "Could not search your notes");
-  return scan2.items.map((n) => ({ name: n.name, content: n.content }));
+  recordTruncation(Math.min(hits.length, MAX_NOTES), hits.length);
+  return hits.slice(0, MAX_NOTES);
 }
 async function createNote(title, body, folderName = DEFAULT_FOLDER) {
   if (!title || title.trim() === "") {
@@ -11199,19 +11207,19 @@ ${body ?? ""}`;
     const result2 = await (0, import_run2.run)(
       (opts) => {
         const Notes = Application("Notes");
-        let folder = null;
-        const folders = Notes.folders();
-        for (let i = 0; i < folders.length; i++) {
-          try {
-            if (folders[i].name() === opts.folderName) {
-              folder = folders[i];
-              break;
-            }
-          } catch (_e) {
+        const folderNames = Notes.folders.name();
+        let index = -1;
+        for (let i = 0; i < folderNames.length; i++) {
+          if (folderNames[i] === opts.folderName) {
+            index = i;
+            break;
           }
         }
         let createdFolder = false;
-        if (!folder) {
+        let folder;
+        if (index >= 0) {
+          folder = Notes.folders[index];
+        } else {
           folder = Notes.make({
             new: "folder",
             withProperties: { name: opts.folderName }
@@ -11237,71 +11245,62 @@ ${body ?? ""}`;
   }
 }
 async function scanFolder(folderName) {
+  let raw;
   try {
-    const raw = await (0, import_run2.run)(
+    raw = await (0, import_run2.run)(
       (opts) => {
         const Notes = Application("Notes");
-        let folder = null;
-        const folders = Notes.folders();
-        for (let i = 0; i < folders.length; i++) {
-          try {
-            if (folders[i].name() === opts.folderName) {
-              folder = folders[i];
-              break;
-            }
-          } catch (_e) {
+        const folderNames = Notes.folders.name();
+        let index = -1;
+        for (let i = 0; i < folderNames.length; i++) {
+          if (folderNames[i] === opts.folderName) {
+            index = i;
+            break;
           }
         }
-        if (!folder) return { found: false, notes: [] };
-        const folderNotes = folder.notes();
-        const out = [];
-        const count = Math.min(folderNotes.length, opts.max);
-        for (let i = 0; i < count; i++) {
-          try {
-            const note = folderNotes[i];
-            const rawName = note.name();
-            let content = note.plaintext();
-            content = typeof content === "string" ? content : "";
-            if (content.length > opts.maxLen) {
-              content = content.slice(0, opts.maxLen) + "\u2026";
-            }
-            let created = null;
-            let modified = null;
-            try {
-              const d = note.creationDate();
-              created = d ? d.getTime() : null;
-            } catch (_e) {
-            }
-            try {
-              const d = note.modificationDate();
-              modified = d ? d.getTime() : null;
-            } catch (_e) {
-            }
-            out.push({
-              name: typeof rawName === "string" && rawName ? rawName : "Untitled Note",
-              content,
-              creationDate: created,
-              modificationDate: modified
-            });
-          } catch (_e) {
+        if (index < 0) {
+          return { found: false, names: [], bodies: [], created: [], modified: [] };
+        }
+        const folder = Notes.folders[index];
+        const toMillis = (values) => values.map((d) => d && typeof d.getTime === "function" ? d.getTime() : null);
+        let names = [];
+        let bodies = [];
+        let created = [];
+        let modified = [];
+        for (let attempt = 0; attempt < 2; attempt++) {
+          names = folder.notes.name();
+          bodies = folder.notes.plaintext();
+          created = toMillis(folder.notes.creationDate());
+          modified = toMillis(folder.notes.modificationDate());
+          if (names.length === bodies.length && names.length === created.length && names.length === modified.length) {
+            break;
           }
         }
-        return { found: true, notes: out };
+        return { found: true, names, bodies, created, modified };
       },
-      { folderName, max: MAX_NOTES, maxLen: MAX_CONTENT_PREVIEW }
+      { folderName }
     );
-    return {
-      found: raw.found,
-      notes: raw.notes.map((n) => ({
-        name: n.name,
-        content: n.content,
-        creationDate: n.creationDate != null ? new Date(n.creationDate) : void 0,
-        modificationDate: n.modificationDate != null ? new Date(n.modificationDate) : void 0
-      }))
-    };
   } catch (error2) {
     throwAppleFailure(error2, NOTES_SUMMARIES);
   }
+  if (!raw.found) return { found: false, notes: [] };
+  assertAlignedColumns(
+    [raw.names.length, raw.bodies.length, raw.created.length, raw.modified.length],
+    `Could not read your notes: the folder "${folderName}" changed while it was being read.`
+  );
+  const total = raw.names.length;
+  const count = Math.min(total, MAX_NOTES);
+  const notes2 = [];
+  for (let i = 0; i < count; i++) {
+    notes2.push({
+      name: noteName(raw.names[i]),
+      content: notePreview(raw.bodies[i]),
+      creationDate: raw.created[i] != null ? new Date(raw.created[i]) : void 0,
+      modificationDate: raw.modified[i] != null ? new Date(raw.modified[i]) : void 0
+    });
+  }
+  recordTruncation(count, total);
+  return { found: true, notes: notes2 };
 }
 async function getNotesFromFolder(folderName) {
   const { found, notes: notes2 } = await scanFolder(folderName);
@@ -11343,16 +11342,16 @@ async function getNotesByDateRange(folderName, fromDate, toDate, limit = 20) {
   });
   return { success: true, notes: filtered.slice(0, Math.max(0, limit)) };
 }
-var import_run2, MAX_NOTES, MAX_CONTENT_PREVIEW, DEFAULT_FOLDER, NOTES_SUMMARIES, NOTES_CREATE_SUMMARIES, notes_default;
+var import_run2, MAX_NOTES, MAX_CONTENT_PREVIEW, DEFAULT_FOLDER, lastNotesTruncation, NOTES_SUMMARIES, NOTES_CREATE_SUMMARIES, notes_default;
 var init_notes = __esm({
   "utils/notes.ts"() {
     "use strict";
     import_run2 = __toESM(require_run(), 1);
     init_native();
-    init_failure();
-    MAX_NOTES = 1e3;
+    MAX_NOTES = 5e3;
     MAX_CONTENT_PREVIEW = 2e3;
     DEFAULT_FOLDER = "Claude";
+    lastNotesTruncation = null;
     NOTES_SUMMARIES = {
       denied: "Could not reach your notes: macOS denied access to Notes. " + grantSentence("Automation > Notes"),
       notRunning: "Could not reach your notes: the Notes app could not be reached.",
@@ -11366,6 +11365,7 @@ var init_notes = __esm({
       failed: "Could not create the note."
     };
     notes_default = {
+      truncation: () => lastNotesTruncation,
       getAllNotes,
       findNote,
       createNote,
@@ -12128,7 +12128,8 @@ __export(calendar_exports, {
   CALENDAR_CREATE_SUMMARIES: () => CALENDAR_CREATE_SUMMARIES,
   CALENDAR_OPEN_SUMMARIES: () => CALENDAR_OPEN_SUMMARIES,
   CALENDAR_SUMMARIES: () => CALENDAR_SUMMARIES,
-  default: () => calendar_default
+  default: () => calendar_default,
+  lastWindowTruncation: () => lastWindowTruncation
 });
 function parseDate(value, label) {
   const d = new Date(value);
@@ -12169,71 +12170,33 @@ async function requestCalendarAccess() {
     throwAppleFailure(error2, CALENDAR_SUMMARIES);
   }
 }
-async function scanWindow(fromMs, toMs, limit, search) {
+async function findWindow(fromMs, toMs) {
   const scan2 = await (0, import_run4.run)(
     (args) => {
       const C = Application("Calendar");
-      const from = new Date(args.fromMs);
-      const to = new Date(args.toMs);
-      const out = [];
-      let scanned = 0;
+      const calendarNames = C.calendars.name();
+      const slots = [];
       let visited = 0;
       let skippedCalendars = 0;
       let firstError = "";
-      const cals = C.calendars();
-      for (let ci = 0; ci < cals.length && out.length < args.limit; ci++) {
+      for (let ci = 0; ci < calendarNames.length; ci++) {
         visited++;
         try {
-          const cal = cals[ci];
-          const calName = cal.name();
-          let evs;
-          try {
-            evs = cal.events.whose({
-              _and: [
-                { startDate: { _greaterThanEquals: from } },
-                { startDate: { _lessThanEquals: to } }
-              ]
-            })();
-          } catch (_predicateUnsupported) {
-            evs = cal.events();
-          }
-          for (let ei = 0; ei < evs.length && out.length < args.limit && scanned < args.cap; ei++) {
-            scanned++;
-            try {
-              const ev = evs[ei];
-              const start = ev.startDate();
-              const end = ev.endDate();
-              const startMs = start ? start.getTime() : NaN;
-              if (!Number.isNaN(startMs) && (startMs < args.fromMs || startMs > args.toMs)) {
-                continue;
-              }
-              const title = ev.summary() || "";
-              const location = ev.location() || null;
-              const notes2 = ev.description() || null;
-              if (args.search) {
-                const hay = (title + " " + (location || "") + " " + (notes2 || "")).toLowerCase();
-                if (hay.indexOf(args.search) === -1) continue;
-              }
-              out.push({
-                id: ev.uid(),
-                title,
-                startDate: start ? start.toISOString() : "",
-                endDate: end ? end.toISOString() : "",
-                location,
-                calendarName: calName,
-                notes: notes2
-              });
-            } catch (_badEvent) {
-            }
+          const starts = C.calendars[ci].events.startDate();
+          for (let ei = 0; ei < starts.length; ei++) {
+            const d = starts[ei];
+            const ms = d && typeof d.getTime === "function" ? d.getTime() : NaN;
+            if (Number.isNaN(ms) || ms < args.fromMs || ms > args.toMs) continue;
+            slots.push({ ci, ei, startMs: ms });
           }
         } catch (badCalendar) {
           skippedCalendars++;
           if (!firstError) firstError = String(badCalendar);
         }
       }
-      return { items: out, visited, skippedCalendars, firstError };
+      return { calendarNames, slots, visited, skippedCalendars, firstError };
     },
-    { fromMs, toMs, limit, search, cap: MAX_SCAN }
+    { fromMs, toMs }
   );
   if (scan2.visited > 0 && scan2.skippedCalendars === scan2.visited) {
     throw new ToolFailure(
@@ -12242,7 +12205,57 @@ async function scanWindow(fromMs, toMs, limit, search) {
       rawBody(scan2.firstError)
     );
   }
-  return scan2.items;
+  return scan2;
+}
+async function readSlots(slots, calendarNames, fromMs, toMs, limit, search) {
+  const read = await (0, import_run4.run)(
+    (args) => {
+      const C = Application("Calendar");
+      const out = [];
+      for (let k = 0; k < args.slots.length && out.length < args.limit; k++) {
+        const slot = args.slots[k];
+        try {
+          const ev = C.calendars[slot.ci].events[slot.ei];
+          const start = ev.startDate();
+          const startMs = start ? start.getTime() : NaN;
+          if (Number.isNaN(startMs) || startMs < args.fromMs || startMs > args.toMs) continue;
+          const title = ev.summary() || "";
+          const location = ev.location() || null;
+          const notes2 = ev.description() || null;
+          if (args.search) {
+            const hay = (title + " " + (location || "") + " " + (notes2 || "")).toLowerCase();
+            if (hay.indexOf(args.search) === -1) continue;
+          }
+          const end = ev.endDate();
+          out.push({
+            id: ev.uid(),
+            title,
+            startDate: start.toISOString(),
+            endDate: end ? end.toISOString() : "",
+            location,
+            calendarName: args.calendarNames[slot.ci],
+            notes: notes2
+          });
+        } catch (_badEvent) {
+        }
+      }
+      return { items: out };
+    },
+    { slots, calendarNames, fromMs, toMs, limit, search }
+  );
+  return read.items;
+}
+async function scanWindow(fromMs, toMs, limit, search) {
+  const { calendarNames, slots } = await findWindow(fromMs, toMs);
+  slots.sort((a, b) => a.startMs - b.startMs);
+  const considered = slots.slice(0, MAX_SCAN);
+  if (considered.length === 0) {
+    lastWindowTruncation = null;
+    return [];
+  }
+  const items = await readSlots(considered, calendarNames, fromMs, toMs, limit, search);
+  lastWindowTruncation = slots.length > considered.length && items.length < limit ? { examined: considered.length } : null;
+  return items;
 }
 async function getEvents(limit = 10, fromDate, toDate) {
   const { fromMs, toMs } = resolveWindow(fromDate, toDate, LIST_WINDOW_DAYS);
@@ -12279,56 +12292,42 @@ async function openEvent(eventId) {
     const found = await (0, import_run4.run)(
       (args) => {
         const C = Application("Calendar");
-        const cals = C.calendars();
-        let scanned = 0;
+        const calNames = C.calendars.name();
         let skippedCalendars = 0;
         let firstError = "";
-        for (let ci = 0; ci < cals.length; ci++) {
+        for (let ci = 0; ci < calNames.length; ci++) {
           try {
-            const cal = cals[ci];
-            let matches;
+            const uids = C.calendars[ci].events.uid();
+            const index = uids.indexOf(args.id);
+            if (index < 0) continue;
+            const ev = C.calendars[ci].events[index];
+            let title = "";
             try {
-              matches = cal.events.whose({ uid: { _equals: args.id } })();
-            } catch (_predicateUnsupported) {
-              matches = [];
+              title = ev.summary() || "";
+            } catch (_noTitle) {
             }
-            if (matches.length === 0) {
-              const evs = cal.events();
-              for (let ei = 0; ei < evs.length && scanned < args.cap; ei++) {
-                scanned++;
-                try {
-                  if (evs[ei].uid() === args.id) {
-                    matches = [evs[ei]];
-                    break;
-                  }
-                } catch (_badEvent) {
-                }
-              }
-            }
-            if (matches.length > 0) {
-              const ev = matches[0];
-              let title = "";
-              try {
-                title = ev.summary() || "";
-              } catch (_noTitle) {
-              }
-              C.activate();
-              return {
-                found: true,
-                title,
-                skippedCalendars,
-                firstError,
-                visited: cals.length
-              };
-            }
+            C.activate();
+            return {
+              found: true,
+              title,
+              skippedCalendars,
+              firstError,
+              visited: calNames.length
+            };
           } catch (badCalendar) {
             skippedCalendars++;
             if (!firstError) firstError = String(badCalendar);
           }
         }
-        return { found: false, title: "", skippedCalendars, firstError, visited: cals.length };
+        return {
+          found: false,
+          title: "",
+          skippedCalendars,
+          firstError,
+          visited: calNames.length
+        };
       },
-      { id, cap: MAX_SCAN }
+      { id }
     );
     if (found.visited > 0 && found.skippedCalendars === found.visited) {
       throw new ToolFailure(
@@ -12432,7 +12431,7 @@ async function createEvent(title, startDate, endDate, location, notes2, isAllDay
     throwAppleFailure(error2, CALENDAR_CREATE_SUMMARIES);
   }
 }
-var import_run4, MAX_SCAN, LIST_WINDOW_DAYS, SEARCH_WINDOW_DAYS, CALENDAR_SUMMARIES, CALENDAR_OPEN_SUMMARIES, CALENDAR_CREATE_SUMMARIES, calendar, calendar_default;
+var import_run4, MAX_SCAN, lastWindowTruncation, LIST_WINDOW_DAYS, SEARCH_WINDOW_DAYS, CALENDAR_SUMMARIES, CALENDAR_OPEN_SUMMARIES, CALENDAR_CREATE_SUMMARIES, calendar, calendar_default;
 var init_calendar = __esm({
   "utils/calendar.ts"() {
     "use strict";
@@ -12440,6 +12439,7 @@ var init_calendar = __esm({
     init_native();
     init_failure();
     MAX_SCAN = 1e3;
+    lastWindowTruncation = null;
     LIST_WINDOW_DAYS = 7;
     SEARCH_WINDOW_DAYS = 30;
     CALENDAR_SUMMARIES = {
@@ -12461,6 +12461,7 @@ var init_calendar = __esm({
       failed: "Could not create the event."
     };
     calendar = {
+      truncation: () => lastWindowTruncation,
       searchEvents,
       openEvent,
       getEvents,
@@ -19759,6 +19760,21 @@ var ENABLED_APPS = (() => {
 function isAppEnabled(toolName) {
   return ENABLED_APPS === null || ENABLED_APPS.has(toolName.toLowerCase());
 }
+function contactsTruncationNote(cut) {
+  return cut ? `
+
+(Only the first ${cut.shown} of ${cut.total} contacts were looked at, so this may be incomplete.)` : "";
+}
+function calendarTruncationNote(cut) {
+  return cut ? `
+
+(Stopped after the first ${cut.examined} events in this window, so this may be incomplete.)` : "";
+}
+function notesTruncationNote(cut, what) {
+  return cut ? `
+
+(Showing ${cut.shown} of ${cut.total} ${what}.)` : "";
+}
 var useEagerLoading = true;
 var loadingTimeout = null;
 var safeModeFallback = false;
@@ -19899,10 +19915,7 @@ function initServer() {
             const contactsModule = await loadModule("contacts");
             if (args.name) {
               const found = await contactsModule.findContacts(args.name);
-              const cut = contactsModule.truncation();
-              const partial2 = cut ? `
-
-(Only ${cut.scanned} of ${cut.total} contacts could be scanned, so this may be incomplete.)` : "";
+              const partial2 = contactsTruncationNote(contactsModule.truncation());
               const lines = found.map((c) => {
                 const parts = [];
                 if (c.emails.length > 0) parts.push(c.emails.join(", "));
@@ -19920,11 +19933,15 @@ function initServer() {
               };
             } else {
               const allNumbers = await contactsModule.getAllNumbers();
+              const partial2 = contactsTruncationNote(contactsModule.truncation());
               const contactCount = Object.keys(allNumbers).length;
               if (contactCount === 0) {
                 return {
                   content: [
-                    { type: "text", text: "No contacts found in the address book." }
+                    {
+                      type: "text",
+                      text: `No contacts found in the address book.${partial2}`
+                    }
                   ],
                   isError: false
                 };
@@ -19936,7 +19953,7 @@ function initServer() {
                     type: "text",
                     text: formattedContacts.length > 0 ? `Found ${contactCount} contacts:
 
-${formattedContacts.join("\n")}` : "Found contacts but none have phone numbers. Try searching by name to see more details."
+${formattedContacts.join("\n")}${partial2}` : `Found contacts but none have phone numbers. Try searching by name to see more details.${partial2}`
                   }
                 ],
                 isError: false
@@ -19969,12 +19986,13 @@ ${formattedContacts.join("\n")}` : "Found contacts but none have phone numbers. 
                   );
                 }
                 const foundNotes = await notesModule.findNote(args.searchText);
+                const trimmed = notesTruncationNote(notesModule.truncation(), "matching notes");
                 return {
                   content: [
                     {
                       type: "text",
                       text: foundNotes.length ? foundNotes.map((note) => `${note.name}:
-${note.content}`).join("\n\n") : `No notes found for "${args.searchText}"`
+${note.content}`).join("\n\n") + trimmed : `No notes found for "${args.searchText}"`
                     }
                   ],
                   isError: false
@@ -19982,12 +20000,13 @@ ${note.content}`).join("\n\n") : `No notes found for "${args.searchText}"`
               }
               case "list": {
                 const allNotes = await notesModule.getAllNotes();
+                const trimmed = notesTruncationNote(notesModule.truncation(), "notes");
                 return {
                   content: [
                     {
                       type: "text",
                       text: allNotes.length ? allNotes.map((note) => `${note.name}:
-${note.content}`).join("\n\n") : "No notes exist."
+${note.content}`).join("\n\n") + trimmed : "No notes exist."
                     }
                   ],
                   isError: false
@@ -20107,22 +20126,13 @@ ${note.content}`).join("\n\n") : "No notes exist."
                   args.limit
                 );
                 const contactsModule = await loadModule("contacts");
-                const messagesWithNames = await Promise.all(
-                  messages.map(async (msg) => {
-                    if (!msg.is_from_me) {
-                      const contactName = await contactsModule.findContactByPhone(msg.sender);
-                      return {
-                        ...msg,
-                        displayName: contactName || msg.sender
-                        // Use contact name if found, otherwise use phone/email
-                      };
-                    }
-                    return {
-                      ...msg,
-                      displayName: "Me"
-                    };
-                  })
-                );
+                const senders = messages.filter((msg) => !msg.is_from_me).map((msg) => msg.sender);
+                const names = await contactsModule.namesForHandles(senders);
+                const messagesWithNames = messages.map((msg) => {
+                  if (msg.is_from_me) return { ...msg, displayName: "Me" };
+                  const contactName = names.get((msg.sender ?? "").trim());
+                  return { ...msg, displayName: contactName || msg.sender };
+                });
                 return {
                   content: [
                     {
@@ -20270,6 +20280,7 @@ ${msg.content}`
                   fromDate,
                   toDate
                 );
+                const trimmed = calendarTruncationNote(calendarModule.truncation());
                 return {
                   content: [
                     {
@@ -20283,7 +20294,7 @@ Calendar: ${event.calendarName}
 ID: ${event.id}
 ${event.notes ? `Notes: ${event.notes}
 ` : ""}`
-                      ).join("\n\n")}` : `No events found matching "${searchText}".`
+                      ).join("\n\n")}${trimmed}` : `No events found matching "${searchText}".${trimmed}`
                     }
                   ],
                   isError: false
@@ -20306,6 +20317,7 @@ ${event.notes ? `Notes: ${event.notes}
                 );
                 const startDateText = fromDate ? new Date(fromDate).toLocaleDateString() : "today";
                 const endDateText = toDate ? new Date(toDate).toLocaleDateString() : "next 7 days";
+                const trimmed = calendarTruncationNote(calendarModule.truncation());
                 return {
                   content: [
                     {
@@ -20317,7 +20329,7 @@ ${events.map(
 Location: ${event.location || "Not specified"}
 Calendar: ${event.calendarName}
 ID: ${event.id}`
-                      ).join("\n\n")}` : `No events found from ${startDateText} to ${endDateText}.`
+                      ).join("\n\n")}${trimmed}` : `No events found from ${startDateText} to ${endDateText}.${trimmed}`
                     }
                   ],
                   isError: false

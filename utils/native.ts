@@ -159,6 +159,25 @@ export function escapeSqlString(value: string): string {
 	return value.replace(/'/g, "''");
 }
 
+/**
+ * Guard the alignment of columns read out of one Apple collection.
+ *
+ * A bulk property read (`collection.name()`, `collection.plaintext()`) is ONE Apple Event returning
+ * one array, which is why every read in this server is shaped that way. Reading two properties is two
+ * events, so an item created or deleted between them leaves the columns off by one, and an off-by-one
+ * column is worse than a failure: it reports one item's title beside another item's body as a fact
+ * about the user's data. Callers retake the read once (a store is unlikely to move twice) and then
+ * call this, which fails loudly with what it actually saw.
+ */
+export function assertAlignedColumns(lengths: number[], summary: string): void {
+	if (lengths.every((n) => n === lengths[0])) return;
+	throw new ToolFailure(
+		"applescript_error",
+		summary,
+		rawBody(`property columns came back with different lengths: ${lengths.join(", ")}`),
+	);
+}
+
 /** Reduce a phone number to its digits (E.164 minus the leading +). */
 export function phoneDigits(value: string): string {
 	return value.replace(/\D/g, "");
