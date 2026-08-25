@@ -19750,6 +19750,7 @@ var tools_default = tools;
 
 // index.ts
 init_failure();
+var NOTE_PREVIEW_CHARS = 200;
 var ENABLED_APPS = (() => {
   const raw = process.env.APPLE_MCP_ENABLED_APPS;
   if (raw === void 0) return null;
@@ -20001,12 +20002,17 @@ ${note.content}`).join("\n\n") + trimmed : `No notes found for "${args.searchTex
               case "list": {
                 const allNotes = await notesModule.getAllNotes();
                 const trimmed = notesTruncationNote(notesModule.truncation(), "notes");
+                const preview = (body) => {
+                  const flat = (body ?? "").replace(/\s+/g, " ").trim();
+                  return flat.length > NOTE_PREVIEW_CHARS ? flat.slice(0, NOTE_PREVIEW_CHARS) + "..." : flat;
+                };
                 return {
                   content: [
                     {
                       type: "text",
-                      text: allNotes.length ? allNotes.map((note) => `${note.name}:
-${note.content}`).join("\n\n") + trimmed : "No notes exist."
+                      text: allNotes.length ? `${allNotes.length} notes, first ${NOTE_PREVIEW_CHARS} characters of each. To read one in full, search for its name.
+
+` + allNotes.map((note) => `${note.name}: ${preview(note.content)}`).join("\n") + trimmed : "No notes exist."
                     }
                   ],
                   isError: false

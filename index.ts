@@ -1,5 +1,9 @@
 #!/usr/bin/env node
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";/// How much of each note a LIST shows. A list is an index, not the content: returning every body in
+/// full was 2.3MB of text into one turn. Search returns whole bodies, which is what it is for.
+const NOTE_PREVIEW_CHARS = 200;
+
+
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
 	CallToolRequestSchema,
@@ -390,14 +394,32 @@ function initServer() {
 							case "list": {
 								const allNotes = await notesModule.getAllNotes();
 								const trimmed = notesTruncationNote(notesModule.truncation(), "notes");
+								// A LIST IS AN INDEX, NOT THE CONTENT. Returning every note in full was
+								// 2.3MB of text into one turn, which is not a thing a small model can be
+								// asked to read: the charter's rule is that context is rationed, not
+								// accumulated. It only got that big because the list stopped truncating
+								// silently (it used to show 1,000 of 3,152), and the fix for hiding things
+								// cannot be to hide them again, so it shows all of them BRIEFLY.
+								//
+								// Search still returns whole bodies, which is what it is for, and the line
+								// below says so: without a route from "I can see it in the list" to "I
+								// have it", a preview would just be a dead end.
+								const preview = (body: string) => {
+									const flat = (body ?? "").replace(/\s+/g, " ").trim();
+									return flat.length > NOTE_PREVIEW_CHARS
+										? flat.slice(0, NOTE_PREVIEW_CHARS) + "..."
+										: flat;
+								};
 								return {
 									content: [
 										{
 											type: "text",
 											text: allNotes.length
-												? allNotes
-														.map((note) => `${note.name}:\n${note.content}`)
-														.join("\n\n") + trimmed
+												? `${allNotes.length} notes, first ${NOTE_PREVIEW_CHARS} characters of each. `
+														+ `To read one in full, search for its name.\n\n`
+														+ allNotes
+																.map((note) => `${note.name}: ${preview(note.content)}`)
+																.join("\n") + trimmed
 												: "No notes exist.",
 										},
 									],
