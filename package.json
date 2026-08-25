@@ -1,6 +1,6 @@
 {
   "name": "apple-mcp",
-  "version": "1.1.0-faces.2",
+  "version": "1.1.0-faces.3",
   "type": "module",
   "description": "Apple MCP server for Contacts, Messages, Notes, Reminders, and Calendar. Faces fork: JXA (real structured returns), honest permission errors, per-app filtering, no script injection.",
   "author": "Dhravya Shah; Faces fork by faces.sh",

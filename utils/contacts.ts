@@ -10,13 +10,33 @@ import { rawBody } from "./failure";
 import { isEmailHandle } from "./phone";
 
 interface ContactEntry {
+	/** The card's stable identifier, which survives edits and renames.
+	 *
+	 *  It is `CNContact.identifier` (verified: JXA's `person.id()` and CNContact return the same
+	 *  "UUID:ABPerson" string for the same card), so a caller holding this can act on the card through
+	 *  the Contacts framework. Maestro uses it to remember which address somebody chose, keyed on
+	 *  something that a rename cannot break and two people called John Smith cannot collide on. */
+	id: string;
 	name: string;
 	phones: string[];
 	emails: string[];
 }
 
 // Maximum contacts to scan (guards against pathological address books).
-const MAX_CONTACTS = 1000;
+//
+// RAISED FROM 1000, and the truncation is now REPORTED rather than silent, because 1000 was not a
+// pathological address book, it was this one: a real Mac here holds 1,647 cards, so 647 people were
+// invisible to every lookup, and the scan takes the FIRST n, which means the invisible ones are the
+// most recently added. A person searched for and not found was indistinguishable from a person who was
+// never looked at.
+//
+// The cap still exists because an unbounded JXA scan on a very large book is a hang, and a hang is worse
+// than a cap. What must never happen again is losing people QUIETLY.
+const MAX_CONTACTS = 5000;
+
+/** How many cards the last scan could not look at, and how many there were. Read by the caller so a
+ *  "not found" can say whether the whole book was searched. Zero once the cap stops biting. */
+export let lastScanTruncation: { scanned: number; total: number } | null = null;
 
 // The one sentence each outcome puts on line 1 of the envelope. It says WHAT DID NOT HAPPEN, and for
 // a denial it also NAMES the permission that is missing and the app to enable it for.
@@ -73,6 +93,7 @@ async function requestContactsAccess(): Promise<{
 async function getAllContacts(): Promise<ContactEntry[]> {
 	let scan: {
 		items: ContactEntry[];
+		total: number;
 		attempted: number;
 		skipped: number;
 		firstError: string;
@@ -81,8 +102,9 @@ async function getAllContacts(): Promise<ContactEntry[]> {
 		scan = (await run((max: number) => {
 			const app = Application("Contacts");
 			const people = app.people();
-			const out: { name: string; phones: string[]; emails: string[] }[] = [];
+			const out: { id: string; name: string; phones: string[]; emails: string[] }[] = [];
 			const count = Math.min(people.length, max);
+			const total = people.length;
 			let skipped = 0;
 			let firstError = "";
 			for (let i = 0; i < count; i++) {
@@ -97,7 +119,7 @@ async function getAllContacts(): Promise<ContactEntry[]> {
 						.map((e: { value: () => string }) => e.value())
 						.filter((v: string) => typeof v === "string" && v.length > 0);
 					if (phones.length > 0 || emails.length > 0) {
-						out.push({ name: person.name(), phones, emails });
+						out.push({ id: person.id(), name: person.name(), phones, emails });
 					}
 				} catch (e) {
 					// Skip an individual unreadable contact; do not abort the whole scan.
@@ -105,7 +127,7 @@ async function getAllContacts(): Promise<ContactEntry[]> {
 					if (!firstError) firstError = String(e);
 				}
 			}
-			return { items: out, attempted: count, skipped, firstError };
+			return { items: out, attempted: count, skipped, firstError, total };
 		}, MAX_CONTACTS)) as typeof scan;
 	} catch (error) {
 		throwAppleFailure(error, CONTACTS_SUMMARIES);
@@ -118,6 +140,8 @@ async function getAllContacts(): Promise<ContactEntry[]> {
 			rawBody(scan.firstError),
 		);
 	}
+	lastScanTruncation =
+		scan.total > scan.attempted ? { scanned: scan.attempted, total: scan.total } : null;
 	return scan.items;
 }
 
@@ -177,6 +201,80 @@ async function findNumber(name: string): Promise<string[]> {
 	return [];
 }
 
+/** Every contact matching a name, WHOLE: id, emails and phones.
+ *
+ *  ASKS CONTACTS TO DO THE FILTERING, which is the whole difference. The obvious implementation reads
+ *  every card into JavaScript and filters there, and on a real address book of 1,647 cards that took
+ *  **211 seconds**: JXA fetches each card over AppleEvents one at a time. Handing the same query to the
+ *  app as a `whose` clause takes **0.8 seconds**, because Contacts answers it against its own index.
+ *
+ *  Two things follow for free. It searches the WHOLE book, so the scan cap cannot silently hide anybody
+ *  from a search; and `_contains` is case-insensitive, so no normalising is needed for that.
+ *
+ *  The ladder is deliberately short: the full query, then each word of it. It replaces a seven-strategy
+ *  cleanName ladder that could only exist because everything was already in memory. Every rung here
+ *  costs a round trip, so the rungs have to earn their place, and "Rollie" and "Stanich" both finding
+ *  Rollie Stanich is what people actually type.
+ *
+ *  `findNumber` still exists beside this and returns phone numbers only, because it feeds the messaging
+ *  path where a phone IS the answer. This one exists because that path got asked for EMAILS: it goes
+ *  through `getAllNumbers`, which drops every contact with no phone, and on this address book that is
+ *  1,370 of 1,647 cards, so a caller looking for an address got nothing back from the one source that
+ *  reliably has it.
+ */
+async function findContacts(name: string): Promise<ContactEntry[]> {
+	if (!name || name.trim() === "") return [];
+	const query = name.trim();
+	// Words long enough to be worth a round trip. One and two letter fragments match half an address
+	// book and answer nothing.
+	const words = query.split(/\s+/).filter((w) => w.length >= 3);
+	const terms = [query, ...words.filter((w) => w.toLowerCase() !== query.toLowerCase())];
+
+	let matched: ContactEntry[] = [];
+	try {
+		matched = (await run((needles: string[]) => {
+			const app = Application("Contacts");
+			const out: { id: string; name: string; phones: string[]; emails: string[] }[] = [];
+			const seen: { [id: string]: true } = {};
+			for (const needle of needles) {
+				let people: unknown[] = [];
+				try {
+					people = app.people.whose({ name: { _contains: needle } })();
+				} catch (e) {
+					continue;              // one bad term must not lose the others
+				}
+				for (const person of people as {
+					id: () => string; name: () => string;
+					phones: () => { value: () => string }[];
+					emails: () => { value: () => string }[];
+				}[]) {
+					try {
+						const id = person.id();
+						if (seen[id]) continue;
+						seen[id] = true;
+						const phones = person.phones().map((p) => p.value())
+							.filter((v: string) => typeof v === "string" && v.length > 0);
+						const emails = person.emails().map((e) => e.value())
+							.filter((v: string) => typeof v === "string" && v.length > 0);
+						if (phones.length > 0 || emails.length > 0) {
+							out.push({ id, name: person.name(), phones, emails });
+						}
+					} catch (e) {
+						// Skip an individual unreadable contact; do not abort the search.
+					}
+				}
+				if (out.length > 0) break;   // the most precise term that found anybody wins
+			}
+			return out;
+		}, terms)) as ContactEntry[];
+	} catch (error) {
+		throwAppleFailure(error, CONTACTS_SUMMARIES);
+	}
+	// A search asks the app, which sees every card, so nothing was skipped for being past a cap.
+	lastScanTruncation = null;
+	return matched;
+}
+
 /** Display name of the contact owning a phone OR email handle, or null if none. An iMessage sender
  *  can be either; phone matching is country-code agnostic, email matching is exact (case-insensitive). */
 async function findContactByPhone(handle: string): Promise<string | null> {
@@ -200,8 +298,10 @@ async function findContactByPhone(handle: string): Promise<string | null> {
 }
 
 export default {
+	truncation: () => lastScanTruncation,
 	getAllNumbers,
 	findNumber,
+	findContacts,
 	findContactByPhone,
 	requestContactsAccess,
 };
