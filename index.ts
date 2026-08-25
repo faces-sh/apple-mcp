@@ -1,5 +1,11 @@
 #!/usr/bin/env node
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";/// How much of each note a LIST shows. A list is an index, not the content: returning every body in
+import {
+	remindersDetail,
+	remindersIndex,
+} from "./utils/reminders-render";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+
+/// How much of each note a LIST shows. A list is an index, not the content: returning every body in
 /// full was 2.3MB of text into one turn. Search returns whole bodies, which is what it is for.
 const NOTE_PREVIEW_CHARS = 200;
 
@@ -633,18 +639,28 @@ function initServer() {
 						const { operation } = args;
 
 						if (operation === "list") {
-							// List all reminders
+							// An INDEX: every list, every reminder, one line each. Not the count it used to
+							// be, and not the whole store either.
+							//
+							// It used to return `Found 50 lists and 1217 reminders.` and put the actual
+							// reminders in a top-level `reminders` field. Nothing reads that field: an MCP
+							// client sees `content` and nothing else, so the model was handed a count of
+							// things it could not see, and no route to them. That was invisible for as long
+							// as this operation never returned at all (#499); fixing the speed is what made
+							// it visible.
+							//
+							// A reminder's NAME is the reminder, so an index of names is the whole useful
+							// picture. Notes are the other way round and get a 200-character preview (#504);
+							// the shape is the same, the content differs because the content differs.
 							const lists = await remindersModule.getAllLists();
 							const allReminders = await remindersModule.getAllReminders();
 							return {
 								content: [
 									{
 										type: "text",
-										text: `Found ${lists.length} lists and ${allReminders.length} reminders.`,
+										text: remindersIndex(lists, allReminders),
 									},
 								],
-								lists,
-								reminders: allReminders,
 								isError: false,
 							};
 						} else if (operation === "search") {
@@ -659,11 +675,11 @@ function initServer() {
 										type: "text",
 										text:
 											results.length > 0
-												? `Found ${results.length} reminders matching "${searchText}".`
+												? `Found ${results.length} reminders matching "${searchText}":\n\n` +
+													results.map(remindersDetail).join("\n\n")
 												: `No reminders found matching "${searchText}".`,
 									},
 								],
-								reminders: results,
 								isError: false,
 							};
 						} else if (operation === "open") {
@@ -694,11 +710,10 @@ function initServer() {
 								content: [
 									{
 										type: "text",
-										text: `Created reminder "${result.name}" ${listName ? `in list "${listName}"` : ""}.`,
+										text: `Created reminder "${result.name}" in list "${result.listName}".`,
 									},
 								],
 								success: true,
-								reminder: result,
 								isError: false,
 							};
 						} else if (operation === "listById") {
@@ -714,11 +729,11 @@ function initServer() {
 										type: "text",
 										text:
 											results.length > 0
-												? `Found ${results.length} reminders in list with ID "${listId}".`
-												: `No reminders found in list with ID "${listId}".`,
+												? `Found ${results.length} reminders in that list:\n\n` +
+													results.map(remindersDetail).join("\n\n")
+												: "That list has no reminders in it.",
 									},
 								],
-								reminders: results,
 								isError: false,
 							};
 						}
