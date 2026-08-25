@@ -4,6 +4,7 @@ import {
 	remindersIndex,
 } from "./utils/reminders-render";
 import { contactsIndex } from "./utils/contacts-render";
+import { showing } from "./utils/showing";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 
 /// How much of each note a LIST shows. A list is an index, not the content: returning every body in
@@ -527,6 +528,11 @@ function initServer() {
 								const messages = await messageModule.getUnreadMessages(
 									args.limit,
 								);
+								// How many there REALLY are. This said "Found 10 unread message(s)" on a
+								// Mac holding 70, with nothing to say it had stopped at ten, so a person
+								// asking "have I got anything unread" was told a number that was true
+								// about the page and false about their phone.
+								const totalUnread = await messageModule.countUnreadMessages();
 
 								// Look up contact names for all messages, in ONE pass over the address book.
 								//
@@ -553,7 +559,9 @@ function initServer() {
 											type: "text",
 											text:
 												messagesWithNames.length > 0
-													? `Found ${messagesWithNames.length} unread message(s):\n` +
+													? showing(messagesWithNames.length, totalUnread,
+															  "unread message(s)", "",
+															  messageModule.maxMessages()) + "\n" +
 														messagesWithNames
 															.map(
 																(msg) =>

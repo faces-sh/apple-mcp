@@ -372,6 +372,34 @@ async function readMessages(phoneNumber: string, limit = 10): Promise<Message[]>
 	}
 }
 
+/** What counts as unread, written ONCE. The page and the total must be about the same set, and two
+ *  copies of a WHERE clause stop being the same set the first time somebody edits one. */
+const UNREAD_WHERE = `
+            WHERE m.is_from_me = 0  -- Only messages from others
+                AND m.is_read = 0   -- Only unread messages
+                AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL OR m.cache_has_attachments = 1)
+                AND m.is_audio_message = 0  -- Skip audio messages
+                AND m.item_type = 0  -- Regular messages only`;
+
+/** How many messages are unread in total, so a page of them can say what it is a page OF.
+ *
+ *  A count over the same join is a few milliseconds on an indexed sqlite table, which is what makes the
+ *  honest answer affordable: `unread` said "Found 10 unread message(s)" on a Mac holding 70, with no
+ *  hint that it had stopped. Returns 0 rather than throwing, because a total we could not get must not
+ *  sink a page of messages we did get. */
+async function countUnreadMessages(): Promise<number> {
+	try {
+		const { stdout } = await retryOperation(() =>
+			execFileAsync("sqlite3", ["-json", CHAT_DB,
+				`SELECT count(*) as n FROM message m INNER JOIN handle h ON h.ROWID = m.handle_id ${UNREAD_WHERE}`]),
+		);
+		const rows = JSON.parse(stdout || "[]") as { n: number }[];
+		return rows[0]?.n ?? 0;
+	} catch {
+		return 0;
+	}
+}
+
 async function getUnreadMessages(limit = 10): Promise<Message[]> {
 	try {
 		const maxLimit = clampLimit(limit);
@@ -399,11 +427,7 @@ async function getUnreadMessages(limit = 10): Promise<Message[]> {
                 END as content_type
             FROM message m
             INNER JOIN handle h ON h.ROWID = m.handle_id
-            WHERE m.is_from_me = 0  -- Only messages from others
-                AND m.is_read = 0   -- Only unread messages
-                AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL OR m.cache_has_attachments = 1)
-                AND m.is_audio_message = 0  -- Skip audio messages
-                AND m.item_type = 0  -- Regular messages only
+            ${UNREAD_WHERE}
             ORDER BY m.date DESC
             LIMIT ${maxLimit}
         `;
@@ -538,6 +562,10 @@ async function scheduleMessage(
 }
 
 export default {
+	/** The hard ceiling on one read, so a caller can say "50 is the most" instead of
+	 *  advising somebody to ask for a hundred and hand them fifty again. */
+	maxMessages: () => CONFIG.MAX_MESSAGES,
+	countUnreadMessages,
 	sendMessage,
 	readMessages,
 	scheduleMessage,

@@ -11620,6 +11620,21 @@ async function readMessages(phoneNumber, limit = 10) {
     throwMessagesDbFailure(error2, "Could not read your messages.");
   }
 }
+async function countUnreadMessages() {
+  try {
+    const { stdout } = await retryOperation(
+      () => execFileAsync2("sqlite3", [
+        "-json",
+        CHAT_DB,
+        `SELECT count(*) as n FROM message m INNER JOIN handle h ON h.ROWID = m.handle_id ${UNREAD_WHERE}`
+      ])
+    );
+    const rows = JSON.parse(stdout || "[]");
+    return rows[0]?.n ?? 0;
+  } catch {
+    return 0;
+  }
+}
 async function getUnreadMessages(limit = 10) {
   try {
     const maxLimit = clampLimit(limit);
@@ -11645,11 +11660,7 @@ async function getUnreadMessages(limit = 10) {
                 END as content_type
             FROM message m
             INNER JOIN handle h ON h.ROWID = m.handle_id
-            WHERE m.is_from_me = 0  -- Only messages from others
-                AND m.is_read = 0   -- Only unread messages
-                AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL OR m.cache_has_attachments = 1)
-                AND m.is_audio_message = 0  -- Skip audio messages
-                AND m.item_type = 0  -- Regular messages only
+            ${UNREAD_WHERE}
             ORDER BY m.date DESC
             LIMIT ${maxLimit}
         `;
@@ -11734,7 +11745,7 @@ ${rawBody(error2)}`
     phoneNumber
   };
 }
-var execFileAsync2, CHAT_DB, MESSAGES_SEND_SUMMARIES, MESSAGES_READ_DENIED, MESSAGES_READ_FAILED, CONFIG, MAX_RETRIES, RETRY_DELAY, message_default;
+var execFileAsync2, CHAT_DB, MESSAGES_SEND_SUMMARIES, MESSAGES_READ_DENIED, MESSAGES_READ_FAILED, CONFIG, MAX_RETRIES, RETRY_DELAY, UNREAD_WHERE, message_default;
 var init_message = __esm({
   "utils/message.ts"() {
     "use strict";
@@ -11762,7 +11773,17 @@ var init_message = __esm({
     };
     MAX_RETRIES = 3;
     RETRY_DELAY = 1e3;
+    UNREAD_WHERE = `
+            WHERE m.is_from_me = 0  -- Only messages from others
+                AND m.is_read = 0   -- Only unread messages
+                AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL OR m.cache_has_attachments = 1)
+                AND m.is_audio_message = 0  -- Skip audio messages
+                AND m.item_type = 0  -- Regular messages only`;
     message_default = {
+      /** The hard ceiling on one read, so a caller can say "50 is the most" instead of
+       *  advising somebody to ask for a hundred and hand them fifty again. */
+      maxMessages: () => CONFIG.MAX_MESSAGES,
+      countUnreadMessages,
       sendMessage,
       readMessages,
       scheduleMessage,
@@ -12124,6 +12145,17 @@ function contactsIndex(cards) {
   return `Found ${cards.length} contacts:
 
 ${cards.map(contactLine).join("\n")}`;
+}
+
+// utils/showing.ts
+function showing(shown, total, noun, ofWhat = "", ceiling = 0) {
+  const about = ofWhat ? ` ${ofWhat}` : "";
+  if (shown === 0) return `No ${noun}${about}.`;
+  const real = Math.max(total, shown);
+  if (real <= shown) return `${shown} ${noun}${about}:`;
+  const stuck = ceiling > 0 && shown >= ceiling;
+  const advice = stuck ? `${shown} is the most this can return at once, so narrow the search to see the rest` : "Ask for more with limit, or narrow the search";
+  return `Showing ${shown} of ${real} ${noun}${about}. ${advice}:`;
 }
 
 // node_modules/zod/v4/core/core.js
@@ -19758,6 +19790,7 @@ ${note.content}`).join("\n\n") + trimmed : `No notes found for "${args.searchTex
                 const messages = await messageModule.getUnreadMessages(
                   args.limit
                 );
+                const totalUnread = await messageModule.countUnreadMessages();
                 const contactsModule = await loadModule("contacts");
                 const senders = messages.filter((msg) => !msg.is_from_me).map((msg) => msg.sender);
                 const names = await contactsModule.namesForHandles(senders);
@@ -19770,8 +19803,13 @@ ${note.content}`).join("\n\n") + trimmed : `No notes found for "${args.searchTex
                   content: [
                     {
                       type: "text",
-                      text: messagesWithNames.length > 0 ? `Found ${messagesWithNames.length} unread message(s):
-` + messagesWithNames.map(
+                      text: messagesWithNames.length > 0 ? showing(
+                        messagesWithNames.length,
+                        totalUnread,
+                        "unread message(s)",
+                        "",
+                        messageModule.maxMessages()
+                      ) + "\n" + messagesWithNames.map(
                         (msg) => `[${new Date(msg.date).toLocaleString()}] From ${msg.displayName}:
 ${msg.content}`
                       ).join("\n\n") : "No unread messages found"
