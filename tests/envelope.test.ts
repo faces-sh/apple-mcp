@@ -279,18 +279,19 @@ describe("a bad argument", () => {
 // FAILURE 3 of 3: the swallowed one. Every calendar in the account throws while being enumerated, and
 // the old code returned "no events" for it. This is the class that makes Maestro claim work was done
 // that was not, so it gets a test that reaches across the JXA boundary with a mock.
-describe("a scan where every container failed to read", () => {
-	test("getEvents FAILS rather than reporting an empty diary", async () => {
-		const CALENDAR_FAULT = "Error: Can't get object. (-1728)";
-
-		mock.module("@jxa/run", () => ({
-			run: async () => ({
-				items: [],
-				visited: 3,
-				skippedCalendars: 3,
-				firstError: CALENDAR_FAULT,
-			}),
-		}));
+describe("a calendar read that goes wrong", () => {
+	// This used to pin down a partial failure the scripted scan could have: three calendars visited,
+	// three unreadable, an empty diary reported as if it were an empty diary. EventKit has no such
+	// state (it reads the store or it throws), so what is left to guarantee is the envelope itself:
+	// when the answer is not an answer, the WHOLE of what came back travels, uninterpreted.
+	test("an unparseable answer keeps the whole response, verbatim", async () => {
+		process.env.MAESTRO_CALENDAR_URL = "http://127.0.0.1:0/calendar";
+		process.env.MAESTRO_CALENDAR_SECRET = "test";
+		const GARBAGE = "<html><body>502 Bad Gateway</body></html>";
+		globalThis.fetch = (async () => ({
+			status: 502,
+			text: async () => GARBAGE,
+		})) as unknown as typeof fetch;
 
 		const calendar = (await import("../utils/calendar")).default;
 		let thrown: unknown;
@@ -302,14 +303,14 @@ describe("a scan where every container failed to read", () => {
 
 		expect(thrown).toBeInstanceOf(ToolFailure);
 		const failure = thrown as ToolFailure;
-		expect(failure.code).toBe("applescript_error");
-		expect(failure.summary).toContain("all 3 calendars failed to read");
-		// And the reason Calendar gave is still there, uninterpreted.
-		expect(failure.body).toContain(CALENDAR_FAULT);
+		expect(failure.code).toBe("internal_error");
+		// Byte for byte, including the status line, because deciding what it means is the caller's job.
+		expect(failure.body).toContain("HTTP 502");
+		expect(failure.body).toContain(GARBAGE);
 
 		const result = failureResultFrom(thrown, "internal_error", "unused");
 		expect(result.isError).toBe(true);
-		expect(result.content[0].text.startsWith("[applescript_error] ")).toBe(true);
+		expect(result.content[0].text.startsWith("[internal_error] ")).toBe(true);
 	});
 });
 

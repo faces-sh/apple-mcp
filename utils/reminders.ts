@@ -1,5 +1,6 @@
 import { run } from "@jxa/run";
 import { ToolFailure, grantSentence, throwAppleFailure } from "./native";
+import { ask as askMaestro } from "./maestro";
 
 // REMINDERS DOES NOT GO THROUGH THE REMINDERS APP, and it is the only one here that does not.
 //
@@ -25,8 +26,6 @@ import { ToolFailure, grantSentence, throwAppleFailure } from "./native";
 // get a correctly-granted app whose reminders still fail.
 //
 // The tools, their names and their arguments are UNCHANGED. Only what happens underneath moved.
-const BROKER_URL = (process.env.MAESTRO_REMINDERS_URL ?? "").trim();
-const BROKER_SECRET = (process.env.MAESTRO_REMINDERS_SECRET ?? "").trim();
 
 // The one sentence each outcome puts on line 1 of the envelope. It says WHAT DID NOT HAPPEN, and for a
 // denial it also NAMES the permission that is missing and where to grant it.
@@ -75,63 +74,9 @@ interface ReminderList {
 	name: string;
 }
 
-/**
- * Ask Maestro to do one thing to the reminders store, and return what it answers.
- *
- * There is NO fallback to the Apple Events path when the door is missing, and that is the point rather
- * than an omission. That path does not work: it takes minutes per reminder and returns nothing at all
- * for a whole store, so "falling back" to it would turn a clear failure into a hang, which is the worse
- * of the two by a distance. When there is no door, say so.
- */
+/** Reminders' half of the shared Maestro client (utils/maestro.ts), which explains why it exists. */
 async function ask(action: string, payload: Record<string, unknown> = {}): Promise<any> {
-	if (!BROKER_URL || !BROKER_SECRET) {
-		throw new ToolFailure(
-			"app_not_running",
-			"Reminders is only available inside Maestro, which reads the store directly. " +
-				"Scripting the Reminders app takes minutes per reminder, so there is no second way to do it.",
-		);
-	}
-
-	let response: Response;
-	try {
-		response = await fetch(BROKER_URL, {
-			method: "POST",
-			headers: {
-				"content-type": "application/json",
-				"x-reminders-secret": BROKER_SECRET,
-			},
-			body: JSON.stringify({ action, ...payload }),
-		});
-	} catch (error) {
-		throw new ToolFailure(
-			"app_not_running",
-			`Could not reach Maestro to read your reminders: ${String(error)}`,
-		);
-	}
-
-	const text = await response.text();
-	let body: any;
-	try {
-		body = JSON.parse(text);
-	} catch {
-		// The whole body, verbatim, because a broker that answered something we cannot parse is a fault
-		// worth seeing in full rather than a summary of our disappointment.
-		throw new ToolFailure(
-			"internal_error",
-			"Maestro answered something that is not a reminders answer.",
-			`HTTP ${response.status}\n${text}`,
-		);
-	}
-
-	if (body?.ok !== "true" && body?.ok !== true) {
-		// The code and sentence travel WHOLE from Maestro, so a reminders denial reads in the same words
-		// as every other denial and nothing is re-worded on the way through.
-		throw new ToolFailure(
-			body?.code ?? "internal_error",
-			body?.reason ?? REMINDERS_SUMMARIES.failed,
-		);
-	}
-	return body;
+	return askMaestro("reminders", action, payload, REMINDERS_SUMMARIES);
 }
 
 /**
