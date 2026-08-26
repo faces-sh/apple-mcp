@@ -50,11 +50,19 @@ function calendarTruncationNote(cut: { shown: number; total: number } | null): s
 		? `\n\n(Showing ${cut.shown} of ${cut.total} in that window. Ask for a bigger limit or a narrower window.)`
 		: "";
 }
+/** Same job as `calendarTruncationNote` and as `showing`, in a third place, which is worth saying out
+ *  loud: these three are one idea written three times, and they had already drifted. This one told the
+ *  caller it had been cut and gave NO way out, so a reader who learned the answer was partial had nowhere
+ *  to go with that. They are not merged here only because `showing` is a HEADER and these two are
+ *  suffixes, so unifying them changes what notes and calendar output look like, which is a bigger change
+ *  than a bug fix and belongs on its own. */
 function notesTruncationNote(
 	cut: { shown: number; total: number } | null,
 	what: string,
 ): string {
-	return cut ? `\n\n(Showing ${cut.shown} of ${cut.total} ${what}.)` : "";
+	return cut
+		? `\n\n(Showing ${cut.shown} of ${cut.total} ${what}. Ask for a bigger limit, or search to narrow it.)`
+		: "";
 }
 
 // Safe mode implementation - lazy loading of modules
@@ -481,19 +489,26 @@ function initServer() {
 									args.phoneNumber,
 									args.limit,
 								);
+								// How many the conversation HOLDS. This returned the last ten of a long
+								// thread and rendered them as the whole conversation, which is the fault
+								// `unread` had (10 of 70) and notes and contacts and mail search each had
+								// in the same week.
+								const totalWith = await messageModule.countMessagesWith(args.phoneNumber);
 								return {
 									content: [
 										{
 											type: "text",
 											text:
 												messages.length > 0
-													? messages
+													? showing(messages.length, totalWith, "message(s)",
+															  `with ${args.phoneNumber}`,
+															  messageModule.maxMessages()) + "\n" + messages
 															.map(
 																(msg) =>
 																	`[${new Date(msg.date).toLocaleString()}] ${msg.is_from_me ? "Me" : msg.sender}: ${msg.content}`,
 															)
 															.join("\n")
-													: "No messages found",
+													: showing(0, 0, "message(s)", `with ${args.phoneNumber}`),
 										},
 									],
 									isError: false,
@@ -545,7 +560,23 @@ function initServer() {
 								const senders = messages
 									.filter((msg) => !msg.is_from_me)
 									.map((msg) => msg.sender);
-								const names = await contactsModule.namesForHandles(senders);
+								// A NAME IS A NICETY; THE MESSAGES ARE THE ANSWER.
+								//
+								// This throw escaped to the outer catch, so a person with Contacts
+								// permission off got NO unread messages at all and a contacts-flavoured
+								// error, rather than their messages with raw phone numbers on them. Through
+								// the messaging proxy that surfaced as "Could not reach iMessage:
+								// [permission_denied] Your contacts can only be read inside Maestro", and
+								// if iMessage was their only app, as a total failure.
+								//
+								// The fallback below already handles a handle with no name, which is what
+								// makes this safe: an empty map degrades to exactly that path.
+								let names = new Map<string, string>();
+								try {
+									names = await contactsModule.namesForHandles(senders);
+								} catch (nameError) {
+									console.error("unread: could not put names on senders:", nameError);
+								}
 								const messagesWithNames = messages.map((msg) => {
 									if (msg.is_from_me) return { ...msg, displayName: "Me" };
 									const contactName = names.get((msg.sender ?? "").trim());

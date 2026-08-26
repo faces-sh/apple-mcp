@@ -294,6 +294,38 @@ async function getAttachmentPaths(messageId: number): Promise<string[]> {
 	}
 }
 
+/** What counts as this conversation, written ONCE so the page and the total are about the same set. */
+function conversationWhere(phoneList: string): string {
+	return `WHERE h.id IN (${phoneList})
+                AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL OR m.cache_has_attachments = 1)
+                AND m.is_from_me IS NOT NULL  -- Ensure it's a real message
+                AND m.item_type = 0  -- Regular messages only
+                AND m.is_audio_message = 0  -- Skip audio messages`;
+}
+
+/** How many messages this conversation holds in total, so a page of it can say what it is a page OF.
+ *
+ *  `read` returned the last 10 of a long thread and rendered them as the whole conversation, which is
+ *  the same fault `unread` had (10 of 70, silently) and the same one notes and contacts and mail search
+ *  each had this week. Returns 0 rather than throwing: a total we could not get must not sink messages
+ *  we did get, and `showing` degrades to the plain form on 0. */
+async function countMessagesWith(phoneNumber: string): Promise<number> {
+	try {
+		const phoneFormats = handleCandidates(phoneNumber);
+		if (phoneFormats.length === 0) return 0;
+		const phoneList = phoneFormats.map((p) => `'${escapeSqlString(p)}'`).join(",");
+		const { stdout } = await retryOperation(() =>
+			execFileAsync("sqlite3", ["-json", CHAT_DB,
+				`SELECT count(*) as n FROM message m INNER JOIN handle h ON h.ROWID = m.handle_id `
+				+ conversationWhere(phoneList)]),
+		);
+		const rows = JSON.parse(stdout || "[]") as { n: number }[];
+		return rows[0]?.n ?? 0;
+	} catch {
+		return 0;
+	}
+}
+
 async function readMessages(phoneNumber: string, limit = 10): Promise<Message[]> {
 	try {
 		const maxLimit = clampLimit(limit);
@@ -338,11 +370,7 @@ async function readMessages(phoneNumber: string, limit = 10): Promise<Message[]>
                 END as content_type
             FROM message m
             INNER JOIN handle h ON h.ROWID = m.handle_id
-            WHERE h.id IN (${phoneList})
-                AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL OR m.cache_has_attachments = 1)
-                AND m.is_from_me IS NOT NULL  -- Ensure it's a real message
-                AND m.item_type = 0  -- Regular messages only
-                AND m.is_audio_message = 0  -- Skip audio messages
+            ${conversationWhere(phoneList)}
             ORDER BY m.date DESC
             LIMIT ${maxLimit}
         `;
@@ -566,6 +594,7 @@ export default {
 	 *  advising somebody to ask for a hundred and hand them fifty again. */
 	maxMessages: () => CONFIG.MAX_MESSAGES,
 	countUnreadMessages,
+	countMessagesWith,
 	sendMessage,
 	readMessages,
 	scheduleMessage,

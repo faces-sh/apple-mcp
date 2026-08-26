@@ -11565,6 +11565,31 @@ async function getAttachmentPaths(messageId) {
     );
   }
 }
+function conversationWhere(phoneList) {
+  return `WHERE h.id IN (${phoneList})
+                AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL OR m.cache_has_attachments = 1)
+                AND m.is_from_me IS NOT NULL  -- Ensure it's a real message
+                AND m.item_type = 0  -- Regular messages only
+                AND m.is_audio_message = 0  -- Skip audio messages`;
+}
+async function countMessagesWith(phoneNumber) {
+  try {
+    const phoneFormats = handleCandidates(phoneNumber);
+    if (phoneFormats.length === 0) return 0;
+    const phoneList = phoneFormats.map((p) => `'${escapeSqlString(p)}'`).join(",");
+    const { stdout } = await retryOperation(
+      () => execFileAsync2("sqlite3", [
+        "-json",
+        CHAT_DB,
+        `SELECT count(*) as n FROM message m INNER JOIN handle h ON h.ROWID = m.handle_id ` + conversationWhere(phoneList)
+      ])
+    );
+    const rows = JSON.parse(stdout || "[]");
+    return rows[0]?.n ?? 0;
+  } catch {
+    return 0;
+  }
+}
 async function readMessages(phoneNumber, limit = 10) {
   try {
     const maxLimit = clampLimit(limit);
@@ -11599,11 +11624,7 @@ async function readMessages(phoneNumber, limit = 10) {
                 END as content_type
             FROM message m
             INNER JOIN handle h ON h.ROWID = m.handle_id
-            WHERE h.id IN (${phoneList})
-                AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL OR m.cache_has_attachments = 1)
-                AND m.is_from_me IS NOT NULL  -- Ensure it's a real message
-                AND m.item_type = 0  -- Regular messages only
-                AND m.is_audio_message = 0  -- Skip audio messages
+            ${conversationWhere(phoneList)}
             ORDER BY m.date DESC
             LIMIT ${maxLimit}
         `;
@@ -11784,6 +11805,7 @@ var init_message = __esm({
        *  advising somebody to ask for a hundred and hand them fifty again. */
       maxMessages: () => CONFIG.MAX_MESSAGES,
       countUnreadMessages,
+      countMessagesWith,
       sendMessage,
       readMessages,
       scheduleMessage,
@@ -19455,7 +19477,7 @@ function calendarTruncationNote(cut) {
 function notesTruncationNote(cut, what) {
   return cut ? `
 
-(Showing ${cut.shown} of ${cut.total} ${what}.)` : "";
+(Showing ${cut.shown} of ${cut.total} ${what}. Ask for a bigger limit, or search to narrow it.)` : "";
 }
 var useEagerLoading = true;
 var loadingTimeout = null;
@@ -19752,13 +19774,20 @@ ${note.content}`).join("\n\n") + trimmed : `No notes found for "${args.searchTex
                   args.phoneNumber,
                   args.limit
                 );
+                const totalWith = await messageModule.countMessagesWith(args.phoneNumber);
                 return {
                   content: [
                     {
                       type: "text",
-                      text: messages.length > 0 ? messages.map(
+                      text: messages.length > 0 ? showing(
+                        messages.length,
+                        totalWith,
+                        "message(s)",
+                        `with ${args.phoneNumber}`,
+                        messageModule.maxMessages()
+                      ) + "\n" + messages.map(
                         (msg) => `[${new Date(msg.date).toLocaleString()}] ${msg.is_from_me ? "Me" : msg.sender}: ${msg.content}`
-                      ).join("\n") : "No messages found"
+                      ).join("\n") : showing(0, 0, "message(s)", `with ${args.phoneNumber}`)
                     }
                   ],
                   isError: false
@@ -19793,7 +19822,12 @@ ${note.content}`).join("\n\n") + trimmed : `No notes found for "${args.searchTex
                 const totalUnread = await messageModule.countUnreadMessages();
                 const contactsModule = await loadModule("contacts");
                 const senders = messages.filter((msg) => !msg.is_from_me).map((msg) => msg.sender);
-                const names = await contactsModule.namesForHandles(senders);
+                let names = /* @__PURE__ */ new Map();
+                try {
+                  names = await contactsModule.namesForHandles(senders);
+                } catch (nameError) {
+                  console.error("unread: could not put names on senders:", nameError);
+                }
                 const messagesWithNames = messages.map((msg) => {
                   if (msg.is_from_me) return { ...msg, displayName: "Me" };
                   const contactName = names.get((msg.sender ?? "").trim());
