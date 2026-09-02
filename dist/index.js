@@ -11582,6 +11582,10 @@ async function readConversation(chatId, limit = 10) {
 function namesAsked(raw) {
   return raw.split(/\s*(?:,|&|\+|\band\b|\bet\b)\s*/i).map((n) => n.trim()).filter(Boolean);
 }
+async function conversationsForHandle(handle, rows = sqlite) {
+  const forms = handleCandidates(handle);
+  return forms.length ? conversationsWith([forms], rows) : [];
+}
 async function conversationsNamed(raw, findCards, rows = sqlite) {
   const names = namesAsked(raw);
   if (!names.length) return { kind: "unknown", missing: [] };
@@ -11608,6 +11612,7 @@ var init_conversation = __esm({
   "utils/conversation.ts"() {
     "use strict";
     init_message();
+    init_phone();
     execFileAsync2 = promisify2(execFile2);
     CHAT_DB = `${process.env.HOME}/Library/Messages/chat.db`;
     LATEST_PER_CHAT = `
@@ -11678,6 +11683,12 @@ function clampLimit(limit) {
   return Math.min(n, CONFIG.MAX_MESSAGES);
 }
 async function sendMessage(phoneNumber, message2) {
+  if (!looksLikeHandle(phoneNumber)) {
+    throw new ToolFailure(
+      "bad_request",
+      `Nothing was sent: "${phoneNumber}" is a name, and a message needs a phone number or email address. Read their conversation to get it, or look the name up in Contacts.`
+    );
+  }
   const buddy = escapeAppleScriptString(phoneNumber);
   const body = escapeAppleScriptString(message2);
   try {
@@ -12110,6 +12121,7 @@ var init_message = __esm({
     init_native();
     init_failure();
     init_phone();
+    init_recipient();
     init_typedstream();
     init_query();
     init_conversation();
@@ -12151,6 +12163,7 @@ var init_message = __esm({
       // THE CONVERSATION LAYER, reached through the same module the tool already loads, so index.ts does
       // not grow a second way of getting at messages.
       conversationsNamed,
+      conversationsForHandle,
       listConversations,
       readConversation,
       readMessages,
@@ -19831,6 +19844,32 @@ function calendarTruncationNote(cut) {
 
 (Showing ${cut.shown} of ${cut.total} in that window. Ask for a bigger limit or a narrower window.)` : "";
 }
+async function readThread(conv, others, limit) {
+  const messageModule = await loadModule("message");
+  const contactsForNames = await loadModule("contacts");
+  const messages = await messageModule.readConversation(conv.chatId, limit);
+  let names = /* @__PURE__ */ new Map();
+  try {
+    names = await contactsForNames.namesForHandles(conv.participants);
+  } catch (nameError) {
+    console.error("read: could not name the participants:", nameError);
+  }
+  const who = (h) => names.get(h.trim()) || h;
+  const heading = conv.title || conv.participants.map(who).join(", ") || "this conversation";
+  const alsoIn = others.length ? `
+
+(They are also in ${others.length} other conversation${others.length === 1 ? "" : "s"}; this is the most recent. Ask for another by naming the people in it.)` : "";
+  return {
+    content: [{
+      type: "text",
+      text: messages.length ? `${messages.length} message(s) in your ${conv.isGroup ? "group " : ""}conversation with ${heading}, most recent first:
+` + messages.map(
+        (msg) => `[${new Date(msg.date).toLocaleString()}] ${msg.fromMe ? "Me" : who(msg.sender)}: ${msg.text}`
+      ).join("\n") + alsoIn : `Your conversation with ${heading} has no messages in it.`
+    }],
+    isError: false
+  };
+}
 function notesTruncationNote(cut, what) {
   return cut ? `
 
@@ -20155,32 +20194,11 @@ ${note.content}`).join("\n\n") + trimmed : `No notes found for "${args.searchTex
                       `No conversation holds ${found.who.join(" and ")} together. They may each have their own thread: read one name at a time.`
                     );
                   }
-                  const conv = found.conversation;
-                  const messages2 = await messageModule.readConversation(
-                    conv.chatId,
-                    args.limit
-                  );
-                  let names = /* @__PURE__ */ new Map();
-                  try {
-                    names = await contactsForNames.namesForHandles(conv.participants);
-                  } catch (nameError) {
-                    console.error("read: could not name the participants:", nameError);
-                  }
-                  const who = (h) => names.get(h.trim()) || h;
-                  const heading = conv.title || conv.participants.map(who).join(", ") || "this conversation";
-                  const others = found.others.length ? `
-
-(They are also in ${found.others.length} other conversation${found.others.length === 1 ? "" : "s"}; this is the most recent. Ask for another by naming the people in it.)` : "";
-                  return {
-                    content: [{
-                      type: "text",
-                      text: messages2.length ? `${messages2.length} message(s) in your ${conv.isGroup ? "group " : ""}conversation with ${heading}, most recent first:
-` + messages2.map(
-                        (msg) => `[${new Date(msg.date).toLocaleString()}] ${msg.fromMe ? "Me" : who(msg.sender)}: ${msg.text}`
-                      ).join("\n") + others : `Your conversation with ${heading} has no messages in it.`
-                    }],
-                    isError: false
-                  };
+                  return await readThread(found.conversation, found.others, args.limit);
+                }
+                const byHandle = await messageModule.conversationsForHandle(handle);
+                if (byHandle.length) {
+                  return await readThread(byHandle[0], byHandle.slice(1), args.limit);
                 }
                 const messages = await messageModule.readMessages(
                   handle,

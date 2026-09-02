@@ -12,9 +12,10 @@ import {
 } from "./native";
 import { rawBody } from "./failure";
 import { handleCandidates } from "./phone";
+import { looksLikeHandle } from "./recipient";
 import { typedstreamText } from "./typedstream";
 import { matchesQuery, queryTerms } from "./query";
-import { conversationsNamed, listConversations, readConversation } from "./conversation";
+import { conversationsForHandle, conversationsNamed, listConversations, readConversation } from "./conversation";
 import contacts from "./contacts";
 import { resolveRecipient, type Resolution } from "./recipient";
 
@@ -91,7 +92,29 @@ function clampLimit(limit: number): number {
 	return Math.min(n, CONFIG.MAX_MESSAGES);
 }
 
+/**
+ * Send one message. THE TARGET MUST BE AN ADDRESS.
+ *
+ * `buddy "Hamilton"` is accepted by Messages and quietly does nothing: no error is raised, so this
+ * returned its canned "Message sent to Hamilton" and the caller believed it. A false success on the one
+ * act that cannot be taken back is the worst failure this file can produce, and it is worse than a
+ * refusal by a wide margin: somebody who is told it failed will send it another way, and somebody who
+ * is told it worked will not.
+ *
+ * Verified on a real Mac: the call reported success and chat.db recorded no outgoing message at all.
+ *
+ * A NAME IS REFUSED RATHER THAN RESOLVED, deliberately. Reading picks the most recent thread when a
+ * name is ambiguous, because a read is reversible; a send is not, and the wrong Caroline gets a message
+ * meant for somebody else. So the caller is told where to get a handle instead.
+ */
 async function sendMessage(phoneNumber: string, message: string) {
+	if (!looksLikeHandle(phoneNumber)) {
+		throw new ToolFailure(
+			"bad_request",
+			`Nothing was sent: "${phoneNumber}" is a name, and a message needs a phone number or email `
+			+ "address. Read their conversation to get it, or look the name up in Contacts.",
+		);
+	}
 	const buddy = escapeAppleScriptString(phoneNumber);
 	const body = escapeAppleScriptString(message);
 	try {
@@ -781,6 +804,7 @@ export default {
 	// THE CONVERSATION LAYER, reached through the same module the tool already loads, so index.ts does
 	// not grow a second way of getting at messages.
 	conversationsNamed,
+	conversationsForHandle,
 	listConversations,
 	readConversation,
 	readMessages,

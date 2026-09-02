@@ -22,6 +22,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { decodeAttributedBody } from "./message";
+import { handleCandidates } from "./phone";
 
 const execFileAsync = promisify(execFile);
 const CHAT_DB = `${process.env.HOME}/Library/Messages/chat.db`;
@@ -180,6 +181,22 @@ export function namesAsked(raw: string): string[] {
 		.split(/\s*(?:,|&|\+|\band\b|\bet\b)\s*/i)
 		.map((n) => n.trim())
 		.filter(Boolean);
+}
+
+/**
+ * The threads one handle appears in, most recently active first.
+ *
+ * A HANDLE IS NOT A THREAD EITHER, which is the same mistake one level down. Reading by number pulled
+ * every message that person had ever sent out of every thread at once and called it "your conversation
+ * with +1408...": their side only, no replies, three group chats interleaved. Somebody reading it would
+ * have thought that was the conversation.
+ */
+export async function conversationsForHandle(
+	handle: string,
+	rows: ChatRows = sqlite,
+): Promise<Conversation[]> {
+	const forms = handleCandidates(handle);
+	return forms.length ? conversationsWith([forms], rows) : [];
 }
 
 /** What a name, or several names, turned out to mean. */

@@ -57,6 +57,52 @@ function calendarTruncationNote(cut: { shown: number; total: number } | null): s
  *  to go with that. They are not merged here only because `showing` is a HEADER and these two are
  *  suffixes, so unifying them changes what notes and calendar output look like, which is a bigger change
  *  than a bug fix and belongs on its own. */
+/**
+ * Render ONE conversation, whoever asked for it and however they named it.
+ *
+ * SHARED BY BOTH READ PATHS ON PURPOSE. A name and a handle are two ways of naming the same thing, so
+ * they must produce the same answer; a second renderer beside this one is how they drift, and how the
+ * handle path came to print a one-sided stream while the name path printed a thread.
+ */
+async function readThread(
+	conv: { chatId: number; isGroup: boolean; participants: string[]; title?: string },
+	others: unknown[],
+	limit: number | undefined,
+): Promise<{ content: { type: "text"; text: string }[]; isError: boolean }> {
+	const messageModule = await loadModule("message");
+	const contactsForNames = await loadModule("contacts");
+	const messages = await messageModule.readConversation(conv.chatId, limit);
+	let names = new Map<string, string>();
+	try {
+		// A name is a nicety; the messages are the answer. Kept OUTSIDE the read so a Contacts denial
+		// cannot turn a conversation into a contacts-flavoured error.
+		names = await contactsForNames.namesForHandles(conv.participants);
+	} catch (nameError) {
+		console.error("read: could not name the participants:", nameError);
+	}
+	const who = (h: string) => names.get(h.trim()) || h;
+	const heading = conv.title || conv.participants.map(who).join(", ") || "this conversation";
+	const alsoIn = others.length
+		? `\n\n(They are also in ${others.length} other conversation${others.length === 1 ? "" : "s"};`
+			+ " this is the most recent. Ask for another by naming the people in it.)"
+		: "";
+	return {
+		content: [{
+			type: "text",
+			text: messages.length
+				? `${messages.length} message(s) in your ${conv.isGroup ? "group " : ""}`
+					+ `conversation with ${heading}, most recent first:\n`
+					+ messages.map((msg: { date: string; fromMe: boolean; sender: string; text: string }) =>
+						`[${new Date(msg.date).toLocaleString()}] `
+						+ `${msg.fromMe ? "Me" : who(msg.sender)}: ${msg.text}`,
+					).join("\n")
+					+ alsoIn
+				: `Your conversation with ${heading} has no messages in it.`,
+		}],
+		isError: false,
+	};
+}
+
 function notesTruncationNote(
 	cut: { shown: number; total: number } | null,
 	what: string,
@@ -547,40 +593,15 @@ function initServer() {
 											+ "They may each have their own thread: read one name at a time.",
 										);
 									}
-									const conv = found.conversation;
-									const messages = await messageModule.readConversation(
-										conv.chatId, args.limit);
-									let names = new Map<string, string>();
-									try {
-										names = await contactsForNames.namesForHandles(conv.participants);
-									} catch (nameError) {
-										console.error("read: could not name the participants:", nameError);
-									}
-									const who = (h: string) => names.get(h.trim()) || h;
-									const heading = conv.title
-										|| conv.participants.map(who).join(", ")
-										|| "this conversation";
-									const others = found.others.length
-										? `\n\n(They are also in ${found.others.length} other conversation`
-											+ `${found.others.length === 1 ? "" : "s"}; this is the most recent. `
-											+ "Ask for another by naming the people in it.)"
-										: "";
-									return {
-										content: [{
-											type: "text",
-											text: messages.length
-												? `${messages.length} message(s) in your `
-													+ `${conv.isGroup ? "group " : ""}conversation with ${heading}`
-													+ ", most recent first:\n"
-													+ messages.map((msg) =>
-														`[${new Date(msg.date).toLocaleString()}] `
-														+ `${msg.fromMe ? "Me" : who(msg.sender)}: ${msg.text}`,
-													).join("\n")
-													+ others
-												: `Your conversation with ${heading} has no messages in it.`,
-										}],
-										isError: false,
-									};
+									return await readThread(found.conversation, found.others, args.limit);
+								}
+								// A HANDLE GOES THROUGH THE SAME LAYER. Reading by number used to select every
+								// message that handle had ever sent, across every thread, and print it as
+								// "your conversation with +1408...": one side of three different threads
+								// interleaved, with no reply in sight. Same rule as a name, one level down.
+								const byHandle = await messageModule.conversationsForHandle(handle);
+								if (byHandle.length) {
+									return await readThread(byHandle[0]!, byHandle.slice(1), args.limit);
 								}
 								const messages = await messageModule.readMessages(
 									handle,

@@ -184,3 +184,17 @@ describe("searching what was said", () => {
 		expect(messages[0]!.chatId).toBe(417);
 	});
 });
+
+// THE WORST FAILURE THIS FILE CAN PRODUCE, found by driving the real server: `send` to a NAME built
+// `buddy "Hamilton"`, which Messages accepts and quietly ignores, so the tool answered "Message sent to
+// Hamilton" with isError false and chat.db recorded no outgoing message at all. Somebody told it failed
+// sends it another way; somebody told it worked does not.
+describe("a send that cannot happen is never reported as done", () => {
+	test("a name is refused, not silently dropped", async () => {
+		await expect(message.sendMessage("Hamilton", "hello")).rejects.toThrow(/is a name/);
+	});
+
+	test("and the refusal says nothing was sent", async () => {
+		await expect(message.sendMessage("Caroline", "hello")).rejects.toThrow(/Nothing was sent/);
+	});
+});
