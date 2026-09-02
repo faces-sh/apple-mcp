@@ -519,13 +519,19 @@ function initServer() {
 									if (who.kind === "cannot-ask") {
 										// NOT "nobody is called that": the book was never opened. The
 										// person can act on this one, which is the whole difference.
+										//
+										// NAMES THE ACT, NOT THE VERB, here and below. This server runs
+										// behind Maestro's `messaging` proxy, where the same thing is
+										// called `recent_conversations`, so "use the recent operation"
+										// sends the caller after a name it cannot call. "List recent
+										// conversations" is true at both levels.
 										return failureResult(
 											"permission_denied",
 											`Could not look up "${handle}": your contacts could not be read, `
 											+ "so a name cannot be turned into a number. Enable Maestro under "
-											+ "System Settings > Privacy & Security > Contacts, or use the "
-											+ "recent operation to see who has been in touch and read that "
-											+ "number directly.",
+											+ "System Settings > Privacy & Security > Contacts, or list "
+											+ "recent conversations to see who has been in touch and read "
+											+ "that number directly.",
 										);
 									}
 									if (who.kind === "unknown") {
@@ -539,8 +545,8 @@ function initServer() {
 											`Your contacts have nobody called "${handle}", so their number `
 											+ "could not be looked up. This does NOT mean they have not "
 											+ "written: a number with no contact card still shows up in your "
-											+ "conversations. Use the recent operation to see who has been in "
-											+ "touch, or search for a word from the message.",
+											+ "conversations. List recent conversations to see who has been "
+											+ "in touch, or search for a word from the message.",
 										);
 									}
 									handle = who.handles[0]!;
