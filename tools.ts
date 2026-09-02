@@ -59,7 +59,7 @@ const CONTACTS_TOOL: Tool = {
         },
         phoneNumber: {
           type: "string",
-          description: "Phone number to send message to (required for send, read, and schedule operations)"
+          description: "Who. A phone number or email address for send and schedule. For read it may also be a person's NAME, which is looked up in Contacts; if two people share it, the tool answers with the candidates so you can call again with one."
         },
         message: {
           type: "string",
