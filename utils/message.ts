@@ -12,6 +12,9 @@ import {
 } from "./native";
 import { rawBody } from "./failure";
 import { handleCandidates } from "./phone";
+import { typedstreamText } from "./typedstream";
+import contacts from "./contacts";
+import { resolveRecipient, type Resolution } from "./recipient";
 
 // Run sqlite3 via execFile (argv vector, NO shell) so the chat.db path and the SQL text are never
 // re-parsed by a shell — closes the shell-injection surface that string-built `sqlite3 "..."`
@@ -167,86 +170,19 @@ async function ensureMessagesDBAccess(): Promise<void> {
 }
 
 function decodeAttributedBody(hexString: string): { text: string; url?: string } {
-	try {
-		// Convert hex to buffer
-		const buffer = Buffer.from(hexString, "hex");
-		const content = buffer.toString();
-
-		// Common patterns in attributedBody
-		const patterns = [
-			/NSString">(.*?)</, // Basic NSString pattern
-			/NSString">([^<]+)/, // NSString without closing tag
-			/NSNumber">\d+<.*?NSString">(.*?)</, // NSNumber followed by NSString
-			/NSArray">.*?NSString">(.*?)</, // NSString within NSArray
-			/"string":\s*"([^"]+)"/, // JSON-style string
-			/text[^>]*>(.*?)</, // Generic XML-style text
-			/message>(.*?)</, // Generic message content
-		];
-
-		// Try each pattern
-		let text = "";
-		for (const pattern of patterns) {
-			const match = content.match(pattern);
-			if (match?.[1]) {
-				text = match[1];
-				if (text.length > 5) {
-					// Only use if we got something substantial
-					break;
-				}
-			}
-		}
-
-		// Look for URLs
-		const urlPatterns = [
-			/(https?:\/\/[^\s<"]+)/, // Standard URLs
-			/NSString">(https?:\/\/[^\s<"]+)/, // URLs in NSString
-			/"url":\s*"(https?:\/\/[^"]+)"/, // URLs in JSON format
-			/link[^>]*>(https?:\/\/[^<]+)/, // URLs in XML-style tags
-		];
-
-		let url: string | undefined;
-		for (const pattern of urlPatterns) {
-			const match = content.match(pattern);
-			if (match?.[1]) {
-				url = match[1];
-				break;
-			}
-		}
-
-		if (!text && !url) {
-			// Try to extract any readable text content
-			const readableText = content
-				.replace(/streamtyped.*?NSString/g, "") // Remove streamtyped header
-				.replace(/NSAttributedString.*?NSString/g, "") // Remove attributed string metadata
-				.replace(/NSDictionary.*?$/g, "") // Remove dictionary metadata
-				.replace(/\+[A-Za-z]+\s/g, "") // Remove +[identifier] patterns
-				.replace(/NSNumber.*?NSValue.*?\*/g, "") // Remove number/value metadata
-				.replace(/[^\x20-\x7E]/g, " ") // Replace non-printable chars with space
-				.replace(/\s+/g, " ") // Normalize whitespace
-				.trim();
-
-			if (readableText.length > 5) {
-				// Only use if we got something substantial
-				text = readableText;
-			} else {
-				return { text: "[Message content not readable]" };
-			}
-		}
-
-		// Clean up the found text
-		if (text) {
-			text = text
-				.replace(/^[+\s]+/, "") // Remove leading + and spaces
-				.replace(/\s*iI\s*[A-Z]\s*$/, "") // Remove iI K pattern at end
-				.replace(/\s+/g, " ") // Normalize whitespace
-				.trim();
-		}
-
-		return { text: text || url || "", url };
-	} catch (error) {
-		console.error("Error decoding attributedBody:", error);
-		return { text: "[Message content not readable]" };
-	}
+	// READ, NOT GUESSED AT. What was here took the hex, ran `Buffer.toString()` over it as UTF-8, and
+	// regex-matched XML patterns (`/NSString">(.*?)</`) that a typedstream does not contain. What came
+	// back was the binary reinterpreted as text: on a real machine a message read
+	// `https://s.sumup.com/77ojrn_q<ef><bf><bd>iI/<ef><bf><bd>`. It knew that artefact well enough to
+	// carry a cleanup rule for it, `.replace(/\s*iI\s*[A-Z]\s*$/, "")`, which is the tell: it was
+	// deleting the evidence of its own misreading rather than reading the format. Accents did not
+	// survive it either, which for a French conversation is most of the message.
+	const blob = Buffer.from(hexString, "hex");
+	const text = typedstreamText(blob) ?? "";
+	// The URL is taken from the DECODED text, not from a second pass over the binary: a link a person
+	// sent is in what they wrote, and looking for it in the framing is how the framing got into the text.
+	const url = text.match(/(https?:\/\/[^\s<"]+)/)?.[1];
+	return { text, url };
 }
 
 async function getAttachmentPaths(messageId: number): Promise<string[]> {
@@ -589,6 +525,191 @@ async function scheduleMessage(
 	};
 }
 
+/** A conversation, as somebody would pick one out of a list: who, when, and what was last said. */
+export interface Conversation {
+	handle: string;          // the phone number or email the thread is with
+	name?: string;           // their name, when Contacts knows it
+	lastMessage: string;
+	date: string;
+	fromMe: boolean;
+}
+
+/**
+ * The most recent conversations, newest first, whether or not anything in them is unread.
+ *
+ * THE VERB THAT WAS MISSING, and its absence is what made the integration unusable. Asked "list the last
+ * five messages I received", the only listing verb was `unread`, which answers a different question: on a
+ * real Mac it returned 5 of 71 unread, all marketing from ten days earlier (SumUp, SFR, BIZAY), while the
+ * message the person actually meant had arrived that afternoon and been read. There was no way to ask
+ * "who has been talking to me lately", which is how anybody finds a thread.
+ *
+ * ONE ROW PER CONVERSATION, not per message. Ten messages from one person is one thing you are looking
+ * for, and a list of the last twenty messages is one busy thread and nothing else.
+ */
+async function recentConversations(
+	limit = 10,
+	// HANDED IN, so a test can supply one without replacing the contacts MODULE for the whole run. The
+	// first version mocked `../utils/contacts` and the suite that tests real Contacts batching went red
+	// in the same run, five tests that had nothing to do with this change.
+	resolveNames: (handles: string[]) => Promise<Map<string, string>> = contacts.namesForHandles,
+): Promise<Conversation[]> {
+	await ensureMessagesDBAccess();
+	const capped = clampLimit(limit);
+	try {
+		const { stdout } = await retryOperation(() =>
+			execFileAsync("sqlite3", ["-json", CHAT_DB, `
+				SELECT
+					h.id AS handle,
+					CASE
+						WHEN m.text IS NOT NULL AND m.text != '' THEN m.text
+						WHEN m.attributedBody IS NOT NULL THEN hex(m.attributedBody)
+						ELSE ''
+					END AS body,
+					CASE WHEN m.text IS NOT NULL AND m.text != '' THEN 0 ELSE 1 END AS is_hex,
+					m.is_from_me AS from_me,
+					datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') AS date
+				FROM message m
+				JOIN handle h ON h.ROWID = m.handle_id
+				JOIN (
+					SELECT handle_id, MAX(date) AS latest
+					FROM message
+					WHERE handle_id IS NOT NULL AND item_type = 0
+					GROUP BY handle_id
+				) last ON last.handle_id = m.handle_id AND last.latest = m.date
+				WHERE m.item_type = 0
+				ORDER BY m.date DESC
+				LIMIT ${capped}`]),
+		);
+		const rows = JSON.parse(stdout || "[]") as {
+			handle: string; body: string; is_hex: number; from_me: number; date: string;
+		}[];
+		// ONE CONTACTS LOOKUP FOR THE WHOLE PAGE, not one per row: `namesForHandles` is the batch form
+		// and exists for exactly this. A name is a nicety here, so a Contacts denial must not sink the
+		// list: the handles are still the answer.
+		let names = new Map<string, string>();
+		try {
+			names = await resolveNames(rows.map((r) => r.handle));
+		} catch { /* no Contacts: the numbers stand on their own */ }
+		return rows.map((r) => {
+			const text = r.is_hex ? decodeAttributedBody(r.body).text : r.body;
+			return {
+				handle: r.handle,
+				name: names.get(r.handle),
+				lastMessage: text || "[no text]",
+				date: r.date,
+				fromMe: r.from_me === 1,
+			};
+		});
+	} catch (error) {
+		throwMessagesDbFailure(error, "Could not read your conversations.");
+	}
+}
+
+/**
+ * Messages whose text contains `query`, newest first, across every conversation.
+ *
+ * SEARCHING WAS SIMPLY REFUSED before this: `search_messages` answered
+ * "[not_supported] iMessage cannot do that, so nothing was searched", so a person who could not name the
+ * exact handle had no route at all. Between that and `unread`, finding a message you had already read was
+ * impossible.
+ *
+ * THE BODY IS ALMOST NEVER IN `text`, which decides the whole shape of this. Measured on a real Mac:
+ * of 44,758 messages, SIXTY-THREE had `text` populated and 44,688 were `attributedBody` only. So there is
+ * no useful `text LIKE` prefilter to push into SQL and no way around decoding; the rows come back and are
+ * matched here.
+ *
+ * BOUNDED, AND IT SAYS SO. `scan` is how far back it looks, newest first, because a search must not walk
+ * a 45,000-message history on every call. At roughly a kilobyte of hex per row that is also what keeps
+ * the answer inside the child process's output buffer, which is the concrete thing that broke first: at
+ * 3,000 rows the query came back as a bare "could not search", three retries deep, with the real cause
+ * (a 2.9MB read into a 1MB default) nowhere in the message.
+ */
+async function searchMessages(query: string, limit = 10, scan = 1200): Promise<Message[]> {
+	await ensureMessagesDBAccess();
+	const capped = clampLimit(limit);
+	const needle = query.trim().toLowerCase();
+	if (!needle) return [];
+	try {
+		const { stdout } = await retryOperation(() =>
+			// A ROOM BIG ENOUGH FOR WHAT WE ASKED FOR. Every other query here returns tens of rows of
+			// plain text; this one returns up to `scan` rows of hex, which is a different order of size.
+			execFileAsync("sqlite3", ["-json", CHAT_DB, `
+				SELECT
+					h.id AS sender,
+					CASE
+						WHEN m.text IS NOT NULL AND m.text != '' THEN m.text
+						WHEN m.attributedBody IS NOT NULL THEN hex(m.attributedBody)
+						ELSE ''
+					END AS body,
+					CASE WHEN m.text IS NOT NULL AND m.text != '' THEN 0 ELSE 1 END AS is_hex,
+					m.is_from_me AS from_me,
+					datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') AS date
+				FROM message m
+				JOIN handle h ON h.ROWID = m.handle_id
+				WHERE m.item_type = 0
+					AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL)
+				ORDER BY m.date DESC
+				LIMIT ${Math.max(capped, Math.min(scan, 5000))}`],
+				{ maxBuffer: 64 * 1024 * 1024 }),
+		);
+		const rows = JSON.parse(stdout || "[]") as {
+			sender: string; body: string; is_hex: number; from_me: number; date: string;
+		}[];
+		const hits: Message[] = [];
+		for (const r of rows) {
+			const text = r.is_hex ? decodeAttributedBody(r.body).text : r.body;
+			if (!text.toLowerCase().includes(needle)) continue;
+			hits.push({ content: text, date: r.date, sender: r.sender, is_from_me: r.from_me === 1 });
+			if (hits.length >= capped) break;
+		}
+		return hits;
+	} catch (error) {
+		throwMessagesDbFailure(error, "Could not search your messages.");
+	}
+}
+
+/** When each handle was last in touch, for deciding between two people with the same name. */
+async function lastSeenByHandle(): Promise<Map<string, string>> {
+	const out = new Map<string, string>();
+	try {
+		const { stdout } = await retryOperation(() =>
+			execFileAsync("sqlite3", ["-json", CHAT_DB, `
+				SELECT h.id AS handle,
+					datetime(MAX(m.date)/1000000000 + 978307200, 'unixepoch', 'localtime') AS date
+				FROM message m JOIN handle h ON h.ROWID = m.handle_id
+				WHERE m.item_type = 0
+				GROUP BY h.id`]),
+		);
+		for (const r of JSON.parse(stdout || "[]") as { handle: string; date: string }[]) {
+			out.set(r.handle, r.date);
+		}
+	} catch { /* no history readable: every candidate is simply "never in touch" */ }
+	return out;
+}
+
+/**
+ * Who a name means, resolved against Contacts and who has actually been in touch.
+ *
+ * Returns the resolution rather than a thread, because two of the three answers are not a thread: several
+ * people can share a name, and Contacts may know nobody by it at all. The caller decides what to say, and
+ * the one thing it must never say for `unknown` is "there are no messages from them" — see `recipient.ts`.
+ */
+async function whoIsMeant(
+	name: string,
+	findCards: (q: string) => Promise<{ name: string; phones: string[]; emails: string[] }[]> =
+		contacts.findContacts,
+): Promise<Resolution> {
+	let cards: { name: string; phones: string[]; emails: string[] }[] = [];
+	try {
+		cards = await findCards(name);
+	} catch {
+		// Contacts denied or unreadable. NOT "nobody is called that": nothing was read, so nothing is
+		// known either way, and saying otherwise states a fact about a book never opened.
+		return { kind: "cannot-ask" };
+	}
+	return resolveRecipient(cards, await lastSeenByHandle());
+}
+
 export default {
 	/** The hard ceiling on one read, so a caller can say "50 is the most" instead of
 	 *  advising somebody to ask for a hundred and hand them fifty again. */
@@ -599,4 +720,8 @@ export default {
 	readMessages,
 	scheduleMessage,
 	getUnreadMessages,
+	recentConversations,
+	searchMessages,
+	whoIsMeant,
+	lastSeenByHandle,
 };

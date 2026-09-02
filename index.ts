@@ -4,6 +4,7 @@ import {
 	remindersIndex,
 } from "./utils/reminders-render";
 import { contactsIndex } from "./utils/contacts-render";
+import { looksLikeHandle } from "./utils/recipient";
 import { showing } from "./utils/showing";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 
@@ -449,9 +450,13 @@ function initServer() {
 					if (!isMessagesArgs(args)) {
 						return failureResult(
 							"bad_request",
-							"Could not run the messages tool: `operation` must be send, read, schedule or " +
-								"unread, with `phoneNumber` for all but unread, `message` for a send or a " +
-								"schedule, and `scheduledTime` for a schedule.",
+							// SAYS WHAT IT ACCEPTS, and stays true when a verb is added: this sentence
+							// still described four operations after two more existed, which is the same
+							// class of stale help that sent a caller round in circles.
+							"Could not run the messages tool: `operation` must be send, read, search, " +
+								"recent, schedule or unread. `phoneNumber` is needed for send, read and " +
+								"schedule; `message` for a send or a schedule; `scheduledTime` for a " +
+								"schedule; and `query` for a search. `recent` and `unread` need nothing.",
 						);
 					}
 
@@ -482,18 +487,73 @@ function initServer() {
 								if (!args.phoneNumber) {
 									return failureResult(
 										"bad_request",
-										"Could not read your messages: no phone number was given.",
+										"Could not read your messages: no phone number, address or name was given.",
 									);
 								}
+								// A NAME IS AN ANSWER TOO. Asked for "the last message from Caroline" this
+								// used to refuse outright ("Caroline is not a usable phone number or email
+								// address"), so the caller went to Contacts, matched a DIFFERENT Caroline by
+								// name, and read an address with no messages on it. Nobody knows the number
+								// of the person they are talking about; that is what a name is for.
+								let handle = args.phoneNumber;
+								if (!looksLikeHandle(handle)) {
+									const who = await messageModule.whoIsMeant(handle);
+									if (who.kind === "several") {
+										// AMBIGUITY IS AN ANSWER, NOT A FAILURE, which is the same shape the
+										// mail destination already uses for an address on two accounts:
+										// "pick one and call again". A failure envelope here would read as
+										// "this did not work" about a question that has been answered.
+										return {
+											content: [{
+												type: "text",
+												text: `More than one person is called "${handle}":\n`
+													+ who.candidates.map((c) =>
+														`  ${c.name} — ${c.handles[0]}`
+														+ (c.lastSeen ? `, last in touch ${c.lastSeen}` : ", never in touch"),
+													).join("\n")
+													+ "\nRead again with the number of the one you mean.",
+											}],
+											isError: false,
+										};
+									}
+									if (who.kind === "cannot-ask") {
+										// NOT "nobody is called that": the book was never opened. The
+										// person can act on this one, which is the whole difference.
+										return failureResult(
+											"permission_denied",
+											`Could not look up "${handle}": your contacts could not be read, `
+											+ "so a name cannot be turned into a number. Enable Maestro under "
+											+ "System Settings > Privacy & Security > Contacts, or use the "
+											+ "recent operation to see who has been in touch and read that "
+											+ "number directly.",
+										);
+									}
+									if (who.kind === "unknown") {
+										// NEVER "THERE ARE NO MESSAGES FROM THEM". Most handles have no card
+										// at all, so the person asked about may be sitting in the thread list
+										// as a bare number: saying they have not written is a false negative
+										// dressed as an answer. Say what actually happened, and name the verb
+										// that gets somewhere.
+										return failureResult(
+											"not_found",
+											`Your contacts have nobody called "${handle}", so their number `
+											+ "could not be looked up. This does NOT mean they have not "
+											+ "written: a number with no contact card still shows up in your "
+											+ "conversations. Use the recent operation to see who has been in "
+											+ "touch, or search for a word from the message.",
+										);
+									}
+									handle = who.handles[0]!;
+								}
 								const messages = await messageModule.readMessages(
-									args.phoneNumber,
+									handle,
 									args.limit,
 								);
 								// How many the conversation HOLDS. This returned the last ten of a long
 								// thread and rendered them as the whole conversation, which is the fault
 								// `unread` had (10 of 70) and notes and contacts and mail search each had
 								// in the same week.
-								const totalWith = await messageModule.countMessagesWith(args.phoneNumber);
+								const totalWith = await messageModule.countMessagesWith(handle);
 								return {
 									content: [
 										{
@@ -501,14 +561,14 @@ function initServer() {
 											text:
 												messages.length > 0
 													? showing(messages.length, totalWith, "message(s)",
-															  `with ${args.phoneNumber}`,
+															  `with ${handle}`,
 															  messageModule.maxMessages()) + "\n" + messages
 															.map(
 																(msg) =>
 																	`[${new Date(msg.date).toLocaleString()}] ${msg.is_from_me ? "Me" : msg.sender}: ${msg.content}`,
 															)
 															.join("\n")
-													: showing(0, 0, "message(s)", `with ${args.phoneNumber}`),
+													: showing(0, 0, "message(s)", `with ${handle}`),
 										},
 									],
 									isError: false,
@@ -606,10 +666,65 @@ function initServer() {
 								};
 							}
 
+							case "recent": {
+								// WHO HAS BEEN IN TOUCH, which is how anybody finds a thread they did not
+								// memorise a number for. Before this the only listing verb was `unread`,
+								// and on a real Mac that answered a request for "the last five messages I
+								// received" with five of seventy-one unread marketing texts from ten days
+								// earlier, while the message meant had arrived that afternoon and been read.
+								const conversations = await messageModule.recentConversations(args.limit);
+								return {
+									content: [{
+										type: "text",
+										text: conversations.length > 0
+											? `${conversations.length} recent conversation(s), most recent first:\n` +
+												conversations.map((c) =>
+													`[${new Date(c.date).toLocaleString()}] ${c.name ?? c.handle}`
+													+ `${c.name ? ` (${c.handle})` : ""}\n`
+													+ `  ${c.fromMe ? "You" : "Them"}: ${c.lastMessage}`,
+												).join("\n\n")
+											: "No conversations found",
+									}],
+									isError: false,
+								};
+							}
+
+							case "search": {
+								// FINDING A MESSAGE BY ITS WORDS, which was simply refused before: the
+								// proxy answered "[not_supported] iMessage cannot do that, so nothing was
+								// searched", so somebody who could not name the exact handle had no route.
+								const found = await messageModule.searchMessages(args.query!, args.limit);
+								const contactsModule = await loadModule("contacts");
+								let names = new Map<string, string>();
+								try {
+									// A NAME IS A NICETY; THE MESSAGES ARE THE ANSWER. Same rule as `unread`
+									// above, and for the same reason: a Contacts denial must not turn a
+									// list of messages into a contacts-flavoured error.
+									names = await contactsModule.namesForHandles(
+										found.filter((m) => !m.is_from_me).map((m) => m.sender));
+								} catch (nameError) {
+									console.error("search: could not put names on senders:", nameError);
+								}
+								return {
+									content: [{
+										type: "text",
+										text: found.length > 0
+											? `${found.length} message(s) matching "${args.query}", most recent first:\n` +
+												found.map((m) =>
+													`[${new Date(m.date).toLocaleString()}] `
+													+ `${m.is_from_me ? "You" : (names.get((m.sender ?? "").trim()) || m.sender)}:\n`
+													+ m.content,
+												).join("\n\n")
+											: `No messages found matching "${args.query}"`,
+									}],
+									isError: false,
+								};
+							}
+
 							default:
 								return failureResult(
 									"bad_request",
-									`Could not run the messages tool: "${args.operation}" is not one of send, read, schedule or unread.`,
+									`Could not run the messages tool: "${args.operation}" is not one of send, read, search, recent, schedule or unread.`,
 								);
 						}
 					} catch (error) {
@@ -1000,19 +1115,20 @@ function isNotesArgs(args: unknown): args is {
 }
 
 function isMessagesArgs(args: unknown): args is {
-	operation: "send" | "read" | "schedule" | "unread";
+	operation: "send" | "read" | "search" | "recent" | "schedule" | "unread";
 	phoneNumber?: string;
 	message?: string;
+	query?: string;
 	limit?: number;
 	scheduledTime?: string;
 } {
 	if (typeof args !== "object" || args === null) return false;
 
-	const { operation, phoneNumber, message, limit, scheduledTime } = args as any;
+	const { operation, phoneNumber, message, query, limit, scheduledTime } = args as any;
 
 	if (
 		!operation ||
-		!["send", "read", "schedule", "unread"].includes(operation)
+		!["send", "read", "search", "recent", "schedule", "unread"].includes(operation)
 	) {
 		return false;
 	}
@@ -1027,6 +1143,11 @@ function isMessagesArgs(args: unknown): args is {
 		case "read":
 			if (!phoneNumber) return false;
 			break;
+		case "search":
+			// The words to look for ARE the request; without them this is `recent` with extra steps.
+			if (!query || typeof query !== "string" || !query.trim()) return false;
+			break;
+		case "recent":
 		case "unread":
 			// No additional required fields
 			break;
@@ -1037,6 +1158,7 @@ function isMessagesArgs(args: unknown): args is {
 	if (message && typeof message !== "string") return false;
 	if (limit && typeof limit !== "number") return false;
 	if (scheduledTime && typeof scheduledTime !== "string") return false;
+	if (query && typeof query !== "string") return false;
 
 	return true;
 }

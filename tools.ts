@@ -48,14 +48,14 @@ const CONTACTS_TOOL: Tool = {
   
   const MESSAGES_TOOL: Tool = {
     name: "messages",
-    description: "Interact with Apple Messages app - send, read, schedule messages and check unread messages",
+    description: "Interact with Apple Messages app - send, read, search and schedule messages, list recent conversations, and check unread messages",
     inputSchema: {
       type: "object",
       properties: {
         operation: {
           type: "string",
-          description: "Operation to perform: 'send', 'read', 'schedule', or 'unread'",
-          enum: ["send", "read", "schedule", "unread"]
+          description: "Operation to perform: 'send', 'read', 'search', 'recent', 'schedule', or 'unread'. Use 'recent' to see who has been in touch lately when you do not know their number, and 'search' to find a message by its words.",
+          enum: ["send", "read", "search", "recent", "schedule", "unread"]
         },
         phoneNumber: {
           type: "string",
@@ -67,7 +67,11 @@ const CONTACTS_TOOL: Tool = {
         },
         limit: {
           type: "number",
-          description: "Number of messages to read (optional, for read and unread operations)"
+          description: "How many to return (optional, for read, search, recent and unread operations)"
+        },
+        query: {
+          type: "string",
+          description: "Words to look for inside the messages themselves (required for search operation)"
         },
         scheduledTime: {
           type: "string",
