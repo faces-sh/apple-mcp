@@ -99,21 +99,21 @@ describe("searching what was said", () => {
 			{ sender: "+15105793963", body: attributed("nothing to do with it"), is_hex: 1, from_me: 0,
 				date: "2026-09-01 10:00:00" },
 		];
-		const hits = await message.searchMessages("rentrée", 5);
+		const { messages: hits } = await message.searchMessages("rentrée", 5);
 		expect(hits.length).toBe(1);
 		expect(hits[0]!.sender).toBe("+33617846836");
 	});
 
 	test("matches whatever the case", async () => {
 		rows = [{ sender: "+1", body: attributed("Bonjour CAROLINE"), is_hex: 1, from_me: 0, date: "x" }];
-		expect((await message.searchMessages("caroline", 5)).length).toBe(1);
+		expect((await message.searchMessages("caroline", 5)).messages.length).toBe(1);
 	});
 
 	// MEASURED: of 44,758 messages on a real Mac, 63 had `text` and 44,688 were attributedBody only. So
 	// the body has to be decoded before it can be matched, and a `text LIKE` prefilter would find nothing.
 	test("searches the bodies it has to decode, not just the text column", async () => {
 		rows = [{ sender: "+1", body: attributed("only in the blob"), is_hex: 1, from_me: 0, date: "x" }];
-		expect((await message.searchMessages("only in the blob", 5)).length).toBe(1);
+		expect((await message.searchMessages("only in the blob", 5)).messages.length).toBe(1);
 		expect(lastSql).not.toContain("LIKE");
 	});
 
@@ -128,11 +128,59 @@ describe("searching what was said", () => {
 	test("stops at the limit asked for", async () => {
 		rows = Array.from({ length: 20 }, (_, i) => ({
 			sender: `+${i}`, body: attributed("same word"), is_hex: 1, from_me: 0, date: "x" }));
-		expect((await message.searchMessages("same word", 3)).length).toBe(3);
+		expect((await message.searchMessages("same word", 3)).messages.length).toBe(3);
 	});
 
 	test("an empty query searches for nothing rather than everything", async () => {
 		rows = [{ sender: "+1", body: attributed("anything"), is_hex: 1, from_me: 0, date: "x" }];
-		expect(await message.searchMessages("   ", 5)).toEqual([]);
+		expect((await message.searchMessages("   ", 5)).messages).toEqual([]);
+	});
+	// THE DEFECT A PERSON FOUND BY WATCHING A RUN GO IN CIRCLES. "Shivani Hamilton" was one literal
+	// string, so it matched only those two words adjacent and in that order, and a thread full of both
+	// came back empty while "Shivani" alone found four.
+	test("a query is AND over its words, in any order", async () => {
+		rows = [
+			{ sender: "+1", body: attributed("Perfect. Shivani can you send the invite so Hamilton is synced?"),
+				is_hex: 1, from_me: 0, date: "x" },
+			{ sender: "+2", body: attributed("Nice to see you today Shivani"), is_hex: 1, from_me: 0, date: "y" },
+		];
+		const { messages } = await message.searchMessages("Shivani Hamilton", 5);
+		expect(messages.length).toBe(1);
+		expect(messages[0]!.sender).toBe("+1");
+	});
+
+	test("accents fold, so rentree finds rentrée", async () => {
+		rows = [{ sender: "+1", body: attributed("c'est la rentrée"), is_hex: 1, from_me: 0, date: "x" }];
+		expect((await message.searchMessages("rentree", 5)).messages.length).toBe(1);
+	});
+
+	// MEASURED on a real Mac: scanning 1,200 rows found 0 matches for "meeting" and scanning all 30,132
+	// found 232, for 160ms more. The ceiling hid 232 messages and the answer said "No messages found".
+	test("scans far past the recent handful", async () => {
+		rows = [];
+		await message.searchMessages("x", 5);
+		expect(lastSql).toMatch(/LIMIT\s+(\d{5,})/);
+	});
+
+	// AND WHEN IT DOES STOP SHORT, IT SAYS SO. An empty answer is only an answer when somebody looked.
+	test("reports the reach when the scan hit its ceiling", async () => {
+		rows = Array.from({ length: 50_000 }, (_, i) => ({
+			sender: "+1", body: attributed("unrelated"), is_hex: 1, from_me: 0, date: `2020-01-01 00:00:0${i % 10}` }));
+		const { messages, coverage } = await message.searchMessages("nothing here", 5);
+		expect(messages.length).toBe(0);
+		expect(coverage.bounded).toBe(true);
+		expect(coverage.scanned).toBe(50_000);
+	});
+
+	test("and does not claim a ceiling it never reached", async () => {
+		rows = [{ sender: "+1", body: attributed("something"), is_hex: 1, from_me: 0, date: "x" }];
+		const { coverage } = await message.searchMessages("absent", 5);
+		expect(coverage.bounded).toBe(false);
+	});
+
+	test("a hit carries the thread it came out of", async () => {
+		rows = [{ sender: "+1", chat_id: 417, body: attributed("found me"), is_hex: 1, from_me: 0, date: "x" }];
+		const { messages } = await message.searchMessages("found me", 5);
+		expect(messages[0]!.chatId).toBe(417);
 	});
 });

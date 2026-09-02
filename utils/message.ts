@@ -13,6 +13,8 @@ import {
 import { rawBody } from "./failure";
 import { handleCandidates } from "./phone";
 import { typedstreamText } from "./typedstream";
+import { matchesQuery, queryTerms } from "./query";
+import { conversationsNamed, listConversations, readConversation } from "./conversation";
 import contacts from "./contacts";
 import { resolveRecipient, type Resolution } from "./recipient";
 
@@ -111,6 +113,9 @@ interface Message {
 	is_from_me: boolean;
 	attachments?: string[];
 	url?: string;
+	/** Which conversation this came out of, when the query knows. Search sets it so a hit is a place
+	 *  the caller can go, rather than a quotation with no thread attached. */
+	chatId?: number;
 }
 
 /**
@@ -169,7 +174,7 @@ async function ensureMessagesDBAccess(): Promise<void> {
 	}
 }
 
-function decodeAttributedBody(hexString: string): { text: string; url?: string } {
+export function decodeAttributedBody(hexString: string): { text: string; url?: string } {
 	// READ, NOT GUESSED AT. What was here took the hex, ran `Buffer.toString()` over it as UTF-8, and
 	// regex-matched XML patterns (`/NSString">(.*?)</`) that a typedstream does not contain. What came
 	// back was the binary reinterpreted as text: on a real machine a message read
@@ -624,11 +629,47 @@ async function recentConversations(
  * 3,000 rows the query came back as a bare "could not search", three retries deep, with the real cause
  * (a 2.9MB read into a 1MB default) nowhere in the message.
  */
-async function searchMessages(query: string, limit = 10, scan = 1200): Promise<Message[]> {
+/** What a search actually covered, so the answer can say it rather than imply "everything". */
+export interface SearchCoverage {
+	/** How many messages were decoded and looked at. */
+	scanned: number;
+	/** Whether the scan stopped at its ceiling, leaving older messages unread. */
+	bounded: boolean;
+	/** The oldest message the scan reached, for a sentence a person can act on. */
+	oldest?: string;
+}
+
+/**
+ * Every message, not the recent ones.
+ *
+ * THE CEILING WAS A GUESS AND THE MEASUREMENT REFUTED IT. This scanned the most recent 1,200 messages
+ * and then said "No messages found matching X", which is a false statement about somebody's messages.
+ * Caught on a real Mac, by a person, when a run searched for "meeting" and was told there were none:
+ *
+ *     scan     rows     hits for "meeting"   sql     decode
+ *     1,200    1,200      0                   29ms     7ms
+ *     5,000    5,000     27                   30ms    12ms
+ *     all     30,132    232                  120ms    77ms
+ *
+ * 232 matches hidden to save 160 milliseconds. The whole history is a fifth of a second, so the ceiling
+ * exists only to stop an unbounded buffer, not to save time, and it is set where the buffer is the
+ * constraint rather than where a guess about "recent enough" put it.
+ *
+ * AND WHEN IT IS HIT, THE ANSWER SAYS SO. That is the half that matters: a bound nobody is told about
+ * turns into "you have no such messages", which is exactly the quietly-partial answer the charter is
+ * about. `notes` already reads its whole store and reports truncation; this is the same rule.
+ */
+async function searchMessages(
+	query: string,
+	limit = 10,
+	scan = 50_000,
+): Promise<{ messages: Message[]; coverage: SearchCoverage }> {
 	await ensureMessagesDBAccess();
 	const capped = clampLimit(limit);
-	const needle = query.trim().toLowerCase();
-	if (!needle) return [];
+	// AND OVER THE WORDS, not one literal string: see `queryTerms`. "Shivani Hamilton" used to mean
+	// those two words adjacent and in that order, which matched nothing in a thread full of both.
+	const terms = queryTerms(query);
+	if (!terms.length) return { messages: [], coverage: { scanned: 0, bounded: false } };
 	try {
 		const { stdout } = await retryOperation(() =>
 			// A ROOM BIG ENOUGH FOR WHAT WE ASKED FOR. Every other query here returns tens of rows of
@@ -636,6 +677,7 @@ async function searchMessages(query: string, limit = 10, scan = 1200): Promise<M
 			execFileAsync("sqlite3", ["-json", CHAT_DB, `
 				SELECT
 					h.id AS sender,
+					cmj.chat_id AS chat_id,
 					CASE
 						WHEN m.text IS NOT NULL AND m.text != '' THEN m.text
 						WHEN m.attributedBody IS NOT NULL THEN hex(m.attributedBody)
@@ -646,23 +688,42 @@ async function searchMessages(query: string, limit = 10, scan = 1200): Promise<M
 					datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') AS date
 				FROM message m
 				JOIN handle h ON h.ROWID = m.handle_id
+				LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
 				WHERE m.item_type = 0
 					AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL)
 				ORDER BY m.date DESC
-				LIMIT ${Math.max(capped, Math.min(scan, 5000))}`],
-				{ maxBuffer: 64 * 1024 * 1024 }),
+				LIMIT ${Math.max(capped, scan)}`],
+				// ~1KB of hex per row measured, so 50,000 rows is ~48MB at the worst and the room is
+				// sized for it with headroom. Too small a buffer fails as a bare "could not search",
+				// which is how the first attempt died three retries deep.
+				{ maxBuffer: 256 * 1024 * 1024 }),
 		);
 		const rows = JSON.parse(stdout || "[]") as {
-			sender: string; body: string; is_hex: number; from_me: number; date: string;
+			sender: string; chat_id: number | null; body: string; is_hex: number;
+			from_me: number; date: string;
 		}[];
 		const hits: Message[] = [];
+		// EVERY ROW IS LOOKED AT even once enough hits are in hand, because the coverage sentence has to
+		// be true: stopping early and then saying "searched 50,000" would be its own quiet lie. The
+		// decode is 77ms for the whole history, so there is nothing to save by stopping.
 		for (const r of rows) {
-			const text = r.is_hex ? decodeAttributedBody(r.body).text : r.body;
-			if (!text.toLowerCase().includes(needle)) continue;
-			hits.push({ content: text, date: r.date, sender: r.sender, is_from_me: r.from_me === 1 });
-			if (hits.length >= capped) break;
+			const text = (r.is_hex ? decodeAttributedBody(r.body).text : r.body) ?? "";
+			if (!matchesQuery(text, terms)) continue;
+			if (hits.length >= capped) continue;
+			// THE THREAD IT CAME FROM, so a hit is somewhere to go rather than a dead end. A search
+			// found the right message ("Nice to see you today Shivani") and the caller then had no way
+			// to open the conversation it was sitting in.
+			hits.push({ content: text, date: r.date, sender: r.sender, is_from_me: r.from_me === 1,
+				chatId: r.chat_id ?? undefined });
 		}
-		return hits;
+		return {
+			messages: hits,
+			coverage: {
+				scanned: rows.length,
+				bounded: rows.length >= Math.max(capped, scan),
+				oldest: rows.length ? rows[rows.length - 1]!.date : undefined,
+			},
+		};
 	} catch (error) {
 		throwMessagesDbFailure(error, "Could not search your messages.");
 	}
@@ -717,6 +778,11 @@ export default {
 	countUnreadMessages,
 	countMessagesWith,
 	sendMessage,
+	// THE CONVERSATION LAYER, reached through the same module the tool already loads, so index.ts does
+	// not grow a second way of getting at messages.
+	conversationsNamed,
+	listConversations,
+	readConversation,
 	readMessages,
 	scheduleMessage,
 	getUnreadMessages,

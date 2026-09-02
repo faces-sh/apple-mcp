@@ -11083,7 +11083,7 @@ var require_run = __commonJS({
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.run = exports.runJXACode = void 0;
-    var execFile3 = __require("child_process").execFile;
+    var execFile4 = __require("child_process").execFile;
     var macosVersion = require_macos_version();
     function runJXACode(jxaCode) {
       return executeInOsa(jxaCode, []);
@@ -11102,7 +11102,7 @@ var require_run = __commonJS({
     function executeInOsa(code, args) {
       return new Promise(function(resolve, reject) {
         macosVersion.assertGreaterThanOrEqualTo("10.10");
-        var child = execFile3("/usr/bin/osascript", ["-l", "JavaScript"], {
+        var child = execFile4("/usr/bin/osascript", ["-l", "JavaScript"], {
           env: {
             OSA_ARGS: JSON.stringify(args)
           },
@@ -11485,15 +11485,175 @@ var init_typedstream = __esm({
   }
 });
 
+// utils/query.ts
+function fold(s) {
+  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+function queryTerms(raw) {
+  const terms = [];
+  const rest = raw.replace(/"([^"]*)"|'([^']*)'/g, (_m, a, b) => {
+    const phrase = fold((a ?? b ?? "").trim());
+    if (phrase) terms.push(phrase);
+    return " ";
+  });
+  for (const word of rest.split(/\s+/)) {
+    const t = fold(word.trim());
+    if (t) terms.push(t);
+  }
+  return terms;
+}
+function matchesQuery(text, terms) {
+  if (!terms.length) return false;
+  const hay = fold(text);
+  return terms.every((t) => hay.includes(t));
+}
+var init_query = __esm({
+  "utils/query.ts"() {
+    "use strict";
+  }
+});
+
+// utils/conversation.ts
+import { execFile as execFile2 } from "node:child_process";
+import { promisify as promisify2 } from "node:util";
+function toConversation(r) {
+  const body = r.is_hex ? decodeAttributedBody(r.body).text ?? "" : r.body ?? "";
+  return {
+    chatId: r.chat_id,
+    // 43 is a group thread, 45 is one-to-one. Participant COUNT is not the test: a group can lose
+    // members down to one and is still a group.
+    isGroup: r.style === 43,
+    participants: (r.participants ?? "").split("|").map((h) => h.trim()).filter(Boolean),
+    title: (r.title ?? "").trim() || void 0,
+    lastMessage: body || void 0,
+    lastDate: r.date,
+    lastFromMe: r.from_me === 1
+  };
+}
+async function listConversations(limit = 10, rows = sqlite) {
+  const capped = Math.max(1, Math.min(Math.floor(limit) || 10, 100));
+  return (await rows(`
+		SELECT ${CHAT_COLUMNS}
+		FROM chat c ${LATEST_PER_CHAT}
+		WHERE m.item_type = 0
+		ORDER BY m.date DESC
+		LIMIT ${capped}`)).map(toConversation);
+}
+async function conversationsWith(handleSets, rows = sqlite) {
+  const wanted = handleSets.map((set) => new Set(set.map((h) => h.trim().toLowerCase()).filter(Boolean))).filter((set) => set.size > 0);
+  if (!wanted.length) return [];
+  const all = (await rows(`
+		SELECT ${CHAT_COLUMNS}
+		FROM chat c ${LATEST_PER_CHAT}
+		WHERE m.item_type = 0
+		ORDER BY m.date DESC`)).map(toConversation);
+  return all.filter((conv) => {
+    const here = new Set(conv.participants.map((h) => h.toLowerCase()));
+    return wanted.every((person) => [...person].some((h) => here.has(h)));
+  });
+}
+async function readConversation(chatId, limit = 10) {
+  const capped = Math.max(1, Math.min(Math.floor(limit) || 10, 100));
+  const { stdout } = await execFileAsync2("sqlite3", ["-json", CHAT_DB, `
+		SELECT
+			COALESCE(h.id, '') AS sender,
+			m.is_from_me AS from_me,
+			CASE
+				WHEN m.text IS NOT NULL AND m.text != '' THEN m.text
+				WHEN m.attributedBody IS NOT NULL THEN hex(m.attributedBody)
+				ELSE ''
+			END AS body,
+			CASE WHEN m.text IS NOT NULL AND m.text != '' THEN 0 ELSE 1 END AS is_hex,
+			datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') AS date
+		FROM message m
+		JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+		LEFT JOIN handle h ON h.ROWID = m.handle_id
+		WHERE cmj.chat_id = ${Math.floor(chatId)} AND m.item_type = 0
+		ORDER BY m.date DESC
+		LIMIT ${capped}`], { maxBuffer: 64 * 1024 * 1024 });
+  const raw = JSON.parse(stdout || "[]");
+  return raw.map((r) => ({
+    sender: r.sender,
+    fromMe: r.from_me === 1,
+    text: (r.is_hex ? decodeAttributedBody(r.body).text : r.body) ?? "",
+    date: r.date
+  }));
+}
+function namesAsked(raw) {
+  return raw.split(/\s*(?:,|&|\+|\band\b|\bet\b)\s*/i).map((n) => n.trim()).filter(Boolean);
+}
+async function conversationsNamed(raw, findCards, rows = sqlite) {
+  const names = namesAsked(raw);
+  if (!names.length) return { kind: "unknown", missing: [] };
+  const handleSets = [];
+  const missing = [];
+  for (const name of names) {
+    let cards;
+    try {
+      cards = await findCards(name);
+    } catch {
+      return { kind: "cannot-ask" };
+    }
+    const handles = cards.flatMap((c) => [...c.phones, ...c.emails]).map((h) => h.trim()).filter(Boolean);
+    if (!handles.length) missing.push(name);
+    else handleSets.push(handles);
+  }
+  if (missing.length) return { kind: "unknown", missing };
+  const found = await conversationsWith(handleSets, rows);
+  if (!found.length) return { kind: "no-thread", who: names };
+  return { kind: "one", conversation: found[0], others: found.slice(1) };
+}
+var execFileAsync2, CHAT_DB, LATEST_PER_CHAT, CHAT_COLUMNS, sqlite;
+var init_conversation = __esm({
+  "utils/conversation.ts"() {
+    "use strict";
+    init_message();
+    execFileAsync2 = promisify2(execFile2);
+    CHAT_DB = `${process.env.HOME}/Library/Messages/chat.db`;
+    LATEST_PER_CHAT = `
+	JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
+	JOIN message m ON m.ROWID = cmj.message_id
+	JOIN (
+		SELECT cmj2.chat_id AS cid, MAX(m2.date) AS latest
+		FROM chat_message_join cmj2 JOIN message m2 ON m2.ROWID = cmj2.message_id
+		WHERE m2.item_type = 0
+		GROUP BY cmj2.chat_id
+	) last ON last.cid = c.ROWID AND last.latest = m.date`;
+    CHAT_COLUMNS = `
+	c.ROWID AS chat_id,
+	c.style AS style,
+	c.display_name AS title,
+	(SELECT GROUP_CONCAT(h.id, '|') FROM chat_handle_join chj
+	 JOIN handle h ON h.ROWID = chj.handle_id WHERE chj.chat_id = c.ROWID) AS participants,
+	m.is_from_me AS from_me,
+	CASE
+		WHEN m.text IS NOT NULL AND m.text != '' THEN m.text
+		WHEN m.attributedBody IS NOT NULL THEN hex(m.attributedBody)
+		ELSE ''
+	END AS body,
+	CASE WHEN m.text IS NOT NULL AND m.text != '' THEN 0 ELSE 1 END AS is_hex,
+	datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') AS date`;
+    sqlite = async (sql) => {
+      const { stdout } = await execFileAsync2(
+        "sqlite3",
+        ["-json", CHAT_DB, sql],
+        { maxBuffer: 64 * 1024 * 1024 }
+      );
+      return JSON.parse(stdout || "[]");
+    };
+  }
+});
+
 // utils/message.ts
 var message_exports = {};
 __export(message_exports, {
   MESSAGES_READ_DENIED: () => MESSAGES_READ_DENIED,
   MESSAGES_SEND_SUMMARIES: () => MESSAGES_SEND_SUMMARIES,
+  decodeAttributedBody: () => decodeAttributedBody,
   default: () => message_default
 });
-import { promisify as promisify2 } from "node:util";
-import { execFile as execFile2 } from "node:child_process";
+import { promisify as promisify3 } from "node:util";
+import { execFile as execFile3 } from "node:child_process";
 import { access } from "node:fs/promises";
 async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -11542,7 +11702,7 @@ function throwMessagesDbFailure(error2, summary) {
   if (code === "ENOENT" && !text.includes("sqlite3")) {
     throw new ToolFailure(
       "not_found",
-      `Could not read your message history: there is no Messages database at ${CHAT_DB}.`,
+      `Could not read your message history: there is no Messages database at ${CHAT_DB2}.`,
       body
     );
   }
@@ -11550,12 +11710,12 @@ function throwMessagesDbFailure(error2, summary) {
 }
 async function ensureMessagesDBAccess() {
   try {
-    await access(CHAT_DB);
+    await access(CHAT_DB2);
   } catch (error2) {
     throwMessagesDbFailure(error2, MESSAGES_READ_FAILED);
   }
   try {
-    await execFileAsync2("sqlite3", [CHAT_DB, "SELECT 1;"]);
+    await execFileAsync3("sqlite3", [CHAT_DB2, "SELECT 1;"]);
   } catch (error2) {
     throwMessagesDbFailure(error2, MESSAGES_READ_FAILED);
   }
@@ -11583,7 +11743,7 @@ async function getAttachmentPaths(messageId) {
         `;
   let stdout;
   try {
-    ({ stdout } = await execFileAsync2("sqlite3", ["-json", CHAT_DB, query]));
+    ({ stdout } = await execFileAsync3("sqlite3", ["-json", CHAT_DB2, query]));
   } catch (error2) {
     throwMessagesDbFailure(
       error2,
@@ -11615,9 +11775,9 @@ async function countMessagesWith(phoneNumber) {
     if (phoneFormats.length === 0) return 0;
     const phoneList = phoneFormats.map((p) => `'${escapeSqlString(p)}'`).join(",");
     const { stdout } = await retryOperation(
-      () => execFileAsync2("sqlite3", [
+      () => execFileAsync3("sqlite3", [
         "-json",
-        CHAT_DB,
+        CHAT_DB2,
         `SELECT count(*) as n FROM message m INNER JOIN handle h ON h.ROWID = m.handle_id ` + conversationWhere(phoneList)
       ])
     );
@@ -11666,7 +11826,7 @@ async function readMessages(phoneNumber, limit = 10) {
             LIMIT ${maxLimit}
         `;
     const { stdout } = await retryOperation(
-      () => execFileAsync2("sqlite3", ["-json", CHAT_DB, query])
+      () => execFileAsync3("sqlite3", ["-json", CHAT_DB2, query])
     );
     if (!stdout.trim()) {
       console.error("No messages found in database for the given phone number");
@@ -11681,9 +11841,9 @@ async function readMessages(phoneNumber, limit = 10) {
 async function countUnreadMessages() {
   try {
     const { stdout } = await retryOperation(
-      () => execFileAsync2("sqlite3", [
+      () => execFileAsync3("sqlite3", [
         "-json",
-        CHAT_DB,
+        CHAT_DB2,
         `SELECT count(*) as n FROM message m INNER JOIN handle h ON h.ROWID = m.handle_id ${UNREAD_WHERE}`
       ])
     );
@@ -11723,7 +11883,7 @@ async function getUnreadMessages(limit = 10) {
             LIMIT ${maxLimit}
         `;
     const { stdout } = await retryOperation(
-      () => execFileAsync2("sqlite3", ["-json", CHAT_DB, query])
+      () => execFileAsync3("sqlite3", ["-json", CHAT_DB2, query])
     );
     if (!stdout.trim()) {
       console.error("No unread messages found");
@@ -11808,7 +11968,7 @@ async function recentConversations(limit = 10, resolveNames = contacts_default.n
   const capped = clampLimit(limit);
   try {
     const { stdout } = await retryOperation(
-      () => execFileAsync2("sqlite3", ["-json", CHAT_DB, `
+      () => execFileAsync3("sqlite3", ["-json", CHAT_DB2, `
 				SELECT
 					h.id AS handle,
 					CASE
@@ -11851,21 +12011,22 @@ async function recentConversations(limit = 10, resolveNames = contacts_default.n
     throwMessagesDbFailure(error2, "Could not read your conversations.");
   }
 }
-async function searchMessages(query, limit = 10, scan2 = 1200) {
+async function searchMessages(query, limit = 10, scan2 = 5e4) {
   await ensureMessagesDBAccess();
   const capped = clampLimit(limit);
-  const needle = query.trim().toLowerCase();
-  if (!needle) return [];
+  const terms = queryTerms(query);
+  if (!terms.length) return { messages: [], coverage: { scanned: 0, bounded: false } };
   try {
     const { stdout } = await retryOperation(
       () => (
         // A ROOM BIG ENOUGH FOR WHAT WE ASKED FOR. Every other query here returns tens of rows of
         // plain text; this one returns up to `scan` rows of hex, which is a different order of size.
-        execFileAsync2(
+        execFileAsync3(
           "sqlite3",
-          ["-json", CHAT_DB, `
+          ["-json", CHAT_DB2, `
 				SELECT
 					h.id AS sender,
+					cmj.chat_id AS chat_id,
 					CASE
 						WHEN m.text IS NOT NULL AND m.text != '' THEN m.text
 						WHEN m.attributedBody IS NOT NULL THEN hex(m.attributedBody)
@@ -11876,23 +12037,40 @@ async function searchMessages(query, limit = 10, scan2 = 1200) {
 					datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') AS date
 				FROM message m
 				JOIN handle h ON h.ROWID = m.handle_id
+				LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
 				WHERE m.item_type = 0
 					AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL)
 				ORDER BY m.date DESC
-				LIMIT ${Math.max(capped, Math.min(scan2, 5e3))}`],
-          { maxBuffer: 64 * 1024 * 1024 }
+				LIMIT ${Math.max(capped, scan2)}`],
+          // ~1KB of hex per row measured, so 50,000 rows is ~48MB at the worst and the room is
+          // sized for it with headroom. Too small a buffer fails as a bare "could not search",
+          // which is how the first attempt died three retries deep.
+          { maxBuffer: 256 * 1024 * 1024 }
         )
       )
     );
     const rows = JSON.parse(stdout || "[]");
     const hits = [];
     for (const r of rows) {
-      const text = r.is_hex ? decodeAttributedBody(r.body).text : r.body;
-      if (!text.toLowerCase().includes(needle)) continue;
-      hits.push({ content: text, date: r.date, sender: r.sender, is_from_me: r.from_me === 1 });
-      if (hits.length >= capped) break;
+      const text = (r.is_hex ? decodeAttributedBody(r.body).text : r.body) ?? "";
+      if (!matchesQuery(text, terms)) continue;
+      if (hits.length >= capped) continue;
+      hits.push({
+        content: text,
+        date: r.date,
+        sender: r.sender,
+        is_from_me: r.from_me === 1,
+        chatId: r.chat_id ?? void 0
+      });
     }
-    return hits;
+    return {
+      messages: hits,
+      coverage: {
+        scanned: rows.length,
+        bounded: rows.length >= Math.max(capped, scan2),
+        oldest: rows.length ? rows[rows.length - 1].date : void 0
+      }
+    };
   } catch (error2) {
     throwMessagesDbFailure(error2, "Could not search your messages.");
   }
@@ -11901,7 +12079,7 @@ async function lastSeenByHandle() {
   const out = /* @__PURE__ */ new Map();
   try {
     const { stdout } = await retryOperation(
-      () => execFileAsync2("sqlite3", ["-json", CHAT_DB, `
+      () => execFileAsync3("sqlite3", ["-json", CHAT_DB2, `
 				SELECT h.id AS handle,
 					datetime(MAX(m.date)/1000000000 + 978307200, 'unixepoch', 'localtime') AS date
 				FROM message m JOIN handle h ON h.ROWID = m.handle_id
@@ -11924,7 +12102,7 @@ async function whoIsMeant(name, findCards = contacts_default.findContacts) {
   }
   return resolveRecipient(cards, await lastSeenByHandle());
 }
-var execFileAsync2, CHAT_DB, MESSAGES_SEND_SUMMARIES, MESSAGES_READ_DENIED, MESSAGES_READ_FAILED, CONFIG, MAX_RETRIES, RETRY_DELAY, UNREAD_WHERE, message_default;
+var execFileAsync3, CHAT_DB2, MESSAGES_SEND_SUMMARIES, MESSAGES_READ_DENIED, MESSAGES_READ_FAILED, CONFIG, MAX_RETRIES, RETRY_DELAY, UNREAD_WHERE, message_default;
 var init_message = __esm({
   "utils/message.ts"() {
     "use strict";
@@ -11933,10 +12111,12 @@ var init_message = __esm({
     init_failure();
     init_phone();
     init_typedstream();
+    init_query();
+    init_conversation();
     init_contacts();
     init_recipient();
-    execFileAsync2 = promisify2(execFile2);
-    CHAT_DB = `${process.env.HOME}/Library/Messages/chat.db`;
+    execFileAsync3 = promisify3(execFile3);
+    CHAT_DB2 = `${process.env.HOME}/Library/Messages/chat.db`;
     MESSAGES_SEND_SUMMARIES = {
       denied: "Could not send the message: macOS denied control of Messages. " + grantSentence("Automation > Messages"),
       notRunning: "Could not send the message: the Messages app could not be reached.",
@@ -11968,6 +12148,11 @@ var init_message = __esm({
       countUnreadMessages,
       countMessagesWith,
       sendMessage,
+      // THE CONVERSATION LAYER, reached through the same module the tool already loads, so index.ts does
+      // not grow a second way of getting at messages.
+      conversationsNamed,
+      listConversations,
+      readConversation,
       readMessages,
       scheduleMessage,
       getUnreadMessages,
@@ -19947,32 +20132,55 @@ ${note.content}`).join("\n\n") + trimmed : `No notes found for "${args.searchTex
                 }
                 let handle = args.phoneNumber;
                 if (!looksLikeHandle(handle)) {
-                  const who = await messageModule.whoIsMeant(handle);
-                  if (who.kind === "several") {
-                    return {
-                      content: [{
-                        type: "text",
-                        text: `More than one person is called "${handle}":
-` + who.candidates.map(
-                          (c) => `  ${c.name} \u2014 ${c.handles[0]}` + (c.lastSeen ? `, last in touch ${c.lastSeen}` : ", never in touch")
-                        ).join("\n") + "\nRead again with the number of the one you mean."
-                      }],
-                      isError: false
-                    };
-                  }
-                  if (who.kind === "cannot-ask") {
+                  const contactsForNames = await loadModule("contacts");
+                  const found = await messageModule.conversationsNamed(
+                    handle,
+                    contactsForNames.findContacts
+                  );
+                  if (found.kind === "cannot-ask") {
                     return failureResult(
                       "permission_denied",
-                      `Could not look up "${handle}": your contacts could not be read, so a name cannot be turned into a number. Enable Maestro under System Settings > Privacy & Security > Contacts, or list recent conversations to see who has been in touch and read that number directly.`
+                      `Could not look up "${handle}": your contacts could not be read, so a name cannot be turned into a conversation. Enable Maestro under System Settings > Privacy & Security > Contacts, or list recent conversations to see who has been in touch and read that number directly.`
                     );
                   }
-                  if (who.kind === "unknown") {
+                  if (found.kind === "unknown") {
                     return failureResult(
                       "not_found",
-                      `Your contacts have nobody called "${handle}", so their number could not be looked up. This does NOT mean they have not written: a number with no contact card still shows up in your conversations. List recent conversations to see who has been in touch, or search for a word from the message.`
+                      `Your contacts have nobody called "${found.missing.join('", "')}", so no conversation could be looked up. This does NOT mean they have not written: a number with no contact card still shows up in your conversations. List recent conversations to see who has been in touch, or search for a word from the message.`
                     );
                   }
-                  handle = who.handles[0];
+                  if (found.kind === "no-thread") {
+                    return failureResult(
+                      "not_found",
+                      `No conversation holds ${found.who.join(" and ")} together. They may each have their own thread: read one name at a time.`
+                    );
+                  }
+                  const conv = found.conversation;
+                  const messages2 = await messageModule.readConversation(
+                    conv.chatId,
+                    args.limit
+                  );
+                  let names = /* @__PURE__ */ new Map();
+                  try {
+                    names = await contactsForNames.namesForHandles(conv.participants);
+                  } catch (nameError) {
+                    console.error("read: could not name the participants:", nameError);
+                  }
+                  const who = (h) => names.get(h.trim()) || h;
+                  const heading = conv.title || conv.participants.map(who).join(", ") || "this conversation";
+                  const others = found.others.length ? `
+
+(They are also in ${found.others.length} other conversation${found.others.length === 1 ? "" : "s"}; this is the most recent. Ask for another by naming the people in it.)` : "";
+                  return {
+                    content: [{
+                      type: "text",
+                      text: messages2.length ? `${messages2.length} message(s) in your ${conv.isGroup ? "group " : ""}conversation with ${heading}, most recent first:
+` + messages2.map(
+                        (msg) => `[${new Date(msg.date).toLocaleString()}] ${msg.fromMe ? "Me" : who(msg.sender)}: ${msg.text}`
+                      ).join("\n") + others : `Your conversation with ${heading} has no messages in it.`
+                    }],
+                    isError: false
+                  };
                 }
                 const messages = await messageModule.readMessages(
                   handle,
@@ -20057,21 +20265,31 @@ ${msg.content}`
                 };
               }
               case "recent": {
-                const conversations = await messageModule.recentConversations(args.limit);
+                const conversations = await messageModule.listConversations(args.limit);
+                const contactsForList = await loadModule("contacts");
+                let listNames = /* @__PURE__ */ new Map();
+                try {
+                  listNames = await contactsForList.namesForHandles(
+                    conversations.flatMap((c) => c.participants)
+                  );
+                } catch (nameError) {
+                  console.error("recent: could not name the participants:", nameError);
+                }
+                const label = (c) => c.title || c.participants.map((h) => listNames.get(h.trim()) || h).join(", ") || "(unknown)";
                 return {
                   content: [{
                     type: "text",
                     text: conversations.length > 0 ? `${conversations.length} recent conversation(s), most recent first:
 ` + conversations.map(
-                      (c) => `[${new Date(c.date).toLocaleString()}] ${c.name ?? c.handle}${c.name ? ` (${c.handle})` : ""}
-  ${c.fromMe ? "You" : "Them"}: ${c.lastMessage}`
+                      (c) => `[${new Date(c.lastDate ?? "").toLocaleString()}] ${label(c)}${c.isGroup ? " (group)" : ""}
+  ${c.lastFromMe ? "You" : "Them"}: ${c.lastMessage ?? ""}`
                     ).join("\n\n") : "No conversations found"
                   }],
                   isError: false
                 };
               }
               case "search": {
-                const found = await messageModule.searchMessages(args.query, args.limit);
+                const { messages: found, coverage } = await messageModule.searchMessages(args.query, args.limit);
                 const contactsModule = await loadModule("contacts");
                 let names = /* @__PURE__ */ new Map();
                 try {
@@ -20081,14 +20299,37 @@ ${msg.content}`
                 } catch (nameError) {
                   console.error("search: could not put names on senders:", nameError);
                 }
+                const threadOf = /* @__PURE__ */ new Map();
+                try {
+                  const chats = await messageModule.listConversations(100);
+                  const wanted = new Set(found.map((m) => m.chatId).filter((id) => id != null));
+                  const mine = chats.filter((c) => wanted.has(c.chatId));
+                  let chatNames = /* @__PURE__ */ new Map();
+                  try {
+                    chatNames = await contactsModule.namesForHandles(
+                      mine.flatMap((c) => c.participants)
+                    );
+                  } catch (nameError) {
+                    console.error("search: could not name the participants:", nameError);
+                  }
+                  for (const c of mine) {
+                    const label = c.title || c.participants.map((h) => chatNames.get(h.trim()) || h).join(", ");
+                    if (label) threadOf.set(c.chatId, `your ${c.isGroup ? "group " : ""}conversation with ${label}`);
+                  }
+                } catch (threadError) {
+                  console.error("search: could not name the threads:", threadError);
+                }
+                const reach = coverage.bounded ? ` The most recent ${coverage.scanned.toLocaleString()} messages were searched${coverage.oldest ? `, back to ${coverage.oldest.split(" ")[0]}` : ""}, so anything older was not.` : "";
                 return {
                   content: [{
                     type: "text",
                     text: found.length > 0 ? `${found.length} message(s) matching "${args.query}", most recent first:
 ` + found.map(
-                      (m) => `[${new Date(m.date).toLocaleString()}] ${m.is_from_me ? "You" : names.get((m.sender ?? "").trim()) || m.sender}:
+                      (m) => `[${new Date(m.date).toLocaleString()}] ${m.is_from_me ? "You" : names.get((m.sender ?? "").trim()) || m.sender}${threadOf.get(m.chatId ?? -1) ? ` in ${threadOf.get(m.chatId ?? -1)}` : ""}:
 ` + m.content
-                    ).join("\n\n") : `No messages found matching "${args.query}"`
+                    ).join("\n\n") + (reach ? `
+
+(${reach.trim()})` : "") : `No messages found matching "${args.query}".${reach}`
                   }],
                   isError: false
                 };

@@ -497,26 +497,16 @@ function initServer() {
 								// of the person they are talking about; that is what a name is for.
 								let handle = args.phoneNumber;
 								if (!looksLikeHandle(handle)) {
-									const who = await messageModule.whoIsMeant(handle);
-									if (who.kind === "several") {
-										// AMBIGUITY IS AN ANSWER, NOT A FAILURE, which is the same shape the
-										// mail destination already uses for an address on two accounts:
-										// "pick one and call again". A failure envelope here would read as
-										// "this did not work" about a question that has been answered.
-										return {
-											content: [{
-												type: "text",
-												text: `More than one person is called "${handle}":\n`
-													+ who.candidates.map((c) =>
-														`  ${c.name} — ${c.handles[0]}`
-														+ (c.lastSeen ? `, last in touch ${c.lastSeen}` : ", never in touch"),
-													).join("\n")
-													+ "\nRead again with the number of the one you mean.",
-											}],
-											isError: false,
-										};
-									}
-									if (who.kind === "cannot-ask") {
+									// A NAME MEANS A CONVERSATION, NOT A NUMBER. Resolving to one handle and
+									// opening the 1:1 thread was wrong twice over: it missed the GROUP the
+									// people are actually talking in, and "the last message from John" is a
+									// question about a thread whose sender is John, not about a message
+									// that mentions him. Several names are the same question with more of
+									// them: "the thread with Shivani and Hamilton" is every name present.
+									const contactsForNames = await loadModule("contacts");
+									const found = await messageModule.conversationsNamed(
+										handle, contactsForNames.findContacts);
+									if (found.kind === "cannot-ask") {
 										// NOT "nobody is called that": the book was never opened. The
 										// person can act on this one, which is the whole difference.
 										//
@@ -528,28 +518,69 @@ function initServer() {
 										return failureResult(
 											"permission_denied",
 											`Could not look up "${handle}": your contacts could not be read, `
-											+ "so a name cannot be turned into a number. Enable Maestro under "
-											+ "System Settings > Privacy & Security > Contacts, or list "
+											+ "so a name cannot be turned into a conversation. Enable Maestro "
+											+ "under System Settings > Privacy & Security > Contacts, or list "
 											+ "recent conversations to see who has been in touch and read "
 											+ "that number directly.",
 										);
 									}
-									if (who.kind === "unknown") {
+									if (found.kind === "unknown") {
 										// NEVER "THERE ARE NO MESSAGES FROM THEM". Most handles have no card
 										// at all, so the person asked about may be sitting in the thread list
 										// as a bare number: saying they have not written is a false negative
-										// dressed as an answer. Say what actually happened, and name the verb
-										// that gets somewhere.
+										// dressed as an answer.
 										return failureResult(
 											"not_found",
-											`Your contacts have nobody called "${handle}", so their number `
-											+ "could not be looked up. This does NOT mean they have not "
-											+ "written: a number with no contact card still shows up in your "
-											+ "conversations. List recent conversations to see who has been "
-											+ "in touch, or search for a word from the message.",
+											`Your contacts have nobody called "${found.missing.join('", "')}", `
+											+ "so no conversation could be looked up. This does NOT mean they "
+											+ "have not written: a number with no contact card still shows up "
+											+ "in your conversations. List recent conversations to see who has "
+											+ "been in touch, or search for a word from the message.",
 										);
 									}
-									handle = who.handles[0]!;
+									if (found.kind === "no-thread") {
+										// A REAL ABSENCE, and the only branch here entitled to state one:
+										// these people are in Contacts and no thread holds all of them.
+										return failureResult(
+											"not_found",
+											`No conversation holds ${found.who.join(" and ")} together. `
+											+ "They may each have their own thread: read one name at a time.",
+										);
+									}
+									const conv = found.conversation;
+									const messages = await messageModule.readConversation(
+										conv.chatId, args.limit);
+									let names = new Map<string, string>();
+									try {
+										names = await contactsForNames.namesForHandles(conv.participants);
+									} catch (nameError) {
+										console.error("read: could not name the participants:", nameError);
+									}
+									const who = (h: string) => names.get(h.trim()) || h;
+									const heading = conv.title
+										|| conv.participants.map(who).join(", ")
+										|| "this conversation";
+									const others = found.others.length
+										? `\n\n(They are also in ${found.others.length} other conversation`
+											+ `${found.others.length === 1 ? "" : "s"}; this is the most recent. `
+											+ "Ask for another by naming the people in it.)"
+										: "";
+									return {
+										content: [{
+											type: "text",
+											text: messages.length
+												? `${messages.length} message(s) in your `
+													+ `${conv.isGroup ? "group " : ""}conversation with ${heading}`
+													+ ", most recent first:\n"
+													+ messages.map((msg) =>
+														`[${new Date(msg.date).toLocaleString()}] `
+														+ `${msg.fromMe ? "Me" : who(msg.sender)}: ${msg.text}`,
+													).join("\n")
+													+ others
+												: `Your conversation with ${heading} has no messages in it.`,
+										}],
+										isError: false,
+									};
 								}
 								const messages = await messageModule.readMessages(
 									handle,
@@ -678,16 +709,33 @@ function initServer() {
 								// and on a real Mac that answered a request for "the last five messages I
 								// received" with five of seventy-one unread marketing texts from ten days
 								// earlier, while the message meant had arrived that afternoon and been read.
-								const conversations = await messageModule.recentConversations(args.limit);
+								// AND IT LISTS THREADS, NOT PEOPLE. This grouped by handle, so a group chat
+								// came back as one row per member and the thread itself was invisible: the
+								// conversation where a meeting was being arranged could not be named, only
+								// its participants separately.
+								const conversations = await messageModule.listConversations(args.limit);
+								const contactsForList = await loadModule("contacts");
+								let listNames = new Map<string, string>();
+								try {
+									// A name is a nicety; the threads are the answer. A Contacts denial must
+									// not turn a thread list into a contacts-flavoured error.
+									listNames = await contactsForList.namesForHandles(
+										conversations.flatMap((c) => c.participants));
+								} catch (nameError) {
+									console.error("recent: could not name the participants:", nameError);
+								}
+								const label = (c: typeof conversations[number]) =>
+									c.title || c.participants.map((h) => listNames.get(h.trim()) || h).join(", ")
+									|| "(unknown)";
 								return {
 									content: [{
 										type: "text",
 										text: conversations.length > 0
 											? `${conversations.length} recent conversation(s), most recent first:\n` +
 												conversations.map((c) =>
-													`[${new Date(c.date).toLocaleString()}] ${c.name ?? c.handle}`
-													+ `${c.name ? ` (${c.handle})` : ""}\n`
-													+ `  ${c.fromMe ? "You" : "Them"}: ${c.lastMessage}`,
+													`[${new Date(c.lastDate ?? "").toLocaleString()}] `
+													+ `${label(c)}${c.isGroup ? " (group)" : ""}\n`
+													+ `  ${c.lastFromMe ? "You" : "Them"}: ${c.lastMessage ?? ""}`,
 												).join("\n\n")
 											: "No conversations found",
 									}],
@@ -699,7 +747,8 @@ function initServer() {
 								// FINDING A MESSAGE BY ITS WORDS, which was simply refused before: the
 								// proxy answered "[not_supported] iMessage cannot do that, so nothing was
 								// searched", so somebody who could not name the exact handle had no route.
-								const found = await messageModule.searchMessages(args.query!, args.limit);
+								const { messages: found, coverage } =
+									await messageModule.searchMessages(args.query!, args.limit);
 								const contactsModule = await loadModule("contacts");
 								let names = new Map<string, string>();
 								try {
@@ -711,6 +760,40 @@ function initServer() {
 								} catch (nameError) {
 									console.error("search: could not put names on senders:", nameError);
 								}
+								// NAME THE THREAD EACH HIT CAME OUT OF, so the caller can read it. Built
+								// from the conversations the hits actually landed in, not a second scan.
+								const threadOf = new Map<number, string>();
+								try {
+									const chats = await messageModule.listConversations(100);
+									const wanted = new Set(found.map((m) => m.chatId).filter((id) => id != null));
+									const mine = chats.filter((c) => wanted.has(c.chatId));
+									// A NAME IS A NICETY; THE THREAD IS THE ANSWER. This once sat inside the
+									// same try as the Contacts call, so a Contacts denial deleted the thread
+									// label entirely and a hit went back to being a dead end over a nicety.
+									// Caught by running it on a machine where Contacts was denied.
+									let chatNames = new Map<string, string>();
+									try {
+										chatNames = await contactsModule.namesForHandles(
+											mine.flatMap((c) => c.participants));
+									} catch (nameError) {
+										console.error("search: could not name the participants:", nameError);
+									}
+									for (const c of mine) {
+										const label = c.title
+											|| c.participants.map((h) => chatNames.get(h.trim()) || h).join(", ");
+										if (label) threadOf.set(c.chatId, `your ${c.isGroup ? "group " : ""}conversation with ${label}`);
+									}
+								} catch (threadError) {
+									console.error("search: could not name the threads:", threadError);
+								}
+								// SAY WHAT WAS SEARCHED WHEN IT WAS NOT EVERYTHING. Silence here reads as
+								// "you have no such messages", and a person cannot tell the difference
+								// between an empty history and a scan that stopped short of it.
+								const reach = coverage.bounded
+									? ` The most recent ${coverage.scanned.toLocaleString()} messages were`
+										+ ` searched${coverage.oldest ? `, back to ${coverage.oldest.split(" ")[0]}` : ""}`
+										+ ", so anything older was not."
+									: "";
 								return {
 									content: [{
 										type: "text",
@@ -718,10 +801,14 @@ function initServer() {
 											? `${found.length} message(s) matching "${args.query}", most recent first:\n` +
 												found.map((m) =>
 													`[${new Date(m.date).toLocaleString()}] `
-													+ `${m.is_from_me ? "You" : (names.get((m.sender ?? "").trim()) || m.sender)}:\n`
+													+ `${m.is_from_me ? "You" : (names.get((m.sender ?? "").trim()) || m.sender)}`
+													// THE THREAD, so a hit is somewhere to go. Without it a
+													// search could find exactly the right message and leave
+													// the caller no way to open the conversation around it.
+													+ `${threadOf.get(m.chatId ?? -1) ? ` in ${threadOf.get(m.chatId ?? -1)}` : ""}:\n`
 													+ m.content,
-												).join("\n\n")
-											: `No messages found matching "${args.query}"`,
+												).join("\n\n") + (reach ? `\n\n(${reach.trim()})` : "")
+											: `No messages found matching "${args.query}".${reach}`,
 									}],
 									isError: false,
 								};
