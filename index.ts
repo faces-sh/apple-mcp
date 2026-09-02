@@ -5,6 +5,7 @@ import {
 } from "./utils/reminders-render";
 import { contactsIndex } from "./utils/contacts-render";
 import { looksLikeHandle } from "./utils/recipient";
+import { namesAsked } from "./utils/conversation";
 import { showing } from "./utils/showing";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 
@@ -517,7 +518,84 @@ function initServer() {
 										"Could not send the message: a phone number and a message are both required.",
 									);
 								}
-								await messageModule.sendMessage(args.phoneNumber, args.message);
+								// A NAME IS ACCEPTED HERE TOO, or the toolbox is a trap: every other verb
+								// answers in names ("Linda Therrien"), and this was the only one that
+								// demanded a number, while nothing on offer returned one. Watched live: the
+								// agent read the thread, was shown the name, tried contacts, tried the
+								// thread list, and gave up with "I haven't sent your note to Linda."
+								//
+								// SENDING ASKS WHERE READING DEFAULTS, which is the one asymmetry worth
+								// keeping. Opening the wrong thread is a read and costs nothing; posting
+								// into the wrong one puts a private note in front of four people. So a
+								// single name resolves to the PERSON (never to a group they happen to be
+								// in), and several names must land on exactly one shared thread or this
+								// comes back with the choice.
+								let target = args.phoneNumber;
+								let intoChat: string | undefined;
+								if (!looksLikeHandle(target)) {
+									const names = namesAsked(target);
+									if (names.length === 1) {
+										const who = await messageModule.whoIsMeant(target);
+										if (who.kind === "cannot-ask") {
+											return failureResult(
+												"permission_denied",
+												`Nothing was sent: "${target}" could not be looked up because `
+												+ "your contacts could not be read. Enable Maestro under System "
+												+ "Settings > Privacy & Security > Contacts, or send to their "
+												+ "number.",
+											);
+										}
+										if (who.kind === "unknown") {
+											return failureResult(
+												"not_found",
+												`Nothing was sent: your contacts have nobody called "${target}". `
+												+ "Send to their number, or list recent conversations to find them.",
+											);
+										}
+										if (who.kind === "several") {
+											return {
+												content: [{
+													type: "text",
+													text: `Nothing was sent yet: more than one person is called `
+														+ `"${target}":\n`
+														+ who.candidates.map((c) =>
+															`  ${c.name} — ${c.handles[0]}`
+															+ (c.lastSeen ? `, last in touch ${c.lastSeen}` : ", never in touch"),
+														).join("\n")
+														+ "\nSend again with the number of the one you mean.",
+												}],
+												isError: false,
+											};
+										}
+										target = who.handles[0]!;
+									} else {
+										const found = await messageModule.conversationsNamed(
+											target, (await loadModule("contacts")).findContacts);
+										if (found.kind === "cannot-ask" || found.kind === "unknown"
+											|| found.kind === "no-thread") {
+											return failureResult(
+												"not_found",
+												`Nothing was sent: no single conversation with ${names.join(" and ")} `
+												+ "could be identified. Send to one person's number instead.",
+											);
+										}
+										if (found.others.length) {
+											return {
+												content: [{
+													type: "text",
+													text: "Nothing was sent yet: "
+														+ `${names.join(" and ")} share ${found.others.length + 1} `
+														+ "conversations, and a message must not go to the wrong one. "
+														+ "Send to one person's number instead.",
+												}],
+												isError: false,
+											};
+										}
+										intoChat = found.conversation.guid;
+									}
+								}
+								if (intoChat) await messageModule.sendToConversation(intoChat, args.message);
+								else await messageModule.sendMessage(target, args.message);
 								return {
 									content: [
 										{

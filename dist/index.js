@@ -2721,6 +2721,1150 @@ var init_recipient = __esm({
   }
 });
 
+// node_modules/run-applescript/index.js
+import process2 from "node:process";
+import { promisify } from "node:util";
+import { execFile, execFileSync } from "node:child_process";
+async function runAppleScript(script, { humanReadableOutput = true, signal } = {}) {
+  if (process2.platform !== "darwin") {
+    throw new Error("macOS only");
+  }
+  const outputArguments = humanReadableOutput ? [] : ["-ss"];
+  const execOptions = {};
+  if (signal) {
+    execOptions.signal = signal;
+  }
+  const { stdout } = await execFileAsync("osascript", ["-e", script, outputArguments], execOptions);
+  return stdout.trim();
+}
+var execFileAsync;
+var init_run_applescript = __esm({
+  "node_modules/run-applescript/index.js"() {
+    execFileAsync = promisify(execFile);
+  }
+});
+
+// utils/failure.ts
+function redactSecrets(body) {
+  let out = body;
+  for (const [pattern, replacement] of SECRET_PATTERNS) {
+    out = out.replace(pattern, replacement);
+  }
+  return out;
+}
+function truncateBody(body) {
+  if (body.length <= MAX_BODY) return body;
+  return body.slice(0, MAX_BODY) + " ...[truncated]";
+}
+function rawBody(error2) {
+  if (error2 && typeof error2 === "object") {
+    const e = error2;
+    const stderr = typeof e.stderr === "string" ? e.stderr : e.stderr instanceof Buffer ? e.stderr.toString() : "";
+    const message2 = typeof e.message === "string" ? e.message : "";
+    const parts = [stderr.trim(), message2.trim()].filter(Boolean);
+    if (parts.length > 0) return truncateBody(redactSecrets(parts.join("\n")));
+  }
+  const asString = String(error2).trim();
+  return asString ? truncateBody(redactSecrets(asString)) : "";
+}
+function envelope(code, summary, body = "") {
+  const evidence = truncateBody(redactSecrets(body)).trim();
+  return evidence ? `[${code}] ${summary}
+${evidence}` : `[${code}] ${summary}`;
+}
+function failureResult(code, summary, body = "") {
+  return {
+    content: [{ type: "text", text: envelope(code, summary, body) }],
+    isError: true
+  };
+}
+function failureResultFrom(error2, fallbackCode, fallbackSummary) {
+  if (error2 instanceof ToolFailure) {
+    return failureResult(error2.code, error2.summary, error2.body);
+  }
+  return failureResult(fallbackCode, fallbackSummary, rawBody(error2));
+}
+var MAX_BODY, SECRET_PATTERNS, ToolFailure;
+var init_failure = __esm({
+  "utils/failure.ts"() {
+    "use strict";
+    MAX_BODY = 4e3;
+    SECRET_PATTERNS = [
+      [/\b(authorization|cookie|set-cookie)\s*:\s*[^\r\n]+/gi, "$1: <redacted>"],
+      [
+        /("(?:access_token|refresh_token|client_secret)"\s*:\s*")[^"]*(")/gi,
+        "$1<redacted>$2"
+      ],
+      [
+        /\b(access_token|refresh_token|client_secret)=[^\s&"']+/gi,
+        "$1=<redacted>"
+      ]
+    ];
+    ToolFailure = class extends Error {
+      code;
+      /** Line 1: what did not happen, in words a person reads. Never a stack trace, never a symbol. */
+      summary;
+      /** The underlying error output, verbatim. Empty when the failure had no underlying output. */
+      body;
+      constructor(code, summary, body = "") {
+        super(summary);
+        this.name = "ToolFailure";
+        this.code = code;
+        this.summary = summary;
+        this.body = body;
+      }
+    };
+  }
+});
+
+// utils/native.ts
+function hostAppName() {
+  const name = (process.env.APPLE_MCP_APP_NAME || "").trim();
+  return name || "this app";
+}
+function grantSentence(...permissionPaths) {
+  const [first, ...rest] = permissionPaths;
+  const tail = rest.map((p) => `, and under ${p}`).join("");
+  return `Enable ${hostAppName()} under System Settings > Privacy & Security > ${first}${tail}.`;
+}
+function isPermissionDenial(error2) {
+  const msg = (error2 instanceof Error ? error2.message : String(error2)).toLowerCase();
+  return msg.includes("-1743") || // errAEEventNotPermitted - Automation denied / never prompted
+  msg.includes("-1744") || // user consent required
+  msg.includes("-10004") || // privilege violation
+  msg.includes("not authorized") || msg.includes("not allowed") || msg.includes("not permitted") || msg.includes("doesn't have permission") || msg.includes("does not have permission") || msg.includes("permission to") || msg.includes("access denied");
+}
+function isAppNotRunning(error2) {
+  const msg = (error2 instanceof Error ? error2.message : String(error2)).toLowerCase();
+  return msg.includes("-600") || // procNotFound
+  msg.includes("-609") || // connectionInvalid
+  msg.includes("isn't running") || msg.includes("is not running") || msg.includes("can't be launched") || msg.includes("cannot be launched");
+}
+function isAppleEventTimeout(error2) {
+  const msg = (error2 instanceof Error ? error2.message : String(error2)).toLowerCase();
+  return msg.includes("-1712") || msg.includes("appleevent timed out");
+}
+function classifyAppleError(error2) {
+  if (isPermissionDenial(error2)) return "permission_denied";
+  if (isAppNotRunning(error2)) return "app_not_running";
+  if (isAppleEventTimeout(error2)) return "timeout";
+  return "applescript_error";
+}
+function throwAppleFailure(error2, summaries) {
+  if (error2 instanceof ToolFailure) throw error2;
+  const code = classifyAppleError(error2);
+  const summary = code === "permission_denied" ? summaries.denied : code === "app_not_running" ? summaries.notRunning : code === "timeout" ? summaries.timedOut : summaries.failed;
+  throw new ToolFailure(code, summary, rawBody(error2));
+}
+function escapeAppleScriptString(value) {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+function escapeSqlString(value) {
+  return value.replace(/'/g, "''");
+}
+function assertAlignedColumns(lengths, summary) {
+  if (lengths.every((n) => n === lengths[0])) return;
+  throw new ToolFailure(
+    "applescript_error",
+    summary,
+    rawBody(`property columns came back with different lengths: ${lengths.join(", ")}`)
+  );
+}
+function phoneDigits(value) {
+  return value.replace(/\D/g, "");
+}
+function phonesMatch(a, b) {
+  const da = phoneDigits(a);
+  const db = phoneDigits(b);
+  if (!da || !db) return false;
+  if (da === db) return true;
+  const [shorter, longer] = da.length <= db.length ? [da, db] : [db, da];
+  return shorter.length >= 7 && longer.endsWith(shorter);
+}
+var init_native = __esm({
+  "utils/native.ts"() {
+    "use strict";
+    init_failure();
+  }
+});
+
+// utils/typedstream.ts
+function typedstreamStrings(blob) {
+  const out = [];
+  let i = 0;
+  const n = blob.length;
+  while (i < n) {
+    const plus = blob.indexOf(43, i);
+    if (plus === -1 || plus + 1 >= n) break;
+    let j = plus + 1;
+    let length = blob[j];
+    j += 1;
+    if (length === 129) {
+      length = blob.readUInt16LE(j);
+      j += 2;
+    } else if (length === 130) {
+      length = blob[j] | blob[j + 1] << 8 | blob[j + 2] << 16;
+      j += 3;
+    } else if (length >= 128) {
+      i = plus + 1;
+      continue;
+    }
+    if (length <= 0 || j + length > n) {
+      i = plus + 1;
+      continue;
+    }
+    const slice = blob.subarray(j, j + length);
+    const text = slice.toString("utf8");
+    if (text && !text.includes("\uFFFD")) out.push(text);
+    i = j + length;
+  }
+  return out;
+}
+function isBookkeeping(text) {
+  const t = text.trim();
+  if (!t) return true;
+  if (ARCHIVE_TOKENS.some((token) => t.includes(token))) return true;
+  if (/^at_\d+_[0-9A-Fa-f-]{8,}$/.test(t)) return true;
+  if (/^[0-9A-Fa-f-]{16,}$/.test(t)) return true;
+  return false;
+}
+function typedstreamText(blob) {
+  for (const candidate of typedstreamStrings(blob)) {
+    if (!isBookkeeping(candidate)) return candidate;
+  }
+  return void 0;
+}
+var ARCHIVE_TOKENS;
+var init_typedstream = __esm({
+  "utils/typedstream.ts"() {
+    "use strict";
+    ARCHIVE_TOKENS = [
+      "$classname",
+      "$classes",
+      "$archiver",
+      "NSAttributedString",
+      "NSMutableString",
+      "NSDictionary",
+      "NSObject",
+      "NSValue",
+      "NSNumber",
+      "NSString",
+      "streamtyped",
+      // Every attribute run names itself, and an audio message's transcript arrives surrounded by these.
+      "__kIM"
+    ];
+  }
+});
+
+// utils/query.ts
+function fold(s) {
+  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+function queryTerms(raw) {
+  const terms = [];
+  const rest = raw.replace(/"([^"]*)"|'([^']*)'/g, (_m, a, b) => {
+    const phrase = fold((a ?? b ?? "").trim());
+    if (phrase) terms.push(phrase);
+    return " ";
+  });
+  for (const word of rest.split(/\s+/)) {
+    const t = fold(word.trim());
+    if (t) terms.push(t);
+  }
+  return terms;
+}
+function matchesQuery(text, terms) {
+  if (!terms.length) return false;
+  const hay = fold(text);
+  return terms.every((t) => hay.includes(t));
+}
+var init_query = __esm({
+  "utils/query.ts"() {
+    "use strict";
+  }
+});
+
+// utils/maestro.ts
+async function ask(door, action, payload, summaries) {
+  const cfg = DOORS[door];
+  const url = (process.env[cfg.url] ?? "").trim();
+  const secret = (process.env[cfg.secret] ?? "").trim();
+  if (!url || !secret) {
+    throw new ToolFailure(
+      "app_not_running",
+      `Your ${cfg.noun} can only be read inside Maestro, which reads the store directly. There is no second way to do it that works.`
+    );
+  }
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", [cfg.header]: secret },
+      body: JSON.stringify({ action, ...payload })
+    });
+  } catch (error2) {
+    throw new ToolFailure("app_not_running", `${summaries.notRunning} (${String(error2)})`);
+  }
+  const text = await response.text();
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new ToolFailure(
+      "internal_error",
+      `Maestro answered something that is not a ${cfg.noun} answer.`,
+      `HTTP ${response.status}
+${text}`
+    );
+  }
+  if (body?.ok !== "true" && body?.ok !== true) {
+    throw new ToolFailure(body?.code ?? "internal_error", body?.reason ?? summaries.failed);
+  }
+  return body;
+}
+var DOORS;
+var init_maestro = __esm({
+  "utils/maestro.ts"() {
+    "use strict";
+    init_native();
+    DOORS = {
+      reminders: {
+        url: "MAESTRO_REMINDERS_URL",
+        secret: "MAESTRO_REMINDERS_SECRET",
+        header: "x-reminders-secret",
+        noun: "reminders"
+      },
+      contacts: {
+        url: "MAESTRO_CONTACTS_URL",
+        secret: "MAESTRO_CONTACTS_SECRET",
+        header: "x-contact-secret",
+        noun: "contacts"
+      },
+      calendar: {
+        url: "MAESTRO_CALENDAR_URL",
+        secret: "MAESTRO_CALENDAR_SECRET",
+        header: "x-calendar-secret",
+        noun: "calendar"
+      }
+    };
+  }
+});
+
+// utils/contacts.ts
+var contacts_exports = {};
+__export(contacts_exports, {
+  CONTACTS_SUMMARIES: () => CONTACTS_SUMMARIES,
+  default: () => contacts_default
+});
+async function getAllContacts() {
+  const body = await ask("contacts", "all", {}, CONTACTS_SUMMARIES);
+  return body.cards ?? [];
+}
+async function requestContactsAccess() {
+  try {
+    await getAllContacts();
+    return { hasAccess: true, message: "Contacts access is granted." };
+  } catch (error2) {
+    if (error2 instanceof ToolFailure && error2.code === "permission_denied") {
+      return { hasAccess: false, message: CONTACTS_SUMMARIES.denied };
+    }
+    throw error2;
+  }
+}
+async function getAllNumbers() {
+  const contacts2 = await getAllContacts();
+  const result2 = {};
+  for (const contact of contacts2) {
+    if (!contact || !contact.name || contact.phones.length === 0) continue;
+    result2[contact.name] = (result2[contact.name] ?? []).concat(contact.phones);
+  }
+  return result2;
+}
+function cleanName(name) {
+  return name.toLowerCase().replace(
+    /[\u{1F600}-\u{1F64F}]|[\u{1F300}-\u{1F5FF}]|[\u{1F680}-\u{1F6FF}]|[\u{1F1E0}-\u{1F1FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/gu,
+    ""
+  ).replace(/[☀-➿⬀-⯿️]/g, "").replace(/\s+/g, " ").trim();
+}
+async function findNumber(name) {
+  if (!name || name.trim() === "") return [];
+  const allNumbers = await getAllNumbers();
+  const names = Object.keys(allNumbers);
+  if (names.length === 0) return [];
+  const search = cleanName(name);
+  const strategies = [
+    (c) => cleanName(c) === search,
+    (c) => cleanName(c).startsWith(search),
+    (c) => cleanName(c).includes(search),
+    (c) => search.includes(cleanName(c)),
+    (c) => cleanName(c).split(" ")[0] === search,
+    (c) => {
+      const parts = cleanName(c).split(" ");
+      return parts[parts.length - 1] === search;
+    },
+    (c) => cleanName(c).split(" ").some((w) => w === search || w.startsWith(search))
+  ];
+  for (const matches of strategies) {
+    const hit = names.find(matches);
+    if (hit) return allNumbers[hit];
+  }
+  return [];
+}
+async function findContacts(name) {
+  if (!name || name.trim() === "") return [];
+  const query = name.trim();
+  const words = query.split(/\s+/).filter((w) => w.length >= 3);
+  const terms = [query, ...words.filter((w) => w.toLowerCase() !== query.toLowerCase())];
+  const contacts2 = await getAllContacts();
+  const matched = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const term of terms) {
+    const needle = term.toLowerCase();
+    for (const c of contacts2) {
+      if (seen.has(c.id)) continue;
+      if (!c.name.toLowerCase().includes(needle)) continue;
+      seen.add(c.id);
+      matched.push(c);
+    }
+  }
+  return matched;
+}
+async function namesForHandles(handles) {
+  const wanted = Array.from(
+    new Set(handles.map((h) => (h ?? "").trim()).filter((h) => h.length > 0))
+  );
+  const resolved = /* @__PURE__ */ new Map();
+  if (wanted.length === 0) return resolved;
+  const contacts2 = await getAllContacts();
+  const emailTargets = /* @__PURE__ */ new Map();
+  const phoneTargets = [];
+  for (const handle of wanted) {
+    if (isEmailHandle(handle)) emailTargets.set(handle.toLowerCase(), handle);
+    else phoneTargets.push(handle);
+  }
+  for (const c of contacts2) {
+    for (const email2 of c.emails) {
+      const handle = emailTargets.get(email2.toLowerCase());
+      if (handle !== void 0 && !resolved.has(handle)) resolved.set(handle, c.name);
+    }
+    for (const handle of phoneTargets) {
+      if (resolved.has(handle)) continue;
+      if (c.phones.some((num) => phonesMatch(num, handle))) resolved.set(handle, c.name);
+    }
+    if (resolved.size === wanted.length) break;
+  }
+  return resolved;
+}
+async function findContactByPhone(handle) {
+  if (!handle || handle.trim() === "") return null;
+  const trimmed = handle.trim();
+  const resolved = await namesForHandles([trimmed]);
+  return resolved.has(trimmed) ? resolved.get(trimmed) : null;
+}
+var CONTACTS_SUMMARIES, contacts_default;
+var init_contacts = __esm({
+  "utils/contacts.ts"() {
+    "use strict";
+    init_native();
+    init_phone();
+    init_maestro();
+    CONTACTS_SUMMARIES = {
+      denied: "Could not read your contacts: macOS denied access to Contacts. " + grantSentence("Contacts"),
+      notRunning: "Could not read your contacts: Maestro could not be reached.",
+      timedOut: "Could not read your contacts: Maestro did not answer in time.",
+      failed: "Could not read your contacts."
+    };
+    contacts_default = {
+      getAllContacts,
+      getAllNumbers,
+      findNumber,
+      findContacts,
+      findContactByPhone,
+      namesForHandles,
+      requestContactsAccess
+    };
+  }
+});
+
+// utils/message.ts
+var message_exports = {};
+__export(message_exports, {
+  MESSAGES_READ_DENIED: () => MESSAGES_READ_DENIED,
+  MESSAGES_SEND_SUMMARIES: () => MESSAGES_SEND_SUMMARIES,
+  decodeAttributedBody: () => decodeAttributedBody,
+  default: () => message_default
+});
+import { promisify as promisify2 } from "node:util";
+import { execFile as execFile2 } from "node:child_process";
+import { access } from "node:fs/promises";
+async function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+async function retryOperation(operation, retries = MAX_RETRIES, delay = RETRY_DELAY) {
+  try {
+    return await operation();
+  } catch (error2) {
+    if (retries > 0) {
+      console.error(
+        `Operation failed, retrying... (${retries} attempts remaining)`
+      );
+      await sleep(delay);
+      return retryOperation(operation, retries - 1, delay);
+    }
+    throw error2;
+  }
+}
+function clampLimit(limit) {
+  const n = Math.floor(Number(limit));
+  if (!Number.isFinite(n) || n <= 0) return 10;
+  return Math.min(n, CONFIG.MAX_MESSAGES);
+}
+async function sendToConversation(guid2, message2) {
+  const body = escapeAppleScriptString(message2);
+  const chat = escapeAppleScriptString(guid2);
+  try {
+    return await runAppleScript(`
+tell application "Messages"
+    send "${body}" to chat id "${chat}"
+end tell`);
+  } catch (error2) {
+    throwAppleFailure(error2, MESSAGES_SEND_SUMMARIES);
+  }
+}
+async function sendMessage(phoneNumber, message2) {
+  if (!looksLikeHandle(phoneNumber)) {
+    throw new ToolFailure(
+      "bad_request",
+      `Nothing was sent: "${phoneNumber}" is a name, and a message needs a phone number or email address. Read their conversation to get it, or look the name up in Contacts.`
+    );
+  }
+  const buddy = escapeAppleScriptString(phoneNumber);
+  const body = escapeAppleScriptString(message2);
+  try {
+    return await runAppleScript(`
+tell application "Messages"
+    set targetService to 1st service whose service type = iMessage
+    set targetBuddy to buddy "${buddy}"
+    send "${body}" to targetBuddy
+end tell`);
+  } catch (error2) {
+    throwAppleFailure(error2, MESSAGES_SEND_SUMMARIES);
+  }
+}
+function throwMessagesDbFailure(error2, summary) {
+  if (error2 instanceof ToolFailure) throw error2;
+  const body = rawBody(error2);
+  const text = body.toLowerCase();
+  const code = error2?.code;
+  if (isPermissionDenial(error2) || code === "EACCES" || code === "EPERM" || text.includes("unable to open database file") || text.includes("authorization denied") || text.includes("operation not permitted")) {
+    throw new ToolFailure("permission_denied", MESSAGES_READ_DENIED, body);
+  }
+  if (code === "ENOENT" && !text.includes("sqlite3")) {
+    throw new ToolFailure(
+      "not_found",
+      `Could not read your message history: there is no Messages database at ${CHAT_DB}.`,
+      body
+    );
+  }
+  throw new ToolFailure("database_error", summary, body);
+}
+async function ensureMessagesDBAccess() {
+  try {
+    await access(CHAT_DB);
+  } catch (error2) {
+    throwMessagesDbFailure(error2, MESSAGES_READ_FAILED);
+  }
+  try {
+    await execFileAsync2("sqlite3", [CHAT_DB, "SELECT 1;"]);
+  } catch (error2) {
+    throwMessagesDbFailure(error2, MESSAGES_READ_FAILED);
+  }
+}
+function decodeAttributedBody(hexString) {
+  const blob = Buffer.from(hexString, "hex");
+  const text = typedstreamText(blob) ?? "";
+  const url = text.match(/(https?:\/\/[^\s<"]+)/)?.[1];
+  return { text, url };
+}
+async function getAttachmentPaths(messageId) {
+  if (!Number.isInteger(messageId)) {
+    throw new ToolFailure(
+      "internal_error",
+      "Could not read the message attachments: the message id was not a number.",
+      String(messageId)
+    );
+  }
+  const query = `
+            SELECT filename
+            FROM attachment
+            INNER JOIN message_attachment_join
+            ON attachment.ROWID = message_attachment_join.attachment_id
+            WHERE message_attachment_join.message_id = ${messageId}
+        `;
+  let stdout;
+  try {
+    ({ stdout } = await execFileAsync2("sqlite3", ["-json", CHAT_DB, query]));
+  } catch (error2) {
+    throwMessagesDbFailure(
+      error2,
+      "Could not read the message attachments."
+    );
+  }
+  if (!stdout.trim()) return [];
+  try {
+    const attachments = JSON.parse(stdout);
+    return attachments.map((a) => a.filename).filter(Boolean);
+  } catch (error2) {
+    throw new ToolFailure(
+      "database_error",
+      "Could not read the message attachments: sqlite3 returned something that is not JSON.",
+      rawBody(error2)
+    );
+  }
+}
+function conversationWhere(phoneList) {
+  return `WHERE h.id IN (${phoneList})
+                AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL OR m.cache_has_attachments = 1)
+                AND m.is_from_me IS NOT NULL  -- Ensure it's a real message
+                AND m.item_type = 0  -- Regular messages only
+                AND m.is_audio_message = 0  -- Skip audio messages`;
+}
+async function countMessagesWith(phoneNumber) {
+  try {
+    const phoneFormats = handleCandidates(phoneNumber);
+    if (phoneFormats.length === 0) return 0;
+    const phoneList = phoneFormats.map((p) => `'${escapeSqlString(p)}'`).join(",");
+    const { stdout } = await retryOperation(
+      () => execFileAsync2("sqlite3", [
+        "-json",
+        CHAT_DB,
+        `SELECT count(*) as n FROM message m INNER JOIN handle h ON h.ROWID = m.handle_id ` + conversationWhere(phoneList)
+      ])
+    );
+    const rows = JSON.parse(stdout || "[]");
+    return rows[0]?.n ?? 0;
+  } catch {
+    return 0;
+  }
+}
+async function readMessages(phoneNumber, limit = 10) {
+  try {
+    const maxLimit = clampLimit(limit);
+    await ensureMessagesDBAccess();
+    const phoneFormats = handleCandidates(phoneNumber);
+    if (phoneFormats.length === 0) {
+      throw new ToolFailure(
+        "bad_request",
+        `Could not read your messages: "${phoneNumber}" is not a usable phone number or email address.`
+      );
+    }
+    console.error("Trying handle formats:", phoneFormats);
+    const phoneList = phoneFormats.map((p) => `'${escapeSqlString(p)}'`).join(",");
+    const query = `
+            SELECT
+                m.ROWID as message_id,
+                CASE
+                    WHEN m.text IS NOT NULL AND m.text != '' THEN m.text
+                    WHEN m.attributedBody IS NOT NULL THEN hex(m.attributedBody)
+                    ELSE NULL
+                END as content,
+                datetime(m.date/1000000000 + strftime('%s', '2001-01-01'), 'unixepoch', 'localtime') as date,
+                h.id as sender,
+                m.is_from_me,
+                m.is_audio_message,
+                m.cache_has_attachments,
+                m.subject,
+                CASE
+                    WHEN m.text IS NOT NULL AND m.text != '' THEN 0
+                    WHEN m.attributedBody IS NOT NULL THEN 1
+                    ELSE 2
+                END as content_type
+            FROM message m
+            INNER JOIN handle h ON h.ROWID = m.handle_id
+            ${conversationWhere(phoneList)}
+            ORDER BY m.date DESC
+            LIMIT ${maxLimit}
+        `;
+    const { stdout } = await retryOperation(
+      () => execFileAsync2("sqlite3", ["-json", CHAT_DB, query])
+    );
+    if (!stdout.trim()) {
+      console.error("No messages found in database for the given phone number");
+      return [];
+    }
+    const messages = JSON.parse(stdout);
+    return await formatMessages(messages);
+  } catch (error2) {
+    throwMessagesDbFailure(error2, "Could not read your messages.");
+  }
+}
+async function countUnreadMessages() {
+  try {
+    const { stdout } = await retryOperation(
+      () => execFileAsync2("sqlite3", [
+        "-json",
+        CHAT_DB,
+        `SELECT count(*) as n FROM message m INNER JOIN handle h ON h.ROWID = m.handle_id ${UNREAD_WHERE}`
+      ])
+    );
+    const rows = JSON.parse(stdout || "[]");
+    return rows[0]?.n ?? 0;
+  } catch {
+    return 0;
+  }
+}
+async function getUnreadMessages(limit = 10) {
+  try {
+    const maxLimit = clampLimit(limit);
+    await ensureMessagesDBAccess();
+    const query = `
+            SELECT
+                m.ROWID as message_id,
+                CASE
+                    WHEN m.text IS NOT NULL AND m.text != '' THEN m.text
+                    WHEN m.attributedBody IS NOT NULL THEN hex(m.attributedBody)
+                    ELSE NULL
+                END as content,
+                datetime(m.date/1000000000 + strftime('%s', '2001-01-01'), 'unixepoch', 'localtime') as date,
+                h.id as sender,
+                m.is_from_me,
+                m.is_audio_message,
+                m.cache_has_attachments,
+                m.subject,
+                CASE
+                    WHEN m.text IS NOT NULL AND m.text != '' THEN 0
+                    WHEN m.attributedBody IS NOT NULL THEN 1
+                    ELSE 2
+                END as content_type
+            FROM message m
+            INNER JOIN handle h ON h.ROWID = m.handle_id
+            ${UNREAD_WHERE}
+            ORDER BY m.date DESC
+            LIMIT ${maxLimit}
+        `;
+    const { stdout } = await retryOperation(
+      () => execFileAsync2("sqlite3", ["-json", CHAT_DB, query])
+    );
+    if (!stdout.trim()) {
+      console.error("No unread messages found");
+      return [];
+    }
+    const messages = JSON.parse(stdout);
+    return await formatMessages(messages);
+  } catch (error2) {
+    throwMessagesDbFailure(error2, "Could not read your unread messages.");
+  }
+}
+async function formatMessages(messages) {
+  return Promise.all(
+    messages.filter((msg) => msg.content !== null || msg.cache_has_attachments === 1).map(async (msg) => {
+      let content = msg.content || "";
+      let url;
+      if (msg.content_type === 1) {
+        const decoded = decodeAttributedBody(content);
+        content = decoded.text;
+        url = decoded.url;
+      } else {
+        const urlMatch = content.match(/(https?:\/\/[^\s]+)/);
+        if (urlMatch) {
+          url = urlMatch[1];
+        }
+      }
+      let attachments = [];
+      if (msg.cache_has_attachments) {
+        attachments = await getAttachmentPaths(msg.message_id);
+      }
+      if (msg.subject) {
+        content = `Subject: ${msg.subject}
+${content}`;
+      }
+      const formattedMsg = {
+        content: content || "[No text content]",
+        date: new Date(msg.date).toISOString(),
+        sender: msg.sender,
+        is_from_me: Boolean(msg.is_from_me)
+      };
+      if (attachments.length > 0) {
+        formattedMsg.attachments = attachments;
+        formattedMsg.content += `
+[Attachments: ${attachments.length}]`;
+      }
+      if (url) {
+        formattedMsg.url = url;
+        formattedMsg.content += `
+[URL: ${url}]`;
+      }
+      return formattedMsg;
+    })
+  );
+}
+async function scheduleMessage(phoneNumber, message2, scheduledTime) {
+  const delay = scheduledTime.getTime() - Date.now();
+  if (delay < 0) {
+    throw new ToolFailure(
+      "bad_request",
+      "Could not schedule the message: the time given is in the past."
+    );
+  }
+  const timeoutId = setTimeout(async () => {
+    try {
+      await sendMessage(phoneNumber, message2);
+    } catch (error2) {
+      console.error(
+        `[scheduled_send_failed] The scheduled message to ${phoneNumber} was not sent.
+${rawBody(error2)}`
+      );
+    }
+  }, delay);
+  return {
+    id: timeoutId,
+    scheduledTime,
+    message: message2,
+    phoneNumber
+  };
+}
+async function recentConversations(limit = 10, resolveNames = contacts_default.namesForHandles) {
+  await ensureMessagesDBAccess();
+  const capped = clampLimit(limit);
+  try {
+    const { stdout } = await retryOperation(
+      () => execFileAsync2("sqlite3", ["-json", CHAT_DB, `
+				SELECT
+					h.id AS handle,
+					CASE
+						WHEN m.text IS NOT NULL AND m.text != '' THEN m.text
+						WHEN m.attributedBody IS NOT NULL THEN hex(m.attributedBody)
+						ELSE ''
+					END AS body,
+					CASE WHEN m.text IS NOT NULL AND m.text != '' THEN 0 ELSE 1 END AS is_hex,
+					m.is_from_me AS from_me,
+					datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') AS date
+				FROM message m
+				JOIN handle h ON h.ROWID = m.handle_id
+				JOIN (
+					SELECT handle_id, MAX(date) AS latest
+					FROM message
+					WHERE handle_id IS NOT NULL AND item_type = 0
+					GROUP BY handle_id
+				) last ON last.handle_id = m.handle_id AND last.latest = m.date
+				WHERE m.item_type = 0
+				ORDER BY m.date DESC
+				LIMIT ${capped}`])
+    );
+    const rows = JSON.parse(stdout || "[]");
+    let names = /* @__PURE__ */ new Map();
+    try {
+      names = await resolveNames(rows.map((r) => r.handle));
+    } catch {
+    }
+    return rows.map((r) => {
+      const text = r.is_hex ? decodeAttributedBody(r.body).text : r.body;
+      return {
+        handle: r.handle,
+        name: names.get(r.handle),
+        lastMessage: text || "[no text]",
+        date: r.date,
+        fromMe: r.from_me === 1
+      };
+    });
+  } catch (error2) {
+    throwMessagesDbFailure(error2, "Could not read your conversations.");
+  }
+}
+async function searchMessages(query, limit = 10, scan2 = 5e4) {
+  await ensureMessagesDBAccess();
+  const capped = clampLimit(limit);
+  const terms = queryTerms(query);
+  if (!terms.length) return { messages: [], coverage: { scanned: 0, bounded: false } };
+  try {
+    const { stdout } = await retryOperation(
+      () => (
+        // A ROOM BIG ENOUGH FOR WHAT WE ASKED FOR. Every other query here returns tens of rows of
+        // plain text; this one returns up to `scan` rows of hex, which is a different order of size.
+        execFileAsync2(
+          "sqlite3",
+          ["-json", CHAT_DB, `
+				SELECT
+					h.id AS sender,
+					cmj.chat_id AS chat_id,
+					CASE
+						WHEN m.text IS NOT NULL AND m.text != '' THEN m.text
+						WHEN m.attributedBody IS NOT NULL THEN hex(m.attributedBody)
+						ELSE ''
+					END AS body,
+					CASE WHEN m.text IS NOT NULL AND m.text != '' THEN 0 ELSE 1 END AS is_hex,
+					m.is_from_me AS from_me,
+					datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') AS date
+				FROM message m
+				JOIN handle h ON h.ROWID = m.handle_id
+				LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+				WHERE m.item_type = 0
+					AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL)
+				ORDER BY m.date DESC
+				LIMIT ${Math.max(capped, scan2)}`],
+          // ~1KB of hex per row measured, so 50,000 rows is ~48MB at the worst and the room is
+          // sized for it with headroom. Too small a buffer fails as a bare "could not search",
+          // which is how the first attempt died three retries deep.
+          { maxBuffer: 256 * 1024 * 1024 }
+        )
+      )
+    );
+    const rows = JSON.parse(stdout || "[]");
+    const hits = [];
+    for (const r of rows) {
+      const text = (r.is_hex ? decodeAttributedBody(r.body).text : r.body) ?? "";
+      if (!matchesQuery(text, terms)) continue;
+      if (hits.length >= capped) continue;
+      hits.push({
+        content: text,
+        date: r.date,
+        sender: r.sender,
+        is_from_me: r.from_me === 1,
+        chatId: r.chat_id ?? void 0
+      });
+    }
+    return {
+      messages: hits,
+      coverage: {
+        scanned: rows.length,
+        bounded: rows.length >= Math.max(capped, scan2),
+        oldest: rows.length ? rows[rows.length - 1].date : void 0
+      }
+    };
+  } catch (error2) {
+    throwMessagesDbFailure(error2, "Could not search your messages.");
+  }
+}
+async function lastSeenByHandle() {
+  const out = /* @__PURE__ */ new Map();
+  try {
+    const { stdout } = await retryOperation(
+      () => execFileAsync2("sqlite3", ["-json", CHAT_DB, `
+				SELECT h.id AS handle,
+					datetime(MAX(m.date)/1000000000 + 978307200, 'unixepoch', 'localtime') AS date
+				FROM message m JOIN handle h ON h.ROWID = m.handle_id
+				WHERE m.item_type = 0
+				GROUP BY h.id`])
+    );
+    for (const r of JSON.parse(stdout || "[]")) {
+      out.set(r.handle, r.date);
+    }
+  } catch {
+  }
+  return out;
+}
+async function whoIsMeant(name, findCards = contacts_default.findContacts) {
+  let cards = [];
+  try {
+    cards = await findCards(name);
+  } catch {
+    return { kind: "cannot-ask" };
+  }
+  return resolveRecipient(cards, await lastSeenByHandle());
+}
+var execFileAsync2, CHAT_DB, MESSAGES_SEND_SUMMARIES, MESSAGES_READ_DENIED, MESSAGES_READ_FAILED, CONFIG, MAX_RETRIES, RETRY_DELAY, UNREAD_WHERE, message_default;
+var init_message = __esm({
+  "utils/message.ts"() {
+    "use strict";
+    init_run_applescript();
+    init_native();
+    init_failure();
+    init_phone();
+    init_recipient();
+    init_typedstream();
+    init_query();
+    init_conversation();
+    init_contacts();
+    init_recipient();
+    execFileAsync2 = promisify2(execFile2);
+    CHAT_DB = `${process.env.HOME}/Library/Messages/chat.db`;
+    MESSAGES_SEND_SUMMARIES = {
+      denied: "Could not send the message: macOS denied control of Messages. " + grantSentence("Automation > Messages"),
+      notRunning: "Could not send the message: the Messages app could not be reached.",
+      timedOut: "Could not send the message: Messages did not answer in time.",
+      failed: "Could not send the message."
+    };
+    MESSAGES_READ_DENIED = "Could not read your message history: macOS denied access to the Messages database. " + grantSentence("Full Disk Access");
+    MESSAGES_READ_FAILED = "Could not read your message history.";
+    CONFIG = {
+      // Maximum messages to process (to avoid performance issues)
+      MAX_MESSAGES: 50,
+      // Maximum content length for previews
+      MAX_CONTENT_PREVIEW: 300,
+      // Timeout for operations
+      TIMEOUT_MS: 8e3
+    };
+    MAX_RETRIES = 3;
+    RETRY_DELAY = 1e3;
+    UNREAD_WHERE = `
+            WHERE m.is_from_me = 0  -- Only messages from others
+                AND m.is_read = 0   -- Only unread messages
+                AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL OR m.cache_has_attachments = 1)
+                AND m.is_audio_message = 0  -- Skip audio messages
+                AND m.item_type = 0  -- Regular messages only`;
+    message_default = {
+      /** The hard ceiling on one read, so a caller can say "50 is the most" instead of
+       *  advising somebody to ask for a hundred and hand them fifty again. */
+      maxMessages: () => CONFIG.MAX_MESSAGES,
+      countUnreadMessages,
+      countMessagesWith,
+      sendMessage,
+      // THE CONVERSATION LAYER, reached through the same module the tool already loads, so index.ts does
+      // not grow a second way of getting at messages.
+      conversationsNamed,
+      conversationsForHandle,
+      sendToConversation,
+      whoIsMeant,
+      listConversations,
+      readConversation,
+      readMessages,
+      scheduleMessage,
+      getUnreadMessages,
+      recentConversations,
+      searchMessages,
+      lastSeenByHandle
+    };
+  }
+});
+
+// utils/conversation.ts
+import { execFile as execFile3 } from "node:child_process";
+import { promisify as promisify3 } from "node:util";
+function toConversation(r) {
+  const body = r.is_hex ? decodeAttributedBody(r.body).text ?? "" : r.body ?? "";
+  return {
+    chatId: r.chat_id,
+    guid: r.guid,
+    // 43 is a group thread, 45 is one-to-one. Participant COUNT is not the test: a group can lose
+    // members down to one and is still a group.
+    isGroup: r.style === 43,
+    participants: (r.participants ?? "").split("|").map((h) => h.trim()).filter(Boolean),
+    title: (r.title ?? "").trim() || void 0,
+    lastMessage: body || void 0,
+    lastDate: r.date,
+    lastFromMe: r.from_me === 1
+  };
+}
+async function listConversations(limit = 10, rows = sqlite) {
+  const capped = Math.max(1, Math.min(Math.floor(limit) || 10, 100));
+  return (await rows(`
+		SELECT ${CHAT_COLUMNS}
+		FROM chat c ${LATEST_PER_CHAT}
+		WHERE m.item_type = 0
+		ORDER BY m.date DESC
+		LIMIT ${capped}`)).map(toConversation);
+}
+async function conversationsWith(handleSets, rows = sqlite) {
+  const wanted = handleSets.map((set) => new Set(set.map((h) => h.trim().toLowerCase()).filter(Boolean))).filter((set) => set.size > 0);
+  if (!wanted.length) return [];
+  const all = (await rows(`
+		SELECT ${CHAT_COLUMNS}
+		FROM chat c ${LATEST_PER_CHAT}
+		WHERE m.item_type = 0
+		ORDER BY m.date DESC`)).map(toConversation);
+  return all.filter((conv) => {
+    const here = new Set(conv.participants.map((h) => h.toLowerCase()));
+    return wanted.every((person) => [...person].some((h) => here.has(h)));
+  });
+}
+async function readConversation(chatId, limit = 10) {
+  const capped = Math.max(1, Math.min(Math.floor(limit) || 10, 100));
+  const { stdout } = await execFileAsync3("sqlite3", ["-json", CHAT_DB2, `
+		SELECT
+			COALESCE(h.id, '') AS sender,
+			m.is_from_me AS from_me,
+			CASE
+				WHEN m.text IS NOT NULL AND m.text != '' THEN m.text
+				WHEN m.attributedBody IS NOT NULL THEN hex(m.attributedBody)
+				ELSE ''
+			END AS body,
+			CASE WHEN m.text IS NOT NULL AND m.text != '' THEN 0 ELSE 1 END AS is_hex,
+			datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') AS date
+		FROM message m
+		JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+		LEFT JOIN handle h ON h.ROWID = m.handle_id
+		WHERE cmj.chat_id = ${Math.floor(chatId)} AND m.item_type = 0
+		ORDER BY m.date DESC
+		LIMIT ${capped}`], { maxBuffer: 64 * 1024 * 1024 });
+  const raw = JSON.parse(stdout || "[]");
+  return raw.map((r) => ({
+    sender: r.sender,
+    fromMe: r.from_me === 1,
+    text: (r.is_hex ? decodeAttributedBody(r.body).text : r.body) ?? "",
+    date: r.date
+  }));
+}
+function namesAsked(raw) {
+  return raw.split(/\s*(?:,|&|\+|\band\b|\bet\b)\s*/i).map((n) => n.trim()).filter(Boolean);
+}
+async function conversationsForHandle(handle, rows = sqlite) {
+  const forms = handleCandidates(handle);
+  return forms.length ? conversationsWith([forms], rows) : [];
+}
+async function conversationsNamed(raw, findCards, rows = sqlite) {
+  const names = namesAsked(raw);
+  if (!names.length) return { kind: "unknown", missing: [] };
+  const handleSets = [];
+  const missing = [];
+  for (const name of names) {
+    let cards;
+    try {
+      cards = await findCards(name);
+    } catch {
+      return { kind: "cannot-ask" };
+    }
+    const handles = cards.flatMap((c) => [...c.phones, ...c.emails]).map((h) => h.trim()).filter(Boolean);
+    if (!handles.length) missing.push(name);
+    else handleSets.push(handles);
+  }
+  if (missing.length) return { kind: "unknown", missing };
+  const found = await conversationsWith(handleSets, rows);
+  if (!found.length) return { kind: "no-thread", who: names };
+  return { kind: "one", conversation: found[0], others: found.slice(1) };
+}
+var execFileAsync3, CHAT_DB2, LATEST_PER_CHAT, CHAT_COLUMNS, sqlite;
+var init_conversation = __esm({
+  "utils/conversation.ts"() {
+    "use strict";
+    init_message();
+    init_phone();
+    execFileAsync3 = promisify3(execFile3);
+    CHAT_DB2 = `${process.env.HOME}/Library/Messages/chat.db`;
+    LATEST_PER_CHAT = `
+	JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
+	JOIN message m ON m.ROWID = cmj.message_id
+	JOIN (
+		SELECT cmj2.chat_id AS cid, MAX(m2.date) AS latest
+		FROM chat_message_join cmj2 JOIN message m2 ON m2.ROWID = cmj2.message_id
+		WHERE m2.item_type = 0
+		GROUP BY cmj2.chat_id
+	) last ON last.cid = c.ROWID AND last.latest = m.date`;
+    CHAT_COLUMNS = `
+	c.ROWID AS chat_id,
+	c.guid AS guid,
+	c.style AS style,
+	c.display_name AS title,
+	(SELECT GROUP_CONCAT(h.id, '|') FROM chat_handle_join chj
+	 JOIN handle h ON h.ROWID = chj.handle_id WHERE chj.chat_id = c.ROWID) AS participants,
+	m.is_from_me AS from_me,
+	CASE
+		WHEN m.text IS NOT NULL AND m.text != '' THEN m.text
+		WHEN m.attributedBody IS NOT NULL THEN hex(m.attributedBody)
+		ELSE ''
+	END AS body,
+	CASE WHEN m.text IS NOT NULL AND m.text != '' THEN 0 ELSE 1 END AS is_hex,
+	datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') AS date`;
+    sqlite = async (sql) => {
+      const { stdout } = await execFileAsync3(
+        "sqlite3",
+        ["-json", CHAT_DB2, sql],
+        { maxBuffer: 64 * 1024 * 1024 }
+      );
+      return JSON.parse(stdout || "[]");
+    };
+  }
+});
+
 // node_modules/ajv/dist/compile/codegen/code.js
 var require_code = __commonJS({
   "node_modules/ajv/dist/compile/codegen/code.js"(exports) {
@@ -9577,352 +10721,6 @@ var require_dist = __commonJS({
   }
 });
 
-// utils/failure.ts
-function redactSecrets(body) {
-  let out = body;
-  for (const [pattern, replacement] of SECRET_PATTERNS) {
-    out = out.replace(pattern, replacement);
-  }
-  return out;
-}
-function truncateBody(body) {
-  if (body.length <= MAX_BODY) return body;
-  return body.slice(0, MAX_BODY) + " ...[truncated]";
-}
-function rawBody(error2) {
-  if (error2 && typeof error2 === "object") {
-    const e = error2;
-    const stderr = typeof e.stderr === "string" ? e.stderr : e.stderr instanceof Buffer ? e.stderr.toString() : "";
-    const message2 = typeof e.message === "string" ? e.message : "";
-    const parts = [stderr.trim(), message2.trim()].filter(Boolean);
-    if (parts.length > 0) return truncateBody(redactSecrets(parts.join("\n")));
-  }
-  const asString = String(error2).trim();
-  return asString ? truncateBody(redactSecrets(asString)) : "";
-}
-function envelope(code, summary, body = "") {
-  const evidence = truncateBody(redactSecrets(body)).trim();
-  return evidence ? `[${code}] ${summary}
-${evidence}` : `[${code}] ${summary}`;
-}
-function failureResult(code, summary, body = "") {
-  return {
-    content: [{ type: "text", text: envelope(code, summary, body) }],
-    isError: true
-  };
-}
-function failureResultFrom(error2, fallbackCode, fallbackSummary) {
-  if (error2 instanceof ToolFailure) {
-    return failureResult(error2.code, error2.summary, error2.body);
-  }
-  return failureResult(fallbackCode, fallbackSummary, rawBody(error2));
-}
-var MAX_BODY, SECRET_PATTERNS, ToolFailure;
-var init_failure = __esm({
-  "utils/failure.ts"() {
-    "use strict";
-    MAX_BODY = 4e3;
-    SECRET_PATTERNS = [
-      [/\b(authorization|cookie|set-cookie)\s*:\s*[^\r\n]+/gi, "$1: <redacted>"],
-      [
-        /("(?:access_token|refresh_token|client_secret)"\s*:\s*")[^"]*(")/gi,
-        "$1<redacted>$2"
-      ],
-      [
-        /\b(access_token|refresh_token|client_secret)=[^\s&"']+/gi,
-        "$1=<redacted>"
-      ]
-    ];
-    ToolFailure = class extends Error {
-      code;
-      /** Line 1: what did not happen, in words a person reads. Never a stack trace, never a symbol. */
-      summary;
-      /** The underlying error output, verbatim. Empty when the failure had no underlying output. */
-      body;
-      constructor(code, summary, body = "") {
-        super(summary);
-        this.name = "ToolFailure";
-        this.code = code;
-        this.summary = summary;
-        this.body = body;
-      }
-    };
-  }
-});
-
-// utils/native.ts
-function hostAppName() {
-  const name = (process.env.APPLE_MCP_APP_NAME || "").trim();
-  return name || "this app";
-}
-function grantSentence(...permissionPaths) {
-  const [first, ...rest] = permissionPaths;
-  const tail = rest.map((p) => `, and under ${p}`).join("");
-  return `Enable ${hostAppName()} under System Settings > Privacy & Security > ${first}${tail}.`;
-}
-function isPermissionDenial(error2) {
-  const msg = (error2 instanceof Error ? error2.message : String(error2)).toLowerCase();
-  return msg.includes("-1743") || // errAEEventNotPermitted - Automation denied / never prompted
-  msg.includes("-1744") || // user consent required
-  msg.includes("-10004") || // privilege violation
-  msg.includes("not authorized") || msg.includes("not allowed") || msg.includes("not permitted") || msg.includes("doesn't have permission") || msg.includes("does not have permission") || msg.includes("permission to") || msg.includes("access denied");
-}
-function isAppNotRunning(error2) {
-  const msg = (error2 instanceof Error ? error2.message : String(error2)).toLowerCase();
-  return msg.includes("-600") || // procNotFound
-  msg.includes("-609") || // connectionInvalid
-  msg.includes("isn't running") || msg.includes("is not running") || msg.includes("can't be launched") || msg.includes("cannot be launched");
-}
-function isAppleEventTimeout(error2) {
-  const msg = (error2 instanceof Error ? error2.message : String(error2)).toLowerCase();
-  return msg.includes("-1712") || msg.includes("appleevent timed out");
-}
-function classifyAppleError(error2) {
-  if (isPermissionDenial(error2)) return "permission_denied";
-  if (isAppNotRunning(error2)) return "app_not_running";
-  if (isAppleEventTimeout(error2)) return "timeout";
-  return "applescript_error";
-}
-function throwAppleFailure(error2, summaries) {
-  if (error2 instanceof ToolFailure) throw error2;
-  const code = classifyAppleError(error2);
-  const summary = code === "permission_denied" ? summaries.denied : code === "app_not_running" ? summaries.notRunning : code === "timeout" ? summaries.timedOut : summaries.failed;
-  throw new ToolFailure(code, summary, rawBody(error2));
-}
-function escapeAppleScriptString(value) {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-function escapeSqlString(value) {
-  return value.replace(/'/g, "''");
-}
-function assertAlignedColumns(lengths, summary) {
-  if (lengths.every((n) => n === lengths[0])) return;
-  throw new ToolFailure(
-    "applescript_error",
-    summary,
-    rawBody(`property columns came back with different lengths: ${lengths.join(", ")}`)
-  );
-}
-function phoneDigits(value) {
-  return value.replace(/\D/g, "");
-}
-function phonesMatch(a, b) {
-  const da = phoneDigits(a);
-  const db = phoneDigits(b);
-  if (!da || !db) return false;
-  if (da === db) return true;
-  const [shorter, longer] = da.length <= db.length ? [da, db] : [db, da];
-  return shorter.length >= 7 && longer.endsWith(shorter);
-}
-var init_native = __esm({
-  "utils/native.ts"() {
-    "use strict";
-    init_failure();
-  }
-});
-
-// utils/maestro.ts
-async function ask(door, action, payload, summaries) {
-  const cfg = DOORS[door];
-  const url = (process.env[cfg.url] ?? "").trim();
-  const secret = (process.env[cfg.secret] ?? "").trim();
-  if (!url || !secret) {
-    throw new ToolFailure(
-      "app_not_running",
-      `Your ${cfg.noun} can only be read inside Maestro, which reads the store directly. There is no second way to do it that works.`
-    );
-  }
-  let response;
-  try {
-    response = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", [cfg.header]: secret },
-      body: JSON.stringify({ action, ...payload })
-    });
-  } catch (error2) {
-    throw new ToolFailure("app_not_running", `${summaries.notRunning} (${String(error2)})`);
-  }
-  const text = await response.text();
-  let body;
-  try {
-    body = JSON.parse(text);
-  } catch {
-    throw new ToolFailure(
-      "internal_error",
-      `Maestro answered something that is not a ${cfg.noun} answer.`,
-      `HTTP ${response.status}
-${text}`
-    );
-  }
-  if (body?.ok !== "true" && body?.ok !== true) {
-    throw new ToolFailure(body?.code ?? "internal_error", body?.reason ?? summaries.failed);
-  }
-  return body;
-}
-var DOORS;
-var init_maestro = __esm({
-  "utils/maestro.ts"() {
-    "use strict";
-    init_native();
-    DOORS = {
-      reminders: {
-        url: "MAESTRO_REMINDERS_URL",
-        secret: "MAESTRO_REMINDERS_SECRET",
-        header: "x-reminders-secret",
-        noun: "reminders"
-      },
-      contacts: {
-        url: "MAESTRO_CONTACTS_URL",
-        secret: "MAESTRO_CONTACTS_SECRET",
-        header: "x-contact-secret",
-        noun: "contacts"
-      },
-      calendar: {
-        url: "MAESTRO_CALENDAR_URL",
-        secret: "MAESTRO_CALENDAR_SECRET",
-        header: "x-calendar-secret",
-        noun: "calendar"
-      }
-    };
-  }
-});
-
-// utils/contacts.ts
-var contacts_exports = {};
-__export(contacts_exports, {
-  CONTACTS_SUMMARIES: () => CONTACTS_SUMMARIES,
-  default: () => contacts_default
-});
-async function getAllContacts() {
-  const body = await ask("contacts", "all", {}, CONTACTS_SUMMARIES);
-  return body.cards ?? [];
-}
-async function requestContactsAccess() {
-  try {
-    await getAllContacts();
-    return { hasAccess: true, message: "Contacts access is granted." };
-  } catch (error2) {
-    if (error2 instanceof ToolFailure && error2.code === "permission_denied") {
-      return { hasAccess: false, message: CONTACTS_SUMMARIES.denied };
-    }
-    throw error2;
-  }
-}
-async function getAllNumbers() {
-  const contacts2 = await getAllContacts();
-  const result2 = {};
-  for (const contact of contacts2) {
-    if (!contact || !contact.name || contact.phones.length === 0) continue;
-    result2[contact.name] = (result2[contact.name] ?? []).concat(contact.phones);
-  }
-  return result2;
-}
-function cleanName(name) {
-  return name.toLowerCase().replace(
-    /[\u{1F600}-\u{1F64F}]|[\u{1F300}-\u{1F5FF}]|[\u{1F680}-\u{1F6FF}]|[\u{1F1E0}-\u{1F1FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/gu,
-    ""
-  ).replace(/[☀-➿⬀-⯿️]/g, "").replace(/\s+/g, " ").trim();
-}
-async function findNumber(name) {
-  if (!name || name.trim() === "") return [];
-  const allNumbers = await getAllNumbers();
-  const names = Object.keys(allNumbers);
-  if (names.length === 0) return [];
-  const search = cleanName(name);
-  const strategies = [
-    (c) => cleanName(c) === search,
-    (c) => cleanName(c).startsWith(search),
-    (c) => cleanName(c).includes(search),
-    (c) => search.includes(cleanName(c)),
-    (c) => cleanName(c).split(" ")[0] === search,
-    (c) => {
-      const parts = cleanName(c).split(" ");
-      return parts[parts.length - 1] === search;
-    },
-    (c) => cleanName(c).split(" ").some((w) => w === search || w.startsWith(search))
-  ];
-  for (const matches of strategies) {
-    const hit = names.find(matches);
-    if (hit) return allNumbers[hit];
-  }
-  return [];
-}
-async function findContacts(name) {
-  if (!name || name.trim() === "") return [];
-  const query = name.trim();
-  const words = query.split(/\s+/).filter((w) => w.length >= 3);
-  const terms = [query, ...words.filter((w) => w.toLowerCase() !== query.toLowerCase())];
-  const contacts2 = await getAllContacts();
-  const matched = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const term of terms) {
-    const needle = term.toLowerCase();
-    for (const c of contacts2) {
-      if (seen.has(c.id)) continue;
-      if (!c.name.toLowerCase().includes(needle)) continue;
-      seen.add(c.id);
-      matched.push(c);
-    }
-  }
-  return matched;
-}
-async function namesForHandles(handles) {
-  const wanted = Array.from(
-    new Set(handles.map((h) => (h ?? "").trim()).filter((h) => h.length > 0))
-  );
-  const resolved = /* @__PURE__ */ new Map();
-  if (wanted.length === 0) return resolved;
-  const contacts2 = await getAllContacts();
-  const emailTargets = /* @__PURE__ */ new Map();
-  const phoneTargets = [];
-  for (const handle of wanted) {
-    if (isEmailHandle(handle)) emailTargets.set(handle.toLowerCase(), handle);
-    else phoneTargets.push(handle);
-  }
-  for (const c of contacts2) {
-    for (const email2 of c.emails) {
-      const handle = emailTargets.get(email2.toLowerCase());
-      if (handle !== void 0 && !resolved.has(handle)) resolved.set(handle, c.name);
-    }
-    for (const handle of phoneTargets) {
-      if (resolved.has(handle)) continue;
-      if (c.phones.some((num) => phonesMatch(num, handle))) resolved.set(handle, c.name);
-    }
-    if (resolved.size === wanted.length) break;
-  }
-  return resolved;
-}
-async function findContactByPhone(handle) {
-  if (!handle || handle.trim() === "") return null;
-  const trimmed = handle.trim();
-  const resolved = await namesForHandles([trimmed]);
-  return resolved.has(trimmed) ? resolved.get(trimmed) : null;
-}
-var CONTACTS_SUMMARIES, contacts_default;
-var init_contacts = __esm({
-  "utils/contacts.ts"() {
-    "use strict";
-    init_native();
-    init_phone();
-    init_maestro();
-    CONTACTS_SUMMARIES = {
-      denied: "Could not read your contacts: macOS denied access to Contacts. " + grantSentence("Contacts"),
-      notRunning: "Could not read your contacts: Maestro could not be reached.",
-      timedOut: "Could not read your contacts: Maestro did not answer in time.",
-      failed: "Could not read your contacts."
-    };
-    contacts_default = {
-      getAllContacts,
-      getAllNumbers,
-      findNumber,
-      findContacts,
-      findContactByPhone,
-      namesForHandles,
-      requestContactsAccess
-    };
-  }
-});
-
 // node_modules/semver/semver.js
 var require_semver = __commonJS({
   "node_modules/semver/semver.js"(exports, module) {
@@ -11394,789 +12192,6 @@ var init_notes = __esm({
   }
 });
 
-// node_modules/run-applescript/index.js
-import process3 from "node:process";
-import { promisify } from "node:util";
-import { execFile, execFileSync } from "node:child_process";
-async function runAppleScript(script, { humanReadableOutput = true, signal } = {}) {
-  if (process3.platform !== "darwin") {
-    throw new Error("macOS only");
-  }
-  const outputArguments = humanReadableOutput ? [] : ["-ss"];
-  const execOptions = {};
-  if (signal) {
-    execOptions.signal = signal;
-  }
-  const { stdout } = await execFileAsync("osascript", ["-e", script, outputArguments], execOptions);
-  return stdout.trim();
-}
-var execFileAsync;
-var init_run_applescript = __esm({
-  "node_modules/run-applescript/index.js"() {
-    execFileAsync = promisify(execFile);
-  }
-});
-
-// utils/typedstream.ts
-function typedstreamStrings(blob) {
-  const out = [];
-  let i = 0;
-  const n = blob.length;
-  while (i < n) {
-    const plus = blob.indexOf(43, i);
-    if (plus === -1 || plus + 1 >= n) break;
-    let j = plus + 1;
-    let length = blob[j];
-    j += 1;
-    if (length === 129) {
-      length = blob.readUInt16LE(j);
-      j += 2;
-    } else if (length === 130) {
-      length = blob[j] | blob[j + 1] << 8 | blob[j + 2] << 16;
-      j += 3;
-    } else if (length >= 128) {
-      i = plus + 1;
-      continue;
-    }
-    if (length <= 0 || j + length > n) {
-      i = plus + 1;
-      continue;
-    }
-    const slice = blob.subarray(j, j + length);
-    const text = slice.toString("utf8");
-    if (text && !text.includes("\uFFFD")) out.push(text);
-    i = j + length;
-  }
-  return out;
-}
-function isBookkeeping(text) {
-  const t = text.trim();
-  if (!t) return true;
-  if (ARCHIVE_TOKENS.some((token) => t.includes(token))) return true;
-  if (/^at_\d+_[0-9A-Fa-f-]{8,}$/.test(t)) return true;
-  if (/^[0-9A-Fa-f-]{16,}$/.test(t)) return true;
-  return false;
-}
-function typedstreamText(blob) {
-  for (const candidate of typedstreamStrings(blob)) {
-    if (!isBookkeeping(candidate)) return candidate;
-  }
-  return void 0;
-}
-var ARCHIVE_TOKENS;
-var init_typedstream = __esm({
-  "utils/typedstream.ts"() {
-    "use strict";
-    ARCHIVE_TOKENS = [
-      "$classname",
-      "$classes",
-      "$archiver",
-      "NSAttributedString",
-      "NSMutableString",
-      "NSDictionary",
-      "NSObject",
-      "NSValue",
-      "NSNumber",
-      "NSString",
-      "streamtyped",
-      // Every attribute run names itself, and an audio message's transcript arrives surrounded by these.
-      "__kIM"
-    ];
-  }
-});
-
-// utils/query.ts
-function fold(s) {
-  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-}
-function queryTerms(raw) {
-  const terms = [];
-  const rest = raw.replace(/"([^"]*)"|'([^']*)'/g, (_m, a, b) => {
-    const phrase = fold((a ?? b ?? "").trim());
-    if (phrase) terms.push(phrase);
-    return " ";
-  });
-  for (const word of rest.split(/\s+/)) {
-    const t = fold(word.trim());
-    if (t) terms.push(t);
-  }
-  return terms;
-}
-function matchesQuery(text, terms) {
-  if (!terms.length) return false;
-  const hay = fold(text);
-  return terms.every((t) => hay.includes(t));
-}
-var init_query = __esm({
-  "utils/query.ts"() {
-    "use strict";
-  }
-});
-
-// utils/conversation.ts
-import { execFile as execFile2 } from "node:child_process";
-import { promisify as promisify2 } from "node:util";
-function toConversation(r) {
-  const body = r.is_hex ? decodeAttributedBody(r.body).text ?? "" : r.body ?? "";
-  return {
-    chatId: r.chat_id,
-    // 43 is a group thread, 45 is one-to-one. Participant COUNT is not the test: a group can lose
-    // members down to one and is still a group.
-    isGroup: r.style === 43,
-    participants: (r.participants ?? "").split("|").map((h) => h.trim()).filter(Boolean),
-    title: (r.title ?? "").trim() || void 0,
-    lastMessage: body || void 0,
-    lastDate: r.date,
-    lastFromMe: r.from_me === 1
-  };
-}
-async function listConversations(limit = 10, rows = sqlite) {
-  const capped = Math.max(1, Math.min(Math.floor(limit) || 10, 100));
-  return (await rows(`
-		SELECT ${CHAT_COLUMNS}
-		FROM chat c ${LATEST_PER_CHAT}
-		WHERE m.item_type = 0
-		ORDER BY m.date DESC
-		LIMIT ${capped}`)).map(toConversation);
-}
-async function conversationsWith(handleSets, rows = sqlite) {
-  const wanted = handleSets.map((set) => new Set(set.map((h) => h.trim().toLowerCase()).filter(Boolean))).filter((set) => set.size > 0);
-  if (!wanted.length) return [];
-  const all = (await rows(`
-		SELECT ${CHAT_COLUMNS}
-		FROM chat c ${LATEST_PER_CHAT}
-		WHERE m.item_type = 0
-		ORDER BY m.date DESC`)).map(toConversation);
-  return all.filter((conv) => {
-    const here = new Set(conv.participants.map((h) => h.toLowerCase()));
-    return wanted.every((person) => [...person].some((h) => here.has(h)));
-  });
-}
-async function readConversation(chatId, limit = 10) {
-  const capped = Math.max(1, Math.min(Math.floor(limit) || 10, 100));
-  const { stdout } = await execFileAsync2("sqlite3", ["-json", CHAT_DB, `
-		SELECT
-			COALESCE(h.id, '') AS sender,
-			m.is_from_me AS from_me,
-			CASE
-				WHEN m.text IS NOT NULL AND m.text != '' THEN m.text
-				WHEN m.attributedBody IS NOT NULL THEN hex(m.attributedBody)
-				ELSE ''
-			END AS body,
-			CASE WHEN m.text IS NOT NULL AND m.text != '' THEN 0 ELSE 1 END AS is_hex,
-			datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') AS date
-		FROM message m
-		JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-		LEFT JOIN handle h ON h.ROWID = m.handle_id
-		WHERE cmj.chat_id = ${Math.floor(chatId)} AND m.item_type = 0
-		ORDER BY m.date DESC
-		LIMIT ${capped}`], { maxBuffer: 64 * 1024 * 1024 });
-  const raw = JSON.parse(stdout || "[]");
-  return raw.map((r) => ({
-    sender: r.sender,
-    fromMe: r.from_me === 1,
-    text: (r.is_hex ? decodeAttributedBody(r.body).text : r.body) ?? "",
-    date: r.date
-  }));
-}
-function namesAsked(raw) {
-  return raw.split(/\s*(?:,|&|\+|\band\b|\bet\b)\s*/i).map((n) => n.trim()).filter(Boolean);
-}
-async function conversationsForHandle(handle, rows = sqlite) {
-  const forms = handleCandidates(handle);
-  return forms.length ? conversationsWith([forms], rows) : [];
-}
-async function conversationsNamed(raw, findCards, rows = sqlite) {
-  const names = namesAsked(raw);
-  if (!names.length) return { kind: "unknown", missing: [] };
-  const handleSets = [];
-  const missing = [];
-  for (const name of names) {
-    let cards;
-    try {
-      cards = await findCards(name);
-    } catch {
-      return { kind: "cannot-ask" };
-    }
-    const handles = cards.flatMap((c) => [...c.phones, ...c.emails]).map((h) => h.trim()).filter(Boolean);
-    if (!handles.length) missing.push(name);
-    else handleSets.push(handles);
-  }
-  if (missing.length) return { kind: "unknown", missing };
-  const found = await conversationsWith(handleSets, rows);
-  if (!found.length) return { kind: "no-thread", who: names };
-  return { kind: "one", conversation: found[0], others: found.slice(1) };
-}
-var execFileAsync2, CHAT_DB, LATEST_PER_CHAT, CHAT_COLUMNS, sqlite;
-var init_conversation = __esm({
-  "utils/conversation.ts"() {
-    "use strict";
-    init_message();
-    init_phone();
-    execFileAsync2 = promisify2(execFile2);
-    CHAT_DB = `${process.env.HOME}/Library/Messages/chat.db`;
-    LATEST_PER_CHAT = `
-	JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
-	JOIN message m ON m.ROWID = cmj.message_id
-	JOIN (
-		SELECT cmj2.chat_id AS cid, MAX(m2.date) AS latest
-		FROM chat_message_join cmj2 JOIN message m2 ON m2.ROWID = cmj2.message_id
-		WHERE m2.item_type = 0
-		GROUP BY cmj2.chat_id
-	) last ON last.cid = c.ROWID AND last.latest = m.date`;
-    CHAT_COLUMNS = `
-	c.ROWID AS chat_id,
-	c.style AS style,
-	c.display_name AS title,
-	(SELECT GROUP_CONCAT(h.id, '|') FROM chat_handle_join chj
-	 JOIN handle h ON h.ROWID = chj.handle_id WHERE chj.chat_id = c.ROWID) AS participants,
-	m.is_from_me AS from_me,
-	CASE
-		WHEN m.text IS NOT NULL AND m.text != '' THEN m.text
-		WHEN m.attributedBody IS NOT NULL THEN hex(m.attributedBody)
-		ELSE ''
-	END AS body,
-	CASE WHEN m.text IS NOT NULL AND m.text != '' THEN 0 ELSE 1 END AS is_hex,
-	datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') AS date`;
-    sqlite = async (sql) => {
-      const { stdout } = await execFileAsync2(
-        "sqlite3",
-        ["-json", CHAT_DB, sql],
-        { maxBuffer: 64 * 1024 * 1024 }
-      );
-      return JSON.parse(stdout || "[]");
-    };
-  }
-});
-
-// utils/message.ts
-var message_exports = {};
-__export(message_exports, {
-  MESSAGES_READ_DENIED: () => MESSAGES_READ_DENIED,
-  MESSAGES_SEND_SUMMARIES: () => MESSAGES_SEND_SUMMARIES,
-  decodeAttributedBody: () => decodeAttributedBody,
-  default: () => message_default
-});
-import { promisify as promisify3 } from "node:util";
-import { execFile as execFile3 } from "node:child_process";
-import { access } from "node:fs/promises";
-async function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-async function retryOperation(operation, retries = MAX_RETRIES, delay = RETRY_DELAY) {
-  try {
-    return await operation();
-  } catch (error2) {
-    if (retries > 0) {
-      console.error(
-        `Operation failed, retrying... (${retries} attempts remaining)`
-      );
-      await sleep(delay);
-      return retryOperation(operation, retries - 1, delay);
-    }
-    throw error2;
-  }
-}
-function clampLimit(limit) {
-  const n = Math.floor(Number(limit));
-  if (!Number.isFinite(n) || n <= 0) return 10;
-  return Math.min(n, CONFIG.MAX_MESSAGES);
-}
-async function sendMessage(phoneNumber, message2) {
-  if (!looksLikeHandle(phoneNumber)) {
-    throw new ToolFailure(
-      "bad_request",
-      `Nothing was sent: "${phoneNumber}" is a name, and a message needs a phone number or email address. Read their conversation to get it, or look the name up in Contacts.`
-    );
-  }
-  const buddy = escapeAppleScriptString(phoneNumber);
-  const body = escapeAppleScriptString(message2);
-  try {
-    return await runAppleScript(`
-tell application "Messages"
-    set targetService to 1st service whose service type = iMessage
-    set targetBuddy to buddy "${buddy}"
-    send "${body}" to targetBuddy
-end tell`);
-  } catch (error2) {
-    throwAppleFailure(error2, MESSAGES_SEND_SUMMARIES);
-  }
-}
-function throwMessagesDbFailure(error2, summary) {
-  if (error2 instanceof ToolFailure) throw error2;
-  const body = rawBody(error2);
-  const text = body.toLowerCase();
-  const code = error2?.code;
-  if (isPermissionDenial(error2) || code === "EACCES" || code === "EPERM" || text.includes("unable to open database file") || text.includes("authorization denied") || text.includes("operation not permitted")) {
-    throw new ToolFailure("permission_denied", MESSAGES_READ_DENIED, body);
-  }
-  if (code === "ENOENT" && !text.includes("sqlite3")) {
-    throw new ToolFailure(
-      "not_found",
-      `Could not read your message history: there is no Messages database at ${CHAT_DB2}.`,
-      body
-    );
-  }
-  throw new ToolFailure("database_error", summary, body);
-}
-async function ensureMessagesDBAccess() {
-  try {
-    await access(CHAT_DB2);
-  } catch (error2) {
-    throwMessagesDbFailure(error2, MESSAGES_READ_FAILED);
-  }
-  try {
-    await execFileAsync3("sqlite3", [CHAT_DB2, "SELECT 1;"]);
-  } catch (error2) {
-    throwMessagesDbFailure(error2, MESSAGES_READ_FAILED);
-  }
-}
-function decodeAttributedBody(hexString) {
-  const blob = Buffer.from(hexString, "hex");
-  const text = typedstreamText(blob) ?? "";
-  const url = text.match(/(https?:\/\/[^\s<"]+)/)?.[1];
-  return { text, url };
-}
-async function getAttachmentPaths(messageId) {
-  if (!Number.isInteger(messageId)) {
-    throw new ToolFailure(
-      "internal_error",
-      "Could not read the message attachments: the message id was not a number.",
-      String(messageId)
-    );
-  }
-  const query = `
-            SELECT filename
-            FROM attachment
-            INNER JOIN message_attachment_join
-            ON attachment.ROWID = message_attachment_join.attachment_id
-            WHERE message_attachment_join.message_id = ${messageId}
-        `;
-  let stdout;
-  try {
-    ({ stdout } = await execFileAsync3("sqlite3", ["-json", CHAT_DB2, query]));
-  } catch (error2) {
-    throwMessagesDbFailure(
-      error2,
-      "Could not read the message attachments."
-    );
-  }
-  if (!stdout.trim()) return [];
-  try {
-    const attachments = JSON.parse(stdout);
-    return attachments.map((a) => a.filename).filter(Boolean);
-  } catch (error2) {
-    throw new ToolFailure(
-      "database_error",
-      "Could not read the message attachments: sqlite3 returned something that is not JSON.",
-      rawBody(error2)
-    );
-  }
-}
-function conversationWhere(phoneList) {
-  return `WHERE h.id IN (${phoneList})
-                AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL OR m.cache_has_attachments = 1)
-                AND m.is_from_me IS NOT NULL  -- Ensure it's a real message
-                AND m.item_type = 0  -- Regular messages only
-                AND m.is_audio_message = 0  -- Skip audio messages`;
-}
-async function countMessagesWith(phoneNumber) {
-  try {
-    const phoneFormats = handleCandidates(phoneNumber);
-    if (phoneFormats.length === 0) return 0;
-    const phoneList = phoneFormats.map((p) => `'${escapeSqlString(p)}'`).join(",");
-    const { stdout } = await retryOperation(
-      () => execFileAsync3("sqlite3", [
-        "-json",
-        CHAT_DB2,
-        `SELECT count(*) as n FROM message m INNER JOIN handle h ON h.ROWID = m.handle_id ` + conversationWhere(phoneList)
-      ])
-    );
-    const rows = JSON.parse(stdout || "[]");
-    return rows[0]?.n ?? 0;
-  } catch {
-    return 0;
-  }
-}
-async function readMessages(phoneNumber, limit = 10) {
-  try {
-    const maxLimit = clampLimit(limit);
-    await ensureMessagesDBAccess();
-    const phoneFormats = handleCandidates(phoneNumber);
-    if (phoneFormats.length === 0) {
-      throw new ToolFailure(
-        "bad_request",
-        `Could not read your messages: "${phoneNumber}" is not a usable phone number or email address.`
-      );
-    }
-    console.error("Trying handle formats:", phoneFormats);
-    const phoneList = phoneFormats.map((p) => `'${escapeSqlString(p)}'`).join(",");
-    const query = `
-            SELECT
-                m.ROWID as message_id,
-                CASE
-                    WHEN m.text IS NOT NULL AND m.text != '' THEN m.text
-                    WHEN m.attributedBody IS NOT NULL THEN hex(m.attributedBody)
-                    ELSE NULL
-                END as content,
-                datetime(m.date/1000000000 + strftime('%s', '2001-01-01'), 'unixepoch', 'localtime') as date,
-                h.id as sender,
-                m.is_from_me,
-                m.is_audio_message,
-                m.cache_has_attachments,
-                m.subject,
-                CASE
-                    WHEN m.text IS NOT NULL AND m.text != '' THEN 0
-                    WHEN m.attributedBody IS NOT NULL THEN 1
-                    ELSE 2
-                END as content_type
-            FROM message m
-            INNER JOIN handle h ON h.ROWID = m.handle_id
-            ${conversationWhere(phoneList)}
-            ORDER BY m.date DESC
-            LIMIT ${maxLimit}
-        `;
-    const { stdout } = await retryOperation(
-      () => execFileAsync3("sqlite3", ["-json", CHAT_DB2, query])
-    );
-    if (!stdout.trim()) {
-      console.error("No messages found in database for the given phone number");
-      return [];
-    }
-    const messages = JSON.parse(stdout);
-    return await formatMessages(messages);
-  } catch (error2) {
-    throwMessagesDbFailure(error2, "Could not read your messages.");
-  }
-}
-async function countUnreadMessages() {
-  try {
-    const { stdout } = await retryOperation(
-      () => execFileAsync3("sqlite3", [
-        "-json",
-        CHAT_DB2,
-        `SELECT count(*) as n FROM message m INNER JOIN handle h ON h.ROWID = m.handle_id ${UNREAD_WHERE}`
-      ])
-    );
-    const rows = JSON.parse(stdout || "[]");
-    return rows[0]?.n ?? 0;
-  } catch {
-    return 0;
-  }
-}
-async function getUnreadMessages(limit = 10) {
-  try {
-    const maxLimit = clampLimit(limit);
-    await ensureMessagesDBAccess();
-    const query = `
-            SELECT
-                m.ROWID as message_id,
-                CASE
-                    WHEN m.text IS NOT NULL AND m.text != '' THEN m.text
-                    WHEN m.attributedBody IS NOT NULL THEN hex(m.attributedBody)
-                    ELSE NULL
-                END as content,
-                datetime(m.date/1000000000 + strftime('%s', '2001-01-01'), 'unixepoch', 'localtime') as date,
-                h.id as sender,
-                m.is_from_me,
-                m.is_audio_message,
-                m.cache_has_attachments,
-                m.subject,
-                CASE
-                    WHEN m.text IS NOT NULL AND m.text != '' THEN 0
-                    WHEN m.attributedBody IS NOT NULL THEN 1
-                    ELSE 2
-                END as content_type
-            FROM message m
-            INNER JOIN handle h ON h.ROWID = m.handle_id
-            ${UNREAD_WHERE}
-            ORDER BY m.date DESC
-            LIMIT ${maxLimit}
-        `;
-    const { stdout } = await retryOperation(
-      () => execFileAsync3("sqlite3", ["-json", CHAT_DB2, query])
-    );
-    if (!stdout.trim()) {
-      console.error("No unread messages found");
-      return [];
-    }
-    const messages = JSON.parse(stdout);
-    return await formatMessages(messages);
-  } catch (error2) {
-    throwMessagesDbFailure(error2, "Could not read your unread messages.");
-  }
-}
-async function formatMessages(messages) {
-  return Promise.all(
-    messages.filter((msg) => msg.content !== null || msg.cache_has_attachments === 1).map(async (msg) => {
-      let content = msg.content || "";
-      let url;
-      if (msg.content_type === 1) {
-        const decoded = decodeAttributedBody(content);
-        content = decoded.text;
-        url = decoded.url;
-      } else {
-        const urlMatch = content.match(/(https?:\/\/[^\s]+)/);
-        if (urlMatch) {
-          url = urlMatch[1];
-        }
-      }
-      let attachments = [];
-      if (msg.cache_has_attachments) {
-        attachments = await getAttachmentPaths(msg.message_id);
-      }
-      if (msg.subject) {
-        content = `Subject: ${msg.subject}
-${content}`;
-      }
-      const formattedMsg = {
-        content: content || "[No text content]",
-        date: new Date(msg.date).toISOString(),
-        sender: msg.sender,
-        is_from_me: Boolean(msg.is_from_me)
-      };
-      if (attachments.length > 0) {
-        formattedMsg.attachments = attachments;
-        formattedMsg.content += `
-[Attachments: ${attachments.length}]`;
-      }
-      if (url) {
-        formattedMsg.url = url;
-        formattedMsg.content += `
-[URL: ${url}]`;
-      }
-      return formattedMsg;
-    })
-  );
-}
-async function scheduleMessage(phoneNumber, message2, scheduledTime) {
-  const delay = scheduledTime.getTime() - Date.now();
-  if (delay < 0) {
-    throw new ToolFailure(
-      "bad_request",
-      "Could not schedule the message: the time given is in the past."
-    );
-  }
-  const timeoutId = setTimeout(async () => {
-    try {
-      await sendMessage(phoneNumber, message2);
-    } catch (error2) {
-      console.error(
-        `[scheduled_send_failed] The scheduled message to ${phoneNumber} was not sent.
-${rawBody(error2)}`
-      );
-    }
-  }, delay);
-  return {
-    id: timeoutId,
-    scheduledTime,
-    message: message2,
-    phoneNumber
-  };
-}
-async function recentConversations(limit = 10, resolveNames = contacts_default.namesForHandles) {
-  await ensureMessagesDBAccess();
-  const capped = clampLimit(limit);
-  try {
-    const { stdout } = await retryOperation(
-      () => execFileAsync3("sqlite3", ["-json", CHAT_DB2, `
-				SELECT
-					h.id AS handle,
-					CASE
-						WHEN m.text IS NOT NULL AND m.text != '' THEN m.text
-						WHEN m.attributedBody IS NOT NULL THEN hex(m.attributedBody)
-						ELSE ''
-					END AS body,
-					CASE WHEN m.text IS NOT NULL AND m.text != '' THEN 0 ELSE 1 END AS is_hex,
-					m.is_from_me AS from_me,
-					datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') AS date
-				FROM message m
-				JOIN handle h ON h.ROWID = m.handle_id
-				JOIN (
-					SELECT handle_id, MAX(date) AS latest
-					FROM message
-					WHERE handle_id IS NOT NULL AND item_type = 0
-					GROUP BY handle_id
-				) last ON last.handle_id = m.handle_id AND last.latest = m.date
-				WHERE m.item_type = 0
-				ORDER BY m.date DESC
-				LIMIT ${capped}`])
-    );
-    const rows = JSON.parse(stdout || "[]");
-    let names = /* @__PURE__ */ new Map();
-    try {
-      names = await resolveNames(rows.map((r) => r.handle));
-    } catch {
-    }
-    return rows.map((r) => {
-      const text = r.is_hex ? decodeAttributedBody(r.body).text : r.body;
-      return {
-        handle: r.handle,
-        name: names.get(r.handle),
-        lastMessage: text || "[no text]",
-        date: r.date,
-        fromMe: r.from_me === 1
-      };
-    });
-  } catch (error2) {
-    throwMessagesDbFailure(error2, "Could not read your conversations.");
-  }
-}
-async function searchMessages(query, limit = 10, scan2 = 5e4) {
-  await ensureMessagesDBAccess();
-  const capped = clampLimit(limit);
-  const terms = queryTerms(query);
-  if (!terms.length) return { messages: [], coverage: { scanned: 0, bounded: false } };
-  try {
-    const { stdout } = await retryOperation(
-      () => (
-        // A ROOM BIG ENOUGH FOR WHAT WE ASKED FOR. Every other query here returns tens of rows of
-        // plain text; this one returns up to `scan` rows of hex, which is a different order of size.
-        execFileAsync3(
-          "sqlite3",
-          ["-json", CHAT_DB2, `
-				SELECT
-					h.id AS sender,
-					cmj.chat_id AS chat_id,
-					CASE
-						WHEN m.text IS NOT NULL AND m.text != '' THEN m.text
-						WHEN m.attributedBody IS NOT NULL THEN hex(m.attributedBody)
-						ELSE ''
-					END AS body,
-					CASE WHEN m.text IS NOT NULL AND m.text != '' THEN 0 ELSE 1 END AS is_hex,
-					m.is_from_me AS from_me,
-					datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') AS date
-				FROM message m
-				JOIN handle h ON h.ROWID = m.handle_id
-				LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-				WHERE m.item_type = 0
-					AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL)
-				ORDER BY m.date DESC
-				LIMIT ${Math.max(capped, scan2)}`],
-          // ~1KB of hex per row measured, so 50,000 rows is ~48MB at the worst and the room is
-          // sized for it with headroom. Too small a buffer fails as a bare "could not search",
-          // which is how the first attempt died three retries deep.
-          { maxBuffer: 256 * 1024 * 1024 }
-        )
-      )
-    );
-    const rows = JSON.parse(stdout || "[]");
-    const hits = [];
-    for (const r of rows) {
-      const text = (r.is_hex ? decodeAttributedBody(r.body).text : r.body) ?? "";
-      if (!matchesQuery(text, terms)) continue;
-      if (hits.length >= capped) continue;
-      hits.push({
-        content: text,
-        date: r.date,
-        sender: r.sender,
-        is_from_me: r.from_me === 1,
-        chatId: r.chat_id ?? void 0
-      });
-    }
-    return {
-      messages: hits,
-      coverage: {
-        scanned: rows.length,
-        bounded: rows.length >= Math.max(capped, scan2),
-        oldest: rows.length ? rows[rows.length - 1].date : void 0
-      }
-    };
-  } catch (error2) {
-    throwMessagesDbFailure(error2, "Could not search your messages.");
-  }
-}
-async function lastSeenByHandle() {
-  const out = /* @__PURE__ */ new Map();
-  try {
-    const { stdout } = await retryOperation(
-      () => execFileAsync3("sqlite3", ["-json", CHAT_DB2, `
-				SELECT h.id AS handle,
-					datetime(MAX(m.date)/1000000000 + 978307200, 'unixepoch', 'localtime') AS date
-				FROM message m JOIN handle h ON h.ROWID = m.handle_id
-				WHERE m.item_type = 0
-				GROUP BY h.id`])
-    );
-    for (const r of JSON.parse(stdout || "[]")) {
-      out.set(r.handle, r.date);
-    }
-  } catch {
-  }
-  return out;
-}
-async function whoIsMeant(name, findCards = contacts_default.findContacts) {
-  let cards = [];
-  try {
-    cards = await findCards(name);
-  } catch {
-    return { kind: "cannot-ask" };
-  }
-  return resolveRecipient(cards, await lastSeenByHandle());
-}
-var execFileAsync3, CHAT_DB2, MESSAGES_SEND_SUMMARIES, MESSAGES_READ_DENIED, MESSAGES_READ_FAILED, CONFIG, MAX_RETRIES, RETRY_DELAY, UNREAD_WHERE, message_default;
-var init_message = __esm({
-  "utils/message.ts"() {
-    "use strict";
-    init_run_applescript();
-    init_native();
-    init_failure();
-    init_phone();
-    init_recipient();
-    init_typedstream();
-    init_query();
-    init_conversation();
-    init_contacts();
-    init_recipient();
-    execFileAsync3 = promisify3(execFile3);
-    CHAT_DB2 = `${process.env.HOME}/Library/Messages/chat.db`;
-    MESSAGES_SEND_SUMMARIES = {
-      denied: "Could not send the message: macOS denied control of Messages. " + grantSentence("Automation > Messages"),
-      notRunning: "Could not send the message: the Messages app could not be reached.",
-      timedOut: "Could not send the message: Messages did not answer in time.",
-      failed: "Could not send the message."
-    };
-    MESSAGES_READ_DENIED = "Could not read your message history: macOS denied access to the Messages database. " + grantSentence("Full Disk Access");
-    MESSAGES_READ_FAILED = "Could not read your message history.";
-    CONFIG = {
-      // Maximum messages to process (to avoid performance issues)
-      MAX_MESSAGES: 50,
-      // Maximum content length for previews
-      MAX_CONTENT_PREVIEW: 300,
-      // Timeout for operations
-      TIMEOUT_MS: 8e3
-    };
-    MAX_RETRIES = 3;
-    RETRY_DELAY = 1e3;
-    UNREAD_WHERE = `
-            WHERE m.is_from_me = 0  -- Only messages from others
-                AND m.is_read = 0   -- Only unread messages
-                AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL OR m.cache_has_attachments = 1)
-                AND m.is_audio_message = 0  -- Skip audio messages
-                AND m.item_type = 0  -- Regular messages only`;
-    message_default = {
-      /** The hard ceiling on one read, so a caller can say "50 is the most" instead of
-       *  advising somebody to ask for a hundred and hand them fifty again. */
-      maxMessages: () => CONFIG.MAX_MESSAGES,
-      countUnreadMessages,
-      countMessagesWith,
-      sendMessage,
-      // THE CONVERSATION LAYER, reached through the same module the tool already loads, so index.ts does
-      // not grow a second way of getting at messages.
-      conversationsNamed,
-      conversationsForHandle,
-      listConversations,
-      readConversation,
-      readMessages,
-      scheduleMessage,
-      getUnreadMessages,
-      recentConversations,
-      searchMessages,
-      whoIsMeant,
-      lastSeenByHandle
-    };
-  }
-});
-
 // utils/reminders.ts
 var reminders_exports = {};
 __export(reminders_exports, {
@@ -12534,6 +12549,7 @@ ${cards.map(contactLine).join("\n")}`;
 
 // index.ts
 init_recipient();
+init_conversation();
 
 // utils/showing.ts
 function showing(shown, total, noun, ofWhat = "", ceiling = 0) {
@@ -19537,7 +19553,7 @@ var Server = class extends Protocol {
 };
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
-import process2 from "node:process";
+import process3 from "node:process";
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/shared/stdio.js
 var ReadBuffer = class {
@@ -19569,7 +19585,7 @@ function serializeMessage(message2) {
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
 var StdioServerTransport = class {
-  constructor(_stdin = process2.stdin, _stdout = process2.stdout) {
+  constructor(_stdin = process3.stdin, _stdout = process3.stdout) {
     this._stdin = _stdin;
     this._stdout = _stdout;
     this._readBuffer = new ReadBuffer();
@@ -20151,7 +20167,62 @@ ${note.content}`).join("\n\n") + trimmed : `No notes found for "${args.searchTex
                     "Could not send the message: a phone number and a message are both required."
                   );
                 }
-                await messageModule.sendMessage(args.phoneNumber, args.message);
+                let target = args.phoneNumber;
+                let intoChat;
+                if (!looksLikeHandle(target)) {
+                  const names = namesAsked(target);
+                  if (names.length === 1) {
+                    const who = await messageModule.whoIsMeant(target);
+                    if (who.kind === "cannot-ask") {
+                      return failureResult(
+                        "permission_denied",
+                        `Nothing was sent: "${target}" could not be looked up because your contacts could not be read. Enable Maestro under System Settings > Privacy & Security > Contacts, or send to their number.`
+                      );
+                    }
+                    if (who.kind === "unknown") {
+                      return failureResult(
+                        "not_found",
+                        `Nothing was sent: your contacts have nobody called "${target}". Send to their number, or list recent conversations to find them.`
+                      );
+                    }
+                    if (who.kind === "several") {
+                      return {
+                        content: [{
+                          type: "text",
+                          text: `Nothing was sent yet: more than one person is called "${target}":
+` + who.candidates.map(
+                            (c) => `  ${c.name} \u2014 ${c.handles[0]}` + (c.lastSeen ? `, last in touch ${c.lastSeen}` : ", never in touch")
+                          ).join("\n") + "\nSend again with the number of the one you mean."
+                        }],
+                        isError: false
+                      };
+                    }
+                    target = who.handles[0];
+                  } else {
+                    const found = await messageModule.conversationsNamed(
+                      target,
+                      (await loadModule("contacts")).findContacts
+                    );
+                    if (found.kind === "cannot-ask" || found.kind === "unknown" || found.kind === "no-thread") {
+                      return failureResult(
+                        "not_found",
+                        `Nothing was sent: no single conversation with ${names.join(" and ")} could be identified. Send to one person's number instead.`
+                      );
+                    }
+                    if (found.others.length) {
+                      return {
+                        content: [{
+                          type: "text",
+                          text: `Nothing was sent yet: ${names.join(" and ")} share ${found.others.length + 1} conversations, and a message must not go to the wrong one. Send to one person's number instead.`
+                        }],
+                        isError: false
+                      };
+                    }
+                    intoChat = found.conversation.guid;
+                  }
+                }
+                if (intoChat) await messageModule.sendToConversation(intoChat, args.message);
+                else await messageModule.sendMessage(target, args.message);
                 return {
                   content: [
                     {

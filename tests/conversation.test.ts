@@ -21,11 +21,11 @@ describe("the names in a request", () => {
 describe("finding a conversation by who is in it", () => {
 	test("a group is found by every person in it, and the newest wins", async () => {
 		const fixture = [
-			{ chat_id: 417, style: 43, title: null, participants: "+1408|+1510",
+			{ chat_id: 417, guid: "any;+;g417", style: 43, title: null, participants: "+1408|+1510",
 				from_me: 0, body: "recent one", is_hex: 0, date: "2026-09-02 21:27:39" },
-			{ chat_id: 359, style: 43, title: null, participants: "+1347|+1408|+1510",
+			{ chat_id: 359, guid: "any;+;g359", style: 43, title: null, participants: "+1347|+1408|+1510",
 				from_me: 0, body: "older one", is_hex: 0, date: "2026-08-01 10:00:00" },
-			{ chat_id: 54, style: 45, title: null, participants: "+3367",
+			{ chat_id: 54, guid: "any;-;g54", style: 45, title: null, participants: "+3367",
 				from_me: 1, body: "somebody else", is_hex: 0, date: "2026-09-02 21:46:07" },
 		];
 		const rows = async () => fixture;

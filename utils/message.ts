@@ -107,6 +107,25 @@ function clampLimit(limit: number): number {
  * name is ambiguous, because a read is reversible; a send is not, and the wrong Caroline gets a message
  * meant for somebody else. So the caller is told where to get a handle instead.
  */
+/**
+ * Send into one existing conversation, addressed by its chat guid.
+ *
+ * THE ONLY WAY TO REPLY TO A GROUP. `buddy` addresses a person, and a group is not a person, so before
+ * this there was no way to answer three people at once in the thread they were talking in.
+ */
+async function sendToConversation(guid: string, message: string) {
+	const body = escapeAppleScriptString(message);
+	const chat = escapeAppleScriptString(guid);
+	try {
+		return await runAppleScript(`
+tell application "Messages"
+    send "${body}" to chat id "${chat}"
+end tell`);
+	} catch (error) {
+		throwAppleFailure(error, MESSAGES_SEND_SUMMARIES);
+	}
+}
+
 async function sendMessage(phoneNumber: string, message: string) {
 	if (!looksLikeHandle(phoneNumber)) {
 		throw new ToolFailure(
@@ -805,6 +824,8 @@ export default {
 	// not grow a second way of getting at messages.
 	conversationsNamed,
 	conversationsForHandle,
+	sendToConversation,
+	whoIsMeant,
 	listConversations,
 	readConversation,
 	readMessages,
@@ -812,6 +833,5 @@ export default {
 	getUnreadMessages,
 	recentConversations,
 	searchMessages,
-	whoIsMeant,
 	lastSeenByHandle,
 };

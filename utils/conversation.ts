@@ -30,6 +30,9 @@ const CHAT_DB = `${process.env.HOME}/Library/Messages/chat.db`;
 export interface Conversation {
 	/** chat.ROWID: stable on this Mac, and what `read` takes to open the thread again. */
 	chatId: number;
+	/** chat.guid, which is what AppleScript addresses. A GROUP has no handle to send to, so this is
+	 *  the only way to reply into one. */
+	guid: string;
 	isGroup: boolean;
 	/** Every handle in the thread, excluding the user themselves (chat.db does not list them). */
 	participants: string[];
@@ -52,6 +55,7 @@ const LATEST_PER_CHAT = `
 
 const CHAT_COLUMNS = `
 	c.ROWID AS chat_id,
+	c.guid AS guid,
 	c.style AS style,
 	c.display_name AS title,
 	(SELECT GROUP_CONCAT(h.id, '|') FROM chat_handle_join chj
@@ -66,7 +70,7 @@ const CHAT_COLUMNS = `
 	datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') AS date`;
 
 export interface ChatRow {
-	chat_id: number; style: number; title: string | null; participants: string | null;
+	chat_id: number; guid: string; style: number; title: string | null; participants: string | null;
 	from_me: number; body: string; is_hex: number; date: string;
 }
 
@@ -74,6 +78,7 @@ function toConversation(r: ChatRow): Conversation {
 	const body = r.is_hex ? (decodeAttributedBody(r.body).text ?? "") : (r.body ?? "");
 	return {
 		chatId: r.chat_id,
+		guid: r.guid,
 		// 43 is a group thread, 45 is one-to-one. Participant COUNT is not the test: a group can lose
 		// members down to one and is still a group.
 		isGroup: r.style === 43,
