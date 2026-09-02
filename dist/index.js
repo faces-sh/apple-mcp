@@ -3801,19 +3801,20 @@ async function conversationsForHandle(handle, rows = sqlite) {
   const forms = handleCandidates(handle);
   return forms.length ? conversationsWith([forms], rows) : [];
 }
-async function conversationsNamed(raw, findCards, rows = sqlite) {
+async function conversationsNamed(raw, resolveOne, rows = sqlite) {
   const names = namesAsked(raw);
   if (!names.length) return { kind: "unknown", missing: [] };
   const handleSets = [];
   const missing = [];
   for (const name of names) {
-    let cards;
-    try {
-      cards = await findCards(name);
-    } catch {
-      return { kind: "cannot-ask" };
+    const who = await resolveOne(name);
+    if (who.kind === "cannot-ask") return { kind: "cannot-ask" };
+    if (who.kind === "several") return { kind: "several-people", name, candidates: who.candidates };
+    if (who.kind === "unknown") {
+      missing.push(name);
+      continue;
     }
-    const handles = cards.flatMap((c) => [...c.phones, ...c.emails]).map((h) => h.trim()).filter(Boolean);
+    const handles = who.handles.map((h) => h.trim()).filter(Boolean);
     if (!handles.length) missing.push(name);
     else handleSets.push(handles);
   }
@@ -20201,9 +20202,9 @@ ${note.content}`).join("\n\n") + trimmed : `No notes found for "${args.searchTex
                   } else {
                     const found = await messageModule.conversationsNamed(
                       target,
-                      (await loadModule("contacts")).findContacts
+                      messageModule.whoIsMeant
                     );
-                    if (found.kind === "cannot-ask" || found.kind === "unknown" || found.kind === "no-thread") {
+                    if (found.kind === "cannot-ask" || found.kind === "unknown" || found.kind === "no-thread" || found.kind === "several-people") {
                       return failureResult(
                         "not_found",
                         `Nothing was sent: no single conversation with ${names.join(" and ")} could be identified. Send to one person's number instead.`
@@ -20245,7 +20246,7 @@ ${note.content}`).join("\n\n") + trimmed : `No notes found for "${args.searchTex
                   const contactsForNames = await loadModule("contacts");
                   const found = await messageModule.conversationsNamed(
                     handle,
-                    contactsForNames.findContacts
+                    messageModule.whoIsMeant
                   );
                   if (found.kind === "cannot-ask") {
                     return failureResult(
@@ -20258,6 +20259,18 @@ ${note.content}`).join("\n\n") + trimmed : `No notes found for "${args.searchTex
                       "not_found",
                       `Your contacts have nobody called "${found.missing.join('", "')}", so no conversation could be looked up. This does NOT mean they have not written: a number with no contact card still shows up in your conversations. List recent conversations to see who has been in touch, or search for a word from the message.`
                     );
+                  }
+                  if (found.kind === "several-people") {
+                    return {
+                      content: [{
+                        type: "text",
+                        text: `More than one person is called "${found.name}":
+` + found.candidates.map(
+                          (c) => `  ${c.name} \u2014 ${c.handles[0]}` + (c.lastSeen ? `, last in touch ${c.lastSeen}` : ", never in touch")
+                        ).join("\n") + "\nRead again with the number of the one you mean."
+                      }],
+                      isError: false
+                    };
                   }
                   if (found.kind === "no-thread") {
                     return failureResult(

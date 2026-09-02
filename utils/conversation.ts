@@ -221,6 +221,13 @@ export type ConversationSearch =
 	| { kind: "no-thread"; who: string[] }
 	/** Contacts was read and has nobody by these names. NOT "they never wrote to you". */
 	| { kind: "unknown"; missing: string[] }
+	/**
+	 * One of the names fits more than one PERSON, so nothing is opened until somebody picks.
+	 *
+	 * This is not the same as several conversations, which is a default. Several PEOPLE is a question,
+	 * because the branches lead to different humans.
+	 */
+	| { kind: "several-people"; name: string; candidates: { name: string; handles: string[]; lastSeen?: string }[] }
 	/** Contacts could not be read at all, so nothing is known either way. */
 	| { kind: "cannot-ask" };
 
@@ -238,7 +245,22 @@ export type ConversationSearch =
  */
 export async function conversationsNamed(
 	raw: string,
-	findCards: (q: string) => Promise<{ name: string; phones: string[]; emails: string[] }[]>,
+	/**
+	 * Which ONE person a name means. `whoIsMeant`, which ranks by who has been in touch and returns
+	 * `several` rather than choosing between two humans.
+	 *
+	 * THIS USED TO UNION THE HANDLES OF EVERY MATCHING CARD, and that was a real leak, found by driving
+	 * the app: Contacts matches loosely, so looking up "Troy Conrad Therrien" also returned the card for
+	 * "Linda Therrien", both people's numbers were poured into one set, and reading the owner's own
+	 * conversation opened his mother's. On a send it would have delivered to her. Resolving a name to a
+	 * PERSON is solved next door and asks when it cannot tell; there was never a reason for a second,
+	 * worse copy of it here.
+	 */
+	resolveOne: (name: string) => Promise<
+		| { kind: "one"; name: string; handles: string[] }
+		| { kind: "several"; candidates: { name: string; handles: string[]; lastSeen?: string }[] }
+		| { kind: "unknown" }
+		| { kind: "cannot-ask" }>,
 	rows: ChatRows = sqlite,
 ): Promise<ConversationSearch> {
 	const names = namesAsked(raw);
@@ -246,14 +268,11 @@ export async function conversationsNamed(
 	const handleSets: string[][] = [];
 	const missing: string[] = [];
 	for (const name of names) {
-		let cards: { name: string; phones: string[]; emails: string[] }[];
-		try {
-			cards = await findCards(name);
-		} catch {
-			return { kind: "cannot-ask" };
-		}
-		const handles = cards.flatMap((c) => [...c.phones, ...c.emails])
-			.map((h) => h.trim()).filter(Boolean);
+		const who = await resolveOne(name);
+		if (who.kind === "cannot-ask") return { kind: "cannot-ask" };
+		if (who.kind === "several") return { kind: "several-people", name, candidates: who.candidates };
+		if (who.kind === "unknown") { missing.push(name); continue; }
+		const handles = who.handles.map((h) => h.trim()).filter(Boolean);
 		if (!handles.length) missing.push(name);
 		else handleSets.push(handles);
 	}

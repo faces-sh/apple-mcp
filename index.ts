@@ -570,9 +570,9 @@ function initServer() {
 										target = who.handles[0]!;
 									} else {
 										const found = await messageModule.conversationsNamed(
-											target, (await loadModule("contacts")).findContacts);
+											target, messageModule.whoIsMeant);
 										if (found.kind === "cannot-ask" || found.kind === "unknown"
-											|| found.kind === "no-thread") {
+											|| found.kind === "no-thread" || found.kind === "several-people") {
 											return failureResult(
 												"not_found",
 												`Nothing was sent: no single conversation with ${names.join(" and ")} `
@@ -629,7 +629,7 @@ function initServer() {
 									// them: "the thread with Shivani and Hamilton" is every name present.
 									const contactsForNames = await loadModule("contacts");
 									const found = await messageModule.conversationsNamed(
-										handle, contactsForNames.findContacts);
+										handle, messageModule.whoIsMeant);
 									if (found.kind === "cannot-ask") {
 										// NOT "nobody is called that": the book was never opened. The
 										// person can act on this one, which is the whole difference.
@@ -661,6 +661,23 @@ function initServer() {
 											+ "in your conversations. List recent conversations to see who has "
 											+ "been in touch, or search for a word from the message.",
 										);
+									}
+									if (found.kind === "several-people") {
+										// TWO PEOPLE, NOT TWO THREADS. Choosing between threads is a
+										// default; choosing between humans is a question, and answering it
+										// wrong opens somebody else's conversation.
+										return {
+											content: [{
+												type: "text",
+												text: `More than one person is called "${found.name}":\n`
+													+ found.candidates.map((c) =>
+														`  ${c.name} — ${c.handles[0]}`
+														+ (c.lastSeen ? `, last in touch ${c.lastSeen}` : ", never in touch"),
+													).join("\n")
+													+ "\nRead again with the number of the one you mean.",
+											}],
+											isError: false,
+										};
 									}
 									if (found.kind === "no-thread") {
 										// A REAL ABSENCE, and the only branch here entitled to state one:
