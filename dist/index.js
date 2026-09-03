@@ -2689,6 +2689,7 @@ function handleCandidates(input) {
 function sendableHandle(input) {
   const trimmed = input.trim();
   if (!trimmed || isEmailHandle(trimmed)) return trimmed;
+  if (!trimmed.startsWith("+")) return trimmed;
   const e1642 = handleCandidates(trimmed).find((h) => h.startsWith("+"));
   return e1642 ?? trimmed;
 }

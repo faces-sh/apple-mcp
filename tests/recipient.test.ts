@@ -139,12 +139,23 @@ describe("which of one person's handles to use", () => {
 // identifier is that literal string, mark the message error 22, and crash one second later in IMCore
 // sorting its chats. Twice, on the two sends that used that spelling, and never on an E.164 one.
 describe("the spelling a send hands to Messages", () => {
-	test("a formatted number becomes E.164", () => {
-		expect(sendableHandle("(604) 730-4051")).toBe("+16047304051");
-		expect(sendableHandle("604-730-4051")).toBe("+16047304051");
+	// THE BUG THIS REPLACES, which I shipped and which reached a real person's thread. The first version
+	// parsed a bare national number against the MAC'S region. On a machine in Paris, the Canadian home
+	// number "(604) 730-4051" became "+336047304051" and a message went to France.
+	test("a bare national number is NEVER given a country", () => {
+		const before = process.env.APPLE_REGION;
+		process.env.APPLE_REGION = "FR";
+		try {
+			expect(sendableHandle("(604) 730-4051")).toBe("(604) 730-4051");
+			expect(sendableHandle("604-730-4051")).toBe("604-730-4051");
+		} finally {
+			if (before === undefined) delete process.env.APPLE_REGION;
+			else process.env.APPLE_REGION = before;
+		}
 	});
 
-	test("an E.164 number is already right", () => {
+	test("a number that states its country is tidied to E.164", () => {
+		expect(sendableHandle("+1 (604) 657-1752")).toBe("+16046571752");
 		expect(sendableHandle("+16046571752")).toBe("+16046571752");
 	});
 
