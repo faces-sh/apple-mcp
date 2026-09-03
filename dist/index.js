@@ -3920,8 +3920,19 @@ async function listConversations(limit = 10, rows = sqlite) {
 		ORDER BY m.date DESC
 		LIMIT ${capped}`)).map(toConversation);
 }
-async function conversationsWith(handleSets, rows = sqlite) {
-  const wanted = handleSets.map((set) => new Set(set.map((h) => h.trim().toLowerCase()).filter(Boolean))).filter((set) => set.size > 0);
+async function conversationsWith(handleSets, rows = sqlite, knownIds = sqliteIds) {
+  const known = await knownIds();
+  const wanted = handleSets.map((set) => {
+    const ids = /* @__PURE__ */ new Set();
+    for (const h of set) {
+      const trimmed = h.trim();
+      if (!trimmed) continue;
+      ids.add(trimmed.toLowerCase());
+      const match = matchKnownHandles(trimmed, known);
+      if (match.kind === "ids") for (const id of match.ids) ids.add(id.toLowerCase());
+    }
+    return ids;
+  }).filter((set) => set.size > 0);
   if (!wanted.length) return [];
   const all = (await rows(`
 		SELECT ${CHAT_COLUMNS}
@@ -3974,9 +3985,9 @@ function namesAsked(raw) {
 async function conversationsForHandle(handle, rows = sqlite, knownIds = sqliteIds) {
   const match = matchKnownHandles(handle, await knownIds());
   if (match.kind !== "ids") return [];
-  return conversationsWith([match.ids], rows);
+  return conversationsWith([match.ids], rows, knownIds);
 }
-async function conversationsNamed(raw, resolveOne, rows = sqlite) {
+async function conversationsNamed(raw, resolveOne, rows = sqlite, knownIds = sqliteIds) {
   const names = namesAsked(raw);
   if (!names.length) return { kind: "unknown", missing: [] };
   const handleSets = [];
@@ -3994,7 +4005,7 @@ async function conversationsNamed(raw, resolveOne, rows = sqlite) {
     else handleSets.push(handles);
   }
   if (missing.length) return { kind: "unknown", missing };
-  const found = await conversationsWith(handleSets, rows);
+  const found = await conversationsWith(handleSets, rows, knownIds);
   if (!found.length) return { kind: "no-thread", who: names };
   return { kind: "one", conversation: found[0], others: found.slice(1) };
 }

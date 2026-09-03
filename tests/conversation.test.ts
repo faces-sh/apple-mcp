@@ -75,3 +75,38 @@ describe("a name means ONE person, never a pile of them", () => {
 		expect(found.others.length).toBe(0);
 	});
 });
+
+// THE TWO SIDES DO NOT SPELL A NUMBER THE SAME WAY, and every fixture here now says so. A contact card
+// returns what the person TYPED ("+1 (604) 657-1752"); chat.db stores E.164 ("+16046571752"). Matching
+// participants by lowercased exact string therefore found NOTHING when a name was resolved: somebody's
+// 7,689-message thread came back as "no conversation holds them", which is a false statement about their
+// messages. It survived every earlier test because the fixtures were written in chat.db's spelling, and
+// because `conversationsForHandle` next door normalised while this path did not.
+describe("a card's spelling still finds the thread", () => {
+  const fixture = [
+    { chat_id: 60, guid: "any;-;+16046571752", style: 45, title: null, participants: "+16046571752",
+      from_me: 0, body: "from mum", is_hex: 0, date: "2026-09-01 19:04:05" },
+    { chat_id: 54, guid: "any;-;+33671322652", style: 45, title: null, participants: "+33671322652",
+      from_me: 0, body: "somebody else", is_hex: 0, date: "2026-09-02 21:46:07" },
+  ];
+  const rows = async () => fixture;
+  const known = async () => ["+16046571752", "+33671322652"];
+
+  test("a formatted card number matches the E.164 handle in the thread", async () => {
+    const found = await conversationsWith([["+1 (604) 657-1752"]], rows, known);
+    expect(found.map((c) => c.chatId)).toEqual([60]);
+  });
+
+  test("and resolving a NAME reaches the same thread", async () => {
+    const resolveOne = async () => ({
+      kind: "one" as const, name: "Linda Therrien", handles: ["+1 (604) 657-1752", "(604) 730-4051"],
+    });
+    const r: any = await conversationsNamed("Linda Therrien", resolveOne, rows, known);
+    expect(r.kind).toBe("one");
+    expect(r.conversation.chatId).toBe(60);
+  });
+
+  test("a number belonging to nobody here still matches nothing", async () => {
+    expect(await conversationsWith([["+15559999999"]], rows, known)).toEqual([]);
+  });
+});

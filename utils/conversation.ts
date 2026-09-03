@@ -149,9 +149,31 @@ export async function listConversations(limit = 10, rows: ChatRows = sqlite): Pr
 export async function conversationsWith(
 	handleSets: string[][],
 	rows: ChatRows = sqlite,
+	knownIds: KnownIds = sqliteIds,
 ): Promise<Conversation[]> {
+	// MATCHED THROUGH THE REAL HANDLE LIST, because the two sides do not spell a number the same way.
+	//
+	// This compared participants by lowercased exact string. Contact cards give back what the person
+	// TYPED, "+1 (604) 657-1752"; chat.db stores E.164. So reading by NAME resolved the person, found
+	// her handles, and then matched nothing: her 7,689-message thread came back as `no-thread`, which
+	// is a false statement about somebody's messages and the exact failure this file exists to prevent.
+	// It survived every test because the model happened to pass raw numbers, and `conversationsForHandle`
+	// next door normalises while this did not: the same question, two implementations, one wrong.
+	const known = await knownIds();
 	const wanted = handleSets
-		.map((set) => new Set(set.map((h) => h.trim().toLowerCase()).filter(Boolean)))
+		.map((set) => {
+			const ids = new Set<string>();
+			for (const h of set) {
+				const trimmed = h.trim();
+				if (!trimmed) continue;
+				ids.add(trimmed.toLowerCase());
+				const match = matchKnownHandles(trimmed, known);
+				// An AMBIGUOUS handle contributes nothing rather than everything it might be: see
+				// `matchKnownHandles`. Reading a stranger's thread is worse than finding none.
+				if (match.kind === "ids") for (const id of match.ids) ids.add(id.toLowerCase());
+			}
+			return ids;
+		})
 		.filter((set) => set.size > 0);
 	if (!wanted.length) return [];
 	const all = (await rows(`
@@ -240,7 +262,7 @@ export async function conversationsForHandle(
 	// real French subscriber whose thread would otherwise have been shown as yours.
 	const match = matchKnownHandles(handle, await knownIds());
 	if (match.kind !== "ids") return [];
-	return conversationsWith([match.ids], rows);
+	return conversationsWith([match.ids], rows, knownIds);
 }
 
 /** What a name, or several names, turned out to mean. */
@@ -301,6 +323,7 @@ export async function conversationsNamed(
 		| { kind: "unknown" }
 		| { kind: "cannot-ask" }>,
 	rows: ChatRows = sqlite,
+	knownIds: KnownIds = sqliteIds,
 ): Promise<ConversationSearch> {
 	const names = namesAsked(raw);
 	if (!names.length) return { kind: "unknown", missing: [] };
@@ -316,7 +339,7 @@ export async function conversationsNamed(
 		else handleSets.push(handles);
 	}
 	if (missing.length) return { kind: "unknown", missing };
-	const found = await conversationsWith(handleSets, rows);
+	const found = await conversationsWith(handleSets, rows, knownIds);
 	if (!found.length) return { kind: "no-thread", who: names };
 	// `conversationsWith` returns most recently active first, so the head is the default.
 	return { kind: "one", conversation: found[0]!, others: found.slice(1) };
