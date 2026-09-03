@@ -2686,6 +2686,37 @@ function handleCandidates(input) {
   }
   return Array.from(set).filter(Boolean);
 }
+function digitsOf(handle) {
+  return handle.replace(/\D/g, "");
+}
+function matchKnownHandles(input, known) {
+  const uniq = (xs) => Array.from(new Set(xs));
+  const trimmed = input.trim();
+  if (!trimmed) return { kind: "none" };
+  if (isEmailHandle(trimmed)) {
+    const want2 = trimmed.toLowerCase();
+    const ids = known.filter((k) => k.trim().toLowerCase() === want2);
+    return ids.length ? { kind: "ids", ids: uniq(ids) } : { kind: "none" };
+  }
+  const exact = known.filter((k) => k.trim() === trimmed);
+  if (exact.length) return { kind: "ids", ids: uniq(exact) };
+  const want = digitsOf(trimmed);
+  if (!want) {
+    const named = known.filter((k) => k.trim().toLowerCase() === trimmed.toLowerCase());
+    return named.length ? { kind: "ids", ids: uniq(named) } : { kind: "none" };
+  }
+  const same = known.filter((k) => digitsOf(k) === want);
+  if (same.length) return { kind: "ids", ids: uniq(same) };
+  const loose = known.filter((k) => {
+    const d = digitsOf(k);
+    if (!d || d === want) return false;
+    const [long, short] = d.length >= want.length ? [d, want] : [want, d];
+    return short.length >= 7 && long.endsWith(short);
+  });
+  if (!loose.length) return { kind: "none" };
+  const distinct = new Set(loose.map(digitsOf));
+  return distinct.size === 1 ? { kind: "ids", ids: uniq(loose) } : { kind: "ambiguous", ids: uniq(loose) };
+}
 function sendableHandle(input) {
   const trimmed = input.trim();
   if (!trimmed || isEmailHandle(trimmed)) return trimmed;
@@ -3273,7 +3304,7 @@ function clampLimit(limit) {
 }
 async function sendFailure(handle, sentAfter, scope = {}) {
   const threshold = Math.round((sentAfter / 1e3 - 978307200 - 2) * 1e9);
-  const where = scope.chatGuid ? `cmj.chat_id IN (SELECT ROWID FROM chat WHERE guid = '${escapeSqlString(scope.chatGuid)}')` : `h.id IN (${[handle, ...handleCandidates(handle)].map((c) => `'${escapeSqlString(c)}'`).join(",") || "''"})`;
+  const where = scope.chatGuid ? `cmj.chat_id IN (SELECT ROWID FROM chat WHERE guid = '${escapeSqlString(scope.chatGuid)}')` : `h.id IN (${(scope.ids ?? []).map((c) => `'${escapeSqlString(c)}'`).join(",") || "''"})`;
   for (let attempt = 0; attempt < 10; attempt++) {
     await new Promise((r) => setTimeout(r, 500));
     try {
@@ -3297,6 +3328,18 @@ async function sendFailure(handle, sentAfter, scope = {}) {
   return `No record of the message to ${handle} was written by Messages, so it does not appear to have been sent. Check the conversation before sending it again, to avoid sending it twice.`;
 }
 async function sendToConversation(guid2, message2) {
+  await ensureMessagesDBAccess();
+  const { stdout: liveOut } = await execFileAsync2("sqlite3", ["-json", CHAT_DB, `
+		SELECT COUNT(*) AS n FROM message m
+		JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+		JOIN chat c ON c.ROWID = cmj.chat_id
+		WHERE c.guid = '${escapeSqlString(guid2)}' AND m.item_type = 0 AND ${GENUINE_CONTACT}`]);
+  if ((JSON.parse(liveOut || "[]")[0]?.n ?? 0) === 0) {
+    throw new ToolFailure(
+      "wrong_number",
+      "Nothing was sent: no message has ever genuinely been sent or received in that conversation, so it is not a thread anybody is reachable in. Send to a number instead."
+    );
+  }
   const body = escapeAppleScriptString(message2);
   const chat = escapeAppleScriptString(guid2);
   const started = Date.now();
@@ -3314,6 +3357,7 @@ end tell`);
   }
 }
 async function sendMessage(phoneNumber, message2) {
+  await ensureMessagesDBAccess();
   if (!looksLikeHandle(phoneNumber)) {
     throw new ToolFailure(
       "bad_request",
@@ -3342,7 +3386,7 @@ tell application "Messages"
     set targetBuddy to buddy "${buddy}"
     send "${body}" to targetBuddy
 end tell`);
-    const failed = await sendFailure(target, started);
+    const failed = await sendFailure(target, started, { ids: await handleIdsFor(target) });
     if (failed) throw new ToolFailure("message_not_sent", failed);
     return out;
   } catch (error2) {
@@ -3430,7 +3474,7 @@ function conversationWhere(phoneList) {
 }
 async function countMessagesWith(phoneNumber) {
   try {
-    const phoneFormats = handleCandidates(phoneNumber);
+    const phoneFormats = await handleIdsFor(phoneNumber);
     if (phoneFormats.length === 0) return 0;
     const phoneList = phoneFormats.map((p) => `'${escapeSqlString(p)}'`).join(",");
     const { stdout } = await retryOperation(
@@ -3450,7 +3494,7 @@ async function readMessages(phoneNumber, limit = 10) {
   try {
     const maxLimit = clampLimit(limit);
     await ensureMessagesDBAccess();
-    const phoneFormats = handleCandidates(phoneNumber);
+    const phoneFormats = await handleIdsFor(phoneNumber);
     if (phoneFormats.length === 0) {
       throw new ToolFailure(
         "bad_request",
@@ -3740,6 +3784,20 @@ async function searchMessages(query, limit = 10, scan2 = 5e4) {
     throwMessagesDbFailure(error2, "Could not search your messages.");
   }
 }
+async function knownHandles() {
+  const { stdout } = await execFileAsync2("sqlite3", ["-json", CHAT_DB, "SELECT id FROM handle"]);
+  return JSON.parse(stdout || "[]").map((r) => r.id).filter(Boolean);
+}
+async function handleIdsFor(input) {
+  const match = matchKnownHandles(input, await knownHandles());
+  if (match.kind === "ambiguous") {
+    throw new ToolFailure(
+      "ambiguous_number",
+      `"${input}" could be more than one number here (${match.ids.join(", ")}), and they are in different countries. Give it with its country code, for example +1 or +33.`
+    );
+  }
+  return match.kind === "ids" ? match.ids : [];
+}
 async function lastSeenByHandle() {
   const out = /* @__PURE__ */ new Map();
   try {
@@ -3913,9 +3971,10 @@ async function readConversation(chatId, limit = 10) {
 function namesAsked(raw) {
   return raw.split(/\s*(?:,|&|\+|\band\b|\bet\b)\s*/i).map((n) => n.trim()).filter(Boolean);
 }
-async function conversationsForHandle(handle, rows = sqlite) {
-  const forms = handleCandidates(handle);
-  return forms.length ? conversationsWith([forms], rows) : [];
+async function conversationsForHandle(handle, rows = sqlite, knownIds = sqliteIds) {
+  const match = matchKnownHandles(handle, await knownIds());
+  if (match.kind !== "ids") return [];
+  return conversationsWith([match.ids], rows);
 }
 async function conversationsNamed(raw, resolveOne, rows = sqlite) {
   const names = namesAsked(raw);
@@ -3939,7 +3998,7 @@ async function conversationsNamed(raw, resolveOne, rows = sqlite) {
   if (!found.length) return { kind: "no-thread", who: names };
   return { kind: "one", conversation: found[0], others: found.slice(1) };
 }
-var execFileAsync3, CHAT_DB2, LATEST_PER_CHAT, CHAT_COLUMNS, sqlite;
+var execFileAsync3, CHAT_DB2, LATEST_PER_CHAT, CHAT_COLUMNS, sqliteIds, sqlite;
 var init_conversation = __esm({
   "utils/conversation.ts"() {
     "use strict";
@@ -3972,6 +4031,10 @@ var init_conversation = __esm({
 	END AS body,
 	CASE WHEN m.text IS NOT NULL AND m.text != '' THEN 0 ELSE 1 END AS is_hex,
 	datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') AS date`;
+    sqliteIds = async () => {
+      const { stdout } = await execFileAsync3("sqlite3", ["-json", CHAT_DB2, "SELECT id FROM handle"]);
+      return JSON.parse(stdout || "[]").map((r) => r.id).filter(Boolean);
+    };
     sqlite = async (sql) => {
       const { stdout } = await execFileAsync3(
         "sqlite3",

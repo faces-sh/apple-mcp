@@ -11,7 +11,7 @@ import {
 	escapeSqlString,
 } from "./native";
 import { rawBody } from "./failure";
-import { handleCandidates, sendableHandle } from "./phone";
+import { handleCandidates, matchKnownHandles, sendableHandle } from "./phone";
 import { unusedNumberFor } from "./wrongnumber";
 import { looksLikeHandle } from "./recipient";
 import { typedstreamText } from "./typedstream";
@@ -139,14 +139,13 @@ function clampLimit(limit: number): number {
 async function sendFailure(
 	handle: string,
 	sentAfter: number,
-	scope: { chatGuid?: string } = {},
+	scope: { chatGuid?: string; ids?: string[] } = {},
 ): Promise<string | null> {
 	// The column is apple-epoch nanoseconds. Convert ONCE, into its units, not the other way about.
 	const threshold = Math.round((sentAfter / 1000 - 978307200 - 2) * 1e9);
 	const where = scope.chatGuid
 		? `cmj.chat_id IN (SELECT ROWID FROM chat WHERE guid = '${escapeSqlString(scope.chatGuid)}')`
-		: `h.id IN (${[handle, ...handleCandidates(handle)]
-			.map((c) => `'${escapeSqlString(c)}'`).join(",") || "''"})`;
+		: `h.id IN (${(scope.ids ?? []).map((c) => `'${escapeSqlString(c)}'`).join(",") || "''"})`;
 	for (let attempt = 0; attempt < 10; attempt++) {
 		await new Promise((r) => setTimeout(r, 500));
 		try {
@@ -179,6 +178,20 @@ async function sendFailure(
 }
 
 async function sendToConversation(guid: string, message: string) {
+	await ensureMessagesDBAccess();
+	// THE SIBLING PATH RAN A CHECK THIS ONE DID NOT. Whether the wrong-number rule applied depended on
+	// how many names the caller typed: "Linda" was checked, "Linda and Troy" was not. A conversation
+	// nobody has ever actually reached is the same defect the handle path refuses, so refuse it here.
+	const { stdout: liveOut } = await execFileAsync("sqlite3", ["-json", CHAT_DB, `
+		SELECT COUNT(*) AS n FROM message m
+		JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+		JOIN chat c ON c.ROWID = cmj.chat_id
+		WHERE c.guid = '${escapeSqlString(guid)}' AND m.item_type = 0 AND ${GENUINE_CONTACT}`]);
+	if (((JSON.parse(liveOut || "[]") as { n: number }[])[0]?.n ?? 0) === 0) {
+		throw new ToolFailure("wrong_number",
+			"Nothing was sent: no message has ever genuinely been sent or received in that conversation, "
+			+ "so it is not a thread anybody is reachable in. Send to a number instead.");
+	}
 	const body = escapeAppleScriptString(message);
 	const chat = escapeAppleScriptString(guid);
 	const started = Date.now();
@@ -197,6 +210,12 @@ end tell`);
 }
 
 async function sendMessage(phoneNumber: string, message: string) {
+	// THE SEND PATH CHECKS THE STORE IS READABLE, exactly as every read does. It did not, and it is the
+	// one path where failing open is dangerous: `unusedNumberFor` returns "allowed" on an unreadable
+	// database and `sendFailure` returns "sent", so with Full Disk Access denied both safety nets were
+	// off, neither said so, and every send reported success. Reads failed loudly and sends failed open,
+	// which is backwards.
+	await ensureMessagesDBAccess();
 	if (!looksLikeHandle(phoneNumber)) {
 		throw new ToolFailure(
 			"bad_request",
@@ -228,7 +247,7 @@ tell application "Messages"
     set targetBuddy to buddy "${buddy}"
     send "${body}" to targetBuddy
 end tell`);
-		const failed = await sendFailure(target, started);
+		const failed = await sendFailure(target, started, { ids: await handleIdsFor(target) });
 		if (failed) throw new ToolFailure("message_not_sent", failed);
 		return out;
 	} catch (error) {
@@ -383,7 +402,7 @@ function conversationWhere(phoneList: string): string {
  *  we did get, and `showing` degrades to the plain form on 0. */
 async function countMessagesWith(phoneNumber: string): Promise<number> {
 	try {
-		const phoneFormats = handleCandidates(phoneNumber);
+		const phoneFormats = await handleIdsFor(phoneNumber);
 		if (phoneFormats.length === 0) return 0;
 		const phoneList = phoneFormats.map((p) => `'${escapeSqlString(p)}'`).join(",");
 		const { stdout } = await retryOperation(() =>
@@ -405,7 +424,7 @@ async function readMessages(phoneNumber: string, limit = 10): Promise<Message[]>
 		await ensureMessagesDBAccess(); // throws ToolFailure when the store is unreadable
 
 		// All handle forms (E.164 / national digits / email) to match chat.db's handle.id
-		const phoneFormats = handleCandidates(phoneNumber);
+		const phoneFormats = await handleIdsFor(phoneNumber);
 		if (phoneFormats.length === 0) {
 			// Nothing to look up. Returning [] here said "no messages with that person", which is a
 			// claim about the conversation; the truth is that the handle was never usable.
@@ -874,6 +893,32 @@ async function searchMessages(
  */
 export const GENUINE_CONTACT =
 	"(m.is_from_me = 0 OR (m.is_sent = 1 AND COALESCE(m.error, 0) = 0))";
+
+/** Every handle string the message database actually holds. The only thing a match may return. */
+async function knownHandles(): Promise<string[]> {
+	const { stdout } = await execFileAsync("sqlite3", ["-json", CHAT_DB, "SELECT id FROM handle"]);
+	return (JSON.parse(stdout || "[]") as { id: string }[]).map((r) => r.id).filter(Boolean);
+}
+
+/**
+ * The stored handles that mean this address, or a refusal.
+ *
+ * NOTHING IS INVENTED HERE. Matching used to parse a bare number against the MAC'S region, so on a
+ * machine in Paris "(604) 730-4051" also produced "+336047304051", which is a real French subscriber
+ * with a real thread on this Mac. Reading it would have shown a stranger's conversation labelled as
+ * yours, and the model would then have replied into it. The country is not knowable from the digits
+ * and the Mac's own region is not evidence, so an address that fits two countries is REFUSED rather
+ * than resolved.
+ */
+async function handleIdsFor(input: string): Promise<string[]> {
+	const match = matchKnownHandles(input, await knownHandles());
+	if (match.kind === "ambiguous") {
+		throw new ToolFailure("ambiguous_number",
+			`"${input}" could be more than one number here (${match.ids.join(", ")}), and they are in `
+			+ "different countries. Give it with its country code, for example +1 or +33.");
+	}
+	return match.kind === "ids" ? match.ids : [];
+}
 
 /**
  * When each handle was last in touch. GENUINE CONTACT ONLY.

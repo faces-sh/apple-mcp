@@ -23,9 +23,10 @@ export function defaultRegion(): string {
 
 /**
  * Candidate strings to match a phone/email against Messages' stored handle (handle.id).
- *  - Email handles → [lowercased email].
- *  - Phone numbers → E.164 (libphonenumber-js; "+CC…" honoured, bare numbers use the default region)
- *    plus the national-digits and raw-cleaned variants, so a handle stored either way still matches.
+ *
+ * DEPRECATED FOR MATCHING: it invents a country. Kept only where a caller has already established that
+ * the input carries its own country code. Prefer `matchKnownHandles`, which matches against the
+ * handles that ACTUALLY EXIST and refuses when it genuinely cannot tell.
  */
 export function handleCandidates(input: string): string[] {
 	const trimmed = input.trim();
@@ -42,6 +43,78 @@ export function handleCandidates(input: string): string[] {
 		if (parsed.nationalNumber) set.add(parsed.nationalNumber); // digits sans country code
 	}
 	return Array.from(set).filter(Boolean);
+}
+
+/** Just the digits of a handle, so punctuation never decides whether two numbers are the same. */
+export function digitsOf(handle: string): string {
+	return handle.replace(/\D/g, "");
+}
+
+/** What a match against the real handle list came to. */
+export type HandleMatch =
+	/** These are the stored handles that mean this address. Usually one. */
+	| { kind: "ids"; ids: string[] }
+	/** Nothing on this Mac matches; the caller decides whether that is an error or a new contact. */
+	| { kind: "none" }
+	/**
+	 * Several DIFFERENT numbers fit, and only a country code could separate them.
+	 *
+	 * THE CASE THIS EXISTS FOR. "(604) 730-4051" is a Canadian number; "+33 6 04 73 04 051" is a real
+	 * French subscriber, and the second ends with the first. Guessing a country turned one into the
+	 * other and sent a message to France. Suffix matching alone conflates them just as badly, in the
+	 * other direction: it would read a stranger's thread and present it as yours. Neither the digits
+	 * nor the Mac's own region can settle it, so nothing here pretends to.
+	 */
+	| { kind: "ambiguous"; ids: string[] };
+
+/**
+ * Which of the handles that ACTUALLY EXIST mean the address the caller gave.
+ *
+ * NOTHING IS INVENTED. Every id returned is a string already present in the user's message database,
+ * so a match can never conjure a subscriber in another country the way parsing against the Mac's
+ * region did. Order of preference, strongest first:
+ *
+ *   1. the same string, or the same string ignoring punctuation
+ *   2. the same digits exactly
+ *   3. one is a suffix of the other by at least 7 digits, which is how a national number relates to
+ *      its own E.164 form
+ *
+ * Rule 3 is the one that can be wrong, so it is only trusted when everything it finds is the SAME
+ * number. Two different numbers matching that loosely is exactly the Canada/France collision, and it
+ * comes back `ambiguous` for the caller to refuse or ask about.
+ */
+export function matchKnownHandles(input: string, known: readonly string[]): HandleMatch {
+	const uniq = (xs: string[]) => Array.from(new Set(xs));
+	const trimmed = input.trim();
+	if (!trimmed) return { kind: "none" };
+	if (isEmailHandle(trimmed)) {
+		const want = trimmed.toLowerCase();
+		const ids = known.filter((k) => k.trim().toLowerCase() === want);
+		return ids.length ? { kind: "ids", ids: uniq(ids) } : { kind: "none" };
+	}
+	const exact = known.filter((k) => k.trim() === trimmed);
+	if (exact.length) return { kind: "ids", ids: uniq(exact) };
+
+	const want = digitsOf(trimmed);
+	if (!want) {
+		// Not a number at all: a short code or a carrier name like "Free Mobile". Only itself will do.
+		const named = known.filter((k) => k.trim().toLowerCase() === trimmed.toLowerCase());
+		return named.length ? { kind: "ids", ids: uniq(named) } : { kind: "none" };
+	}
+	const same = known.filter((k) => digitsOf(k) === want);
+	if (same.length) return { kind: "ids", ids: uniq(same) };
+
+	// SEVEN DIGITS, because a local subscriber number is seven and anything shorter starts matching
+	// unrelated people: on this machine a 4-digit rule joins short codes to real numbers.
+	const loose = known.filter((k) => {
+		const d = digitsOf(k);
+		if (!d || d === want) return false;
+		const [long, short] = d.length >= want.length ? [d, want] : [want, d];
+		return short.length >= 7 && long.endsWith(short);
+	});
+	if (!loose.length) return { kind: "none" };
+	const distinct = new Set(loose.map(digitsOf));
+	return distinct.size === 1 ? { kind: "ids", ids: uniq(loose) } : { kind: "ambiguous", ids: uniq(loose) };
 }
 
 /**

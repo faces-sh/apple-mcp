@@ -22,7 +22,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { GENUINE_CONTACT, decodeAttributedBody } from "./message";
-import { handleCandidates } from "./phone";
+import { matchKnownHandles } from "./phone";
 
 const execFileAsync = promisify(execFile);
 const CHAT_DB = `${process.env.HOME}/Library/Messages/chat.db`;
@@ -113,6 +113,14 @@ function toConversation(r: ChatRow): Conversation {
  * unrelated tests, and here it does not even work, because the binding is taken before the mock lands.
  */
 export type ChatRows = (sql: string) => Promise<ChatRow[]>;
+
+/** Every handle string the database holds. Injectable for the same reason `ChatRows` is. */
+export type KnownIds = () => Promise<string[]>;
+
+const sqliteIds: KnownIds = async () => {
+	const { stdout } = await execFileAsync("sqlite3", ["-json", CHAT_DB, "SELECT id FROM handle"]);
+	return (JSON.parse(stdout || "[]") as { id: string }[]).map((r) => r.id).filter(Boolean);
+};
 
 const sqlite: ChatRows = async (sql) => {
 	const { stdout } = await execFileAsync("sqlite3", ["-json", CHAT_DB, sql],
@@ -225,9 +233,14 @@ export function namesAsked(raw: string): string[] {
 export async function conversationsForHandle(
 	handle: string,
 	rows: ChatRows = sqlite,
+	knownIds: KnownIds = sqliteIds,
 ): Promise<Conversation[]> {
-	const forms = handleCandidates(handle);
-	return forms.length ? conversationsWith([forms], rows) : [];
+	// MATCHED AGAINST THE HANDLES THAT EXIST, never against a country this Mac guessed. See
+	// `matchKnownHandles`: a bare national number can belong to two countries, and one of them was a
+	// real French subscriber whose thread would otherwise have been shown as yours.
+	const match = matchKnownHandles(handle, await knownIds());
+	if (match.kind !== "ids") return [];
+	return conversationsWith([match.ids], rows);
 }
 
 /** What a name, or several names, turned out to mean. */
