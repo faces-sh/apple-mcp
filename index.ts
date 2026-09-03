@@ -70,10 +70,11 @@ async function readThread(
 	others: unknown[],
 	limit: number | undefined,
 	since?: string,
+	until?: string,
 ): Promise<{ content: { type: "text"; text: string }[]; isError: boolean }> {
 	const messageModule = await loadModule("message");
 	const contactsForNames = await loadModule("contacts");
-	const { messages, total } = await messageModule.readConversation(conv.chatId, limit, since);
+	const { messages, total, period } = await messageModule.readConversation(conv.chatId, limit, since, until);
 	let names = new Map<string, string>();
 	try {
 		// A name is a nicety; the messages are the answer. Kept OUTSIDE the read so a Contacts denial
@@ -92,7 +93,7 @@ async function readThread(
 		content: [{
 			type: "text",
 			text: messages.length
-				? `Showing ${messages.length} of ${total} message(s)${since ? ` since ${since}` : ""} in your `
+				? `Showing ${messages.length} of ${total} message(s)${period ?? ""} in your `
 					+ `${conv.isGroup ? "group " : ""}conversation with ${heading}`
 					+ (total > messages.length ? ", most recent first. Ask for more with limit:\n" : ", most recent first:\n")
 					+ messages.map((msg: { date: string; fromMe: boolean; sender: string; text: string }) =>
@@ -739,7 +740,7 @@ function initServer() {
 											+ "They may each have their own thread: read one name at a time.",
 										);
 									}
-									return await readThread(found.conversation, found.others, args.limit, args.since);
+									return await readThread(found.conversation, found.others, args.limit, args.since, args.until);
 								}
 								// A HANDLE GOES THROUGH THE SAME LAYER. Reading by number used to select every
 								// message that handle had ever sent, across every thread, and print it as
@@ -747,7 +748,7 @@ function initServer() {
 								// interleaved, with no reply in sight. Same rule as a name, one level down.
 								const byHandle = await messageModule.conversationsForHandle(handle);
 								if (byHandle.length) {
-									return await readThread(byHandle[0]!, byHandle.slice(1), args.limit, args.since);
+									return await readThread(byHandle[0]!, byHandle.slice(1), args.limit, args.since, args.until);
 								}
 								const messages = await messageModule.readMessages(
 									handle,
@@ -1382,6 +1383,7 @@ function isMessagesArgs(args: unknown): args is {
 	limit?: number;
 	scheduledTime?: string;
 	since?: string;
+	until?: string;
 } {
 	if (typeof args !== "object" || args === null) return false;
 
@@ -1416,8 +1418,10 @@ function isMessagesArgs(args: unknown): args is {
 
 	// Validate field types if present
 	if (phoneNumber && typeof phoneNumber !== "string") return false;
-	if ((args as { since?: unknown }).since !== undefined
-		&& typeof (args as { since?: unknown }).since !== "string") return false;
+	for (const key of ["since", "until"] as const) {
+		const v = (args as Record<string, unknown>)[key];
+		if (v !== undefined && typeof v !== "string") return false;
+	}
 	if (message && typeof message !== "string") return false;
 	if (limit && typeof limit !== "number") return false;
 	if (scheduledTime && typeof scheduledTime !== "string") return false;

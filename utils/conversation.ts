@@ -23,6 +23,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { GENUINE_CONTACT, decodeAttributedBody } from "./message";
 import { matchKnownHandles } from "./phone";
+import { periodClause, periodSaid } from "./when";
 
 const execFileAsync = promisify(execFile);
 const CHAT_DB = `${process.env.HOME}/Library/Messages/chat.db`;
@@ -208,15 +209,13 @@ export async function readConversation(
 	chatId: number,
 	limit = 10,
 	since?: string,
+	until?: string,
 ): Promise<{ messages: { sender: string; fromMe: boolean; text: string; date: string }[];
-            total: number; since?: string }> {
-	const ceiling = since ? 600 : 100;
+            total: number; period?: string }> {
+	// A PERIOD BOUNDS THE ANSWER ITSELF, so it raises the ceiling a bare limit cannot be trusted with.
+	const window = periodClause("m.date", since, until);
+	const ceiling = window ? 600 : 100;
 	const capped = Math.max(1, Math.min(Math.floor(limit) || 10, ceiling));
-	// A date the person named, as SQLite reads it. Anything it cannot parse is ignored rather than
-	// silently narrowing the answer to nothing, which would read as "they never wrote".
-	const window = since && /^\d{4}-\d{2}-\d{2}/.test(since.trim())
-		? `AND m.date > (strftime('%s','${escapeSql(since.trim().slice(0, 10))}') - 978307200) * 1000000000`
-		: "";
 	const { stdout } = await execFileAsync("sqlite3", ["-json", CHAT_DB, `
 		SELECT
 			COALESCE(h.id, '') AS sender,
@@ -245,7 +244,7 @@ export async function readConversation(
 		WHERE cmj.chat_id = ${Math.floor(chatId)} AND m.item_type = 0 ${window}`]);
 	const total = (JSON.parse(countOut || "[]") as { n: number }[])[0]?.n ?? raw.length;
 	return {
-		since: window ? since : undefined,
+		period: periodSaid(since, until) || undefined,
 		messages: raw.map((r) => ({
 			sender: r.sender,
 			fromMe: r.from_me === 1,

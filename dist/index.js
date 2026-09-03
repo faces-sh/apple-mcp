@@ -3887,6 +3887,50 @@ var init_message = __esm({
   }
 });
 
+// utils/when.ts
+function instantOf(value, edge = "start") {
+  const m = SHAPE.exec((value ?? "").trim());
+  if (!m) return null;
+  const [, y, mo, d, hh, mi, ss] = m;
+  const dateOnly = hh === void 0;
+  const at = new Date(
+    Number(y),
+    Number(mo) - 1,
+    Number(d),
+    dateOnly ? edge === "end" ? 23 : 0 : Number(hh),
+    dateOnly ? edge === "end" ? 59 : 0 : Number(mi ?? 0),
+    dateOnly ? edge === "end" ? 59 : 0 : Number(ss ?? 0),
+    dateOnly && edge === "end" ? 999 : 0
+  );
+  if (Number.isNaN(at.getTime())) return null;
+  if (at.getFullYear() !== Number(y) || at.getMonth() !== Number(mo) - 1 || at.getDate() !== Number(d)) return null;
+  return Math.round((at.getTime() / 1e3 - APPLE_EPOCH_SECONDS) * 1e9);
+}
+function periodClause(column, since, until) {
+  const from = instantOf(since, "start");
+  const to = instantOf(until, "end");
+  const parts = [];
+  if (from !== null) parts.push(`${column} >= ${from}`);
+  if (to !== null) parts.push(`${column} <= ${to}`);
+  return parts.length ? ` AND ${parts.join(" AND ")}` : "";
+}
+function periodSaid(since, until) {
+  const from = instantOf(since, "start") !== null ? since.trim() : void 0;
+  const to = instantOf(until, "end") !== null ? until.trim() : void 0;
+  if (from && to) return ` between ${from} and ${to}`;
+  if (from) return ` since ${from}`;
+  if (to) return ` up to ${to}`;
+  return "";
+}
+var SHAPE, APPLE_EPOCH_SECONDS;
+var init_when = __esm({
+  "utils/when.ts"() {
+    "use strict";
+    SHAPE = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/;
+    APPLE_EPOCH_SECONDS = 978307200;
+  }
+});
+
 // utils/conversation.ts
 import { execFile as execFile2 } from "node:child_process";
 import { promisify as promisify2 } from "node:util";
@@ -3904,9 +3948,6 @@ function toConversation(r) {
     lastDate: r.date,
     lastFromMe: r.from_me === 1
   };
-}
-function escapeSql(v) {
-  return v.replace(/'/g, "''");
 }
 async function listConversations(limit = 10, rows = sqlite) {
   const capped = Math.max(1, Math.min(Math.floor(limit) || 10, 100));
@@ -3941,10 +3982,10 @@ async function conversationsWith(handleSets, rows = sqlite, knownIds = sqliteIds
     return wanted.every((person) => [...person].some((h) => here.has(h)));
   });
 }
-async function readConversation(chatId, limit = 10, since) {
-  const ceiling = since ? 600 : 100;
+async function readConversation(chatId, limit = 10, since, until) {
+  const window = periodClause("m.date", since, until);
+  const ceiling = window ? 600 : 100;
   const capped = Math.max(1, Math.min(Math.floor(limit) || 10, ceiling));
-  const window = since && /^\d{4}-\d{2}-\d{2}/.test(since.trim()) ? `AND m.date > (strftime('%s','${escapeSql(since.trim().slice(0, 10))}') - 978307200) * 1000000000` : "";
   const { stdout } = await execFileAsync2("sqlite3", ["-json", CHAT_DB2, `
 		SELECT
 			COALESCE(h.id, '') AS sender,
@@ -3969,7 +4010,7 @@ async function readConversation(chatId, limit = 10, since) {
 		WHERE cmj.chat_id = ${Math.floor(chatId)} AND m.item_type = 0 ${window}`]);
   const total = JSON.parse(countOut || "[]")[0]?.n ?? raw.length;
   return {
-    since: window ? since : void 0,
+    period: periodSaid(since, until) || void 0,
     messages: raw.map((r) => ({
       sender: r.sender,
       fromMe: r.from_me === 1,
@@ -4015,6 +4056,7 @@ var init_conversation = __esm({
     "use strict";
     init_message();
     init_phone();
+    init_when();
     execFileAsync2 = promisify2(execFile2);
     CHAT_DB2 = `${process.env.HOME}/Library/Messages/chat.db`;
     LATEST_PER_CHAT = `
@@ -19906,7 +19948,11 @@ var MESSAGES_TOOL = {
       },
       since: {
         type: "string",
-        description: "Optional, for read: only messages on or after this date, as YYYY-MM-DD. This is how you cover a PERIOD, for example the last six months; without it a read returns only the most recent handful."
+        description: "Optional, for read: only messages on or after this, as YYYY-MM-DD or YYYY-MM-DD HH:MM. With `until` it gives a period, which is how you cover the last six months or a single month; without either, a read returns only the most recent handful."
+      },
+      until: {
+        type: "string",
+        description: "Optional, for read: only messages up to this, as YYYY-MM-DD or YYYY-MM-DD HH:MM. A plain date includes the whole of that day."
       },
       query: {
         type: "string",
@@ -20056,10 +20102,10 @@ function calendarTruncationNote(cut) {
 
 (Showing ${cut.shown} of ${cut.total} in that window. Ask for a bigger limit or a narrower window.)` : "";
 }
-async function readThread(conv, others, limit, since) {
+async function readThread(conv, others, limit, since, until) {
   const messageModule = await loadModule("message");
   const contactsForNames = await loadModule("contacts");
-  const { messages, total } = await messageModule.readConversation(conv.chatId, limit, since);
+  const { messages, total, period } = await messageModule.readConversation(conv.chatId, limit, since, until);
   let names = /* @__PURE__ */ new Map();
   try {
     names = await contactsForNames.namesForHandles(conv.participants);
@@ -20074,7 +20120,7 @@ async function readThread(conv, others, limit, since) {
   return {
     content: [{
       type: "text",
-      text: messages.length ? `Showing ${messages.length} of ${total} message(s)${since ? ` since ${since}` : ""} in your ${conv.isGroup ? "group " : ""}conversation with ${heading}` + (total > messages.length ? ", most recent first. Ask for more with limit:\n" : ", most recent first:\n") + messages.map(
+      text: messages.length ? `Showing ${messages.length} of ${total} message(s)${period ?? ""} in your ${conv.isGroup ? "group " : ""}conversation with ${heading}` + (total > messages.length ? ", most recent first. Ask for more with limit:\n" : ", most recent first:\n") + messages.map(
         (msg) => `[${new Date(msg.date).toLocaleString()}] ${msg.fromMe ? "Me" : who(msg.sender)}: ${msg.text}`
       ).join("\n") + alsoIn : `Your conversation with ${heading} has no messages in it.`
     }],
@@ -20500,11 +20546,11 @@ ${note.content}`).join("\n\n") + trimmed : `No notes found for "${args.searchTex
                       `No conversation holds ${found.who.join(" and ")} together. They may each have their own thread: read one name at a time.`
                     );
                   }
-                  return await readThread(found.conversation, found.others, args.limit, args.since);
+                  return await readThread(found.conversation, found.others, args.limit, args.since, args.until);
                 }
                 const byHandle = await messageModule.conversationsForHandle(handle);
                 if (byHandle.length) {
-                  return await readThread(byHandle[0], byHandle.slice(1), args.limit, args.since);
+                  return await readThread(byHandle[0], byHandle.slice(1), args.limit, args.since, args.until);
                 }
                 const messages = await messageModule.readMessages(
                   handle,
@@ -20981,7 +21027,10 @@ function isMessagesArgs(args) {
       break;
   }
   if (phoneNumber && typeof phoneNumber !== "string") return false;
-  if (args.since !== void 0 && typeof args.since !== "string") return false;
+  for (const key of ["since", "until"]) {
+    const v = args[key];
+    if (v !== void 0 && typeof v !== "string") return false;
+  }
   if (message2 && typeof message2 !== "string") return false;
   if (limit && typeof limit !== "number") return false;
   if (scheduledTime && typeof scheduledTime !== "string") return false;

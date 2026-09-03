@@ -71,9 +71,14 @@ const CONTACTS_TOOL: Tool = {
         },
         since: {
           type: "string",
-          description: "Optional, for read: only messages on or after this date, as YYYY-MM-DD. This "
-            + "is how you cover a PERIOD, for example the last six months; without it a read returns "
-            + "only the most recent handful."
+          description: "Optional, for read: only messages on or after this, as YYYY-MM-DD or "
+            + "YYYY-MM-DD HH:MM. With `until` it gives a period, which is how you cover the last six "
+            + "months or a single month; without either, a read returns only the most recent handful."
+        },
+        until: {
+          type: "string",
+          description: "Optional, for read: only messages up to this, as YYYY-MM-DD or "
+            + "YYYY-MM-DD HH:MM. A plain date includes the whole of that day."
         },
         query: {
           type: "string",
