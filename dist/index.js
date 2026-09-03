@@ -3017,25 +3017,56 @@ var init_typedstream = __esm({
 
 // utils/query.ts
 function fold(s) {
-  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  return s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
 }
-function queryTerms(raw) {
+function parseQuery(raw) {
   const terms = [];
-  const rest = raw.replace(/"([^"]*)"|'([^']*)'/g, (_m, a, b) => {
+  const phrases = [];
+  const excluded = [];
+  let rest = raw ?? "";
+  rest = rest.replace(/(-?)"([^"]*)"|(-?)'([^']*)'/g, (_m, negA, a, negB, b) => {
     const phrase = fold((a ?? b ?? "").trim());
-    if (phrase) terms.push(phrase);
+    if (phrase) (negA || negB ? excluded : phrases).push(phrase);
     return " ";
   });
   for (const word of rest.split(/\s+/)) {
-    const t = fold(word.trim());
+    const w = word.trim();
+    if (!w) continue;
+    if (w.startsWith("-") && w.length > 1) {
+      const t2 = fold(w.slice(1));
+      if (t2) excluded.push(t2);
+      continue;
+    }
+    const t = fold(w);
     if (t) terms.push(t);
   }
-  return terms;
+  return { terms, phrases, excluded };
 }
-function matchesQuery(text, terms) {
-  if (!terms.length) return false;
-  const hay = fold(text);
-  return terms.every((t) => hay.includes(t));
+function isEmptyQuery(q) {
+  return q.terms.length === 0 && q.phrases.length === 0;
+}
+function scoreFields(fields, q) {
+  if (isEmptyQuery(q)) return null;
+  const folded = fields.map((f) => ({ hay: fold(f.text), weight: f.weight }));
+  for (const bad of q.excluded) {
+    if (folded.some((f) => f.hay.includes(bad))) return null;
+  }
+  let score = 0;
+  for (const phrase of q.phrases) {
+    const best = folded.filter((f) => f.hay.includes(phrase)).map((f) => f.weight).sort((a, b) => b - a)[0];
+    if (best === void 0) return null;
+    score += best * 4;
+  }
+  let matched = 0;
+  for (const term of q.terms) {
+    const best = folded.filter((f) => f.hay.includes(term)).map((f) => f.weight).sort((a, b) => b - a)[0];
+    if (best === void 0) continue;
+    matched += 1;
+    score += best;
+  }
+  if (q.terms.length && matched === 0 && q.phrases.length === 0) return null;
+  score += matched * matched;
+  return score;
 }
 var init_query = __esm({
   "utils/query.ts"() {
@@ -3712,8 +3743,8 @@ async function recentConversations(limit = 10, resolveNames = contacts_default.n
 async function searchMessages(query, limit = 10, scan2 = 5e4) {
   await ensureMessagesDBAccess();
   const capped = clampLimit(limit);
-  const terms = queryTerms(query);
-  if (!terms.length) return { messages: [], coverage: { scanned: 0, bounded: false } };
+  const q = parseQuery(query);
+  if (isEmptyQuery(q)) return { messages: [], coverage: { scanned: 0, bounded: false } };
   try {
     const { stdout } = await retryOperation(
       () => (
@@ -3754,19 +3785,41 @@ async function searchMessages(query, limit = 10, scan2 = 5e4) {
       )
     );
     const rows = JSON.parse(stdout || "[]");
-    const hits = [];
+    const chats = await listConversations(200);
+    let named = /* @__PURE__ */ new Map();
+    try {
+      named = await contacts_default.namesForHandles(chats.flatMap((c) => c.participants));
+    } catch {
+    }
+    const whoByChat = /* @__PURE__ */ new Map();
+    for (const c of chats) {
+      whoByChat.set(c.chatId, [
+        c.title ?? "",
+        ...c.participants,
+        ...c.participants.map((h) => named.get(h.trim()) ?? "")
+      ].filter(Boolean).join(" "));
+    }
+    const scored = [];
     for (const r of rows) {
       const text = (r.is_hex ? decodeAttributedBody(r.body).text : r.body) ?? "";
-      if (!matchesQuery(text, terms)) continue;
-      if (hits.length >= capped) continue;
-      hits.push({
+      const who = whoByChat.get(r.chat_id ?? -1) ?? r.sender ?? "";
+      const score = scoreFields([
+        // A hit on WHO identifies the thread; a hit in prose merely mentions it.
+        { text: who, weight: 3 },
+        { text: named.get((r.sender ?? "").trim()) ?? r.sender ?? "", weight: 3 },
+        { text, weight: 1 }
+      ], q);
+      if (score === null) continue;
+      scored.push({ score, hit: {
         content: text,
         date: r.date,
         sender: r.sender ?? "",
         is_from_me: r.from_me === 1,
         chatId: r.chat_id ?? void 0
-      });
+      } });
     }
+    scored.sort((a, b) => b.score - a.score || (a.hit.date < b.hit.date ? 1 : -1));
+    const hits = scored.slice(0, capped).map((s) => s.hit);
     return {
       messages: hits,
       coverage: {
@@ -20693,7 +20746,7 @@ ${msg.content}`
                 return {
                   content: [{
                     type: "text",
-                    text: found.length > 0 ? `${found.length} message(s) matching "${args.query}", most recent first:
+                    text: found.length > 0 ? `${found.length} message(s) matching "${args.query}", best match first:
 ` + found.map(
                       (m) => `[${new Date(m.date).toLocaleString()}] ${m.is_from_me ? "You" : names.get((m.sender ?? "").trim()) || m.sender}${threadOf.get(m.chatId ?? -1) ? ` in ${threadOf.get(m.chatId ?? -1)}` : ""}:
 ` + m.content

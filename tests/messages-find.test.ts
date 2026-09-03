@@ -19,6 +19,9 @@ process.env.APPLE_MCP_APP_NAME = "Maestro";
 
 let rows: unknown[] = [];
 let lastSql = "";
+// Every statement of the run: a search now also reads the thread list, so an assertion about "the
+// query" has to name WHICH query rather than trusting whichever ran last.
+let allSql: string[] = [];
 let lastOptions: any;
 
 // Spread the real module and override ONLY execFile: replacing it wholesale hides `execFileSync`, which
@@ -35,6 +38,7 @@ mock.module("node:child_process", () => ({
 		const cb = typeof optionsOrCb === "function" ? optionsOrCb : maybeCb!;
 		lastOptions = typeof optionsOrCb === "function" ? undefined : optionsOrCb;
 		lastSql = args[args.length - 1] ?? "";
+		allSql.push(lastSql);
 		// `access` probes the file; anything else is a query.
 		cb(null, { stdout: JSON.stringify(rows), stderr: "" });
 	},
@@ -135,17 +139,19 @@ describe("searching what was said", () => {
 		rows = [{ sender: "+1", body: attributed("anything"), is_hex: 1, from_me: 0, date: "x" }];
 		expect((await message.searchMessages("   ", 5)).messages).toEqual([]);
 	});
-	// THE DEFECT A PERSON FOUND BY WATCHING A RUN GO IN CIRCLES. "Shivani Hamilton" was one literal
-	// string, so it matched only those two words adjacent and in that order, and a thread full of both
-	// came back empty while "Shivani" alone found four.
-	test("a query is AND over its words, in any order", async () => {
+	// RANKED, NOT FILTERED (faced#625). This used to assert AND: every word in the same message. That
+	// answered "nothing matched" when the truth was "not everything matched", and a run stopped on the
+	// difference. A message matching one of three words is still an answer; matching two beats it.
+	test("a message matching some of the words is still found", async () => {
 		rows = [
 			{ sender: "+1", body: attributed("Perfect. Shivani can you send the invite so Hamilton is synced?"),
-				is_hex: 1, from_me: 0, date: "x" },
-			{ sender: "+2", body: attributed("Nice to see you today Shivani"), is_hex: 1, from_me: 0, date: "y" },
+				is_hex: 1, from_me: 0, date: "2026-01-02" },
+			{ sender: "+2", body: attributed("Nice to see you today Shivani"), is_hex: 1, from_me: 0,
+				date: "2026-01-01" },
 		];
-		const { messages } = await message.searchMessages("Shivani Hamilton", 5);
-		expect(messages.length).toBe(1);
+		const { messages } = await message.searchMessages("Shivani Hamilton meeting", 5);
+		expect(messages.length).toBe(2);
+		// The one with BOTH names ranks above the one with a single name.
 		expect(messages[0]!.sender).toBe("+1");
 	});
 
@@ -159,7 +165,9 @@ describe("searching what was said", () => {
 	test("scans far past the recent handful", async () => {
 		rows = [];
 		await message.searchMessages("x", 5);
-		expect(lastSql).toMatch(/LIMIT\s+(\d{5,})/);
+		// ANY of the statements, because a search also reads the thread list now, and `lastSql` keeps
+		// only the most recent. Asserting on the last one tested whichever query happened to run last.
+		expect(allSql.some((q) => /LIMIT\s+(\d{5,})/.test(q))).toBe(true);
 	});
 
 	// AND WHEN IT DOES STOP SHORT, IT SAYS SO. An empty answer is only an answer when somebody looked.

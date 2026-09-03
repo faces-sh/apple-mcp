@@ -15,7 +15,7 @@ import { handleCandidates, matchKnownHandles, sendableHandle } from "./phone";
 import { unusedNumberFor } from "./wrongnumber";
 import { looksLikeHandle } from "./recipient";
 import { typedstreamText } from "./typedstream";
-import { matchesQuery, queryTerms } from "./query";
+import { parseQuery, scoreFields, isEmptyQuery } from "./query";
 import { conversationsForHandle, conversationsNamed, listConversations, readConversation } from "./conversation";
 import contacts from "./contacts";
 import { resolveRecipient, type Resolution } from "./recipient";
@@ -846,10 +846,11 @@ async function searchMessages(
 ): Promise<{ messages: Message[]; coverage: SearchCoverage }> {
 	await ensureMessagesDBAccess();
 	const capped = clampLimit(limit);
-	// AND OVER THE WORDS, not one literal string: see `queryTerms`. "Shivani Hamilton" used to mean
-	// those two words adjacent and in that order, which matched nothing in a thread full of both.
-	const terms = queryTerms(query);
-	if (!terms.length) return { messages: [], coverage: { scanned: 0, bounded: false } };
+	// GOOGLE'S GRAMMAR, RANKED: see `parseQuery`. Words are optional and score; quotes are exact; a
+	// leading minus excludes. Requiring every word answered "nothing matched" when the truth was "not
+	// everything matched", and a run stopped on the difference.
+	const q = parseQuery(query);
+	if (isEmptyQuery(q)) return { messages: [], coverage: { scanned: 0, bounded: false } };
 	try {
 		const { stdout } = await retryOperation(() =>
 			// A ROOM BIG ENOUGH FOR WHAT WE ASKED FOR. Every other query here returns tens of rows of
@@ -888,20 +889,40 @@ async function searchMessages(
 			sender: string | null; chat_id: number | null; body: string; is_hex: number;
 			from_me: number; date: string;
 		}[];
-		const hits: Message[] = [];
-		// EVERY ROW IS LOOKED AT even once enough hits are in hand, because the coverage sentence has to
-		// be true: stopping early and then saying "searched 50,000" would be its own quiet lie. The
-		// decode is 77ms for the whole history, so there is nothing to save by stopping.
+		// WHO A THREAD IS WITH IS PART OF WHAT IT IS. Searching only bodies is why "hamilton shivani"
+		// found nothing while their conversation sat there: neither name is written in any message.
+		// A front door has to look at the people as well as the prose.
+		const chats = await listConversations(200);
+		let named = new Map<string, string>();
+		try {
+			named = await contacts.namesForHandles(chats.flatMap((c) => c.participants));
+		} catch { /* a name is a nicety; the handles still identify the thread */ }
+		const whoByChat = new Map<number, string>();
+		for (const c of chats) {
+			whoByChat.set(c.chatId, [c.title ?? "", ...c.participants,
+				...c.participants.map((h) => named.get(h.trim()) ?? "")].filter(Boolean).join(" "));
+		}
+		// EVERY ROW IS LOOKED AT, because the coverage sentence has to be true and because ranking needs
+		// every candidate before it can say which is best. The decode is 77ms for the whole history.
+		const scored: { hit: Message; score: number }[] = [];
 		for (const r of rows) {
 			const text = (r.is_hex ? decodeAttributedBody(r.body).text : r.body) ?? "";
-			if (!matchesQuery(text, terms)) continue;
-			if (hits.length >= capped) continue;
-			// THE THREAD IT CAME FROM, so a hit is somewhere to go rather than a dead end. A search
-			// found the right message ("Nice to see you today Shivani") and the caller then had no way
-			// to open the conversation it was sitting in.
-			hits.push({ content: text, date: r.date, sender: r.sender ?? "", is_from_me: r.from_me === 1,
-				chatId: r.chat_id ?? undefined });
+			const who = whoByChat.get(r.chat_id ?? -1) ?? r.sender ?? "";
+			const score = scoreFields([
+				// A hit on WHO identifies the thread; a hit in prose merely mentions it.
+				{ text: who, weight: 3 },
+				{ text: named.get((r.sender ?? "").trim()) ?? r.sender ?? "", weight: 3 },
+				{ text, weight: 1 },
+			], q);
+			if (score === null) continue;
+			// THE THREAD IT CAME FROM, so a hit is somewhere to go rather than a dead end.
+			scored.push({ score, hit: { content: text, date: r.date, sender: r.sender ?? "",
+				is_from_me: r.from_me === 1, chatId: r.chat_id ?? undefined } });
 		}
+		// Best answer first, and the more recent of two equally good ones. Both are tie-breakers on a
+		// ranking, never filters: nothing is dropped for being old or for matching only one word.
+		scored.sort((a, b) => b.score - a.score || (a.hit.date < b.hit.date ? 1 : -1));
+		const hits = scored.slice(0, capped).map((s) => s.hit);
 		return {
 			messages: hits,
 			coverage: {

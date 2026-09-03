@@ -966,7 +966,10 @@ function initServer() {
 									content: [{
 										type: "text",
 										text: found.length > 0
-											? `${found.length} message(s) matching "${args.query}", most recent first:\n` +
+											// BEST MATCH FIRST, not most recent: the order is a ranking now, and
+											// saying "most recent" about a ranked list is a small lie that
+											// makes the top result look like an accident of timing.
+											? `${found.length} message(s) matching "${args.query}", best match first:\n` +
 												found.map((m) =>
 													`[${new Date(m.date).toLocaleString()}] `
 													+ `${m.is_from_me ? "You" : (names.get((m.sender ?? "").trim()) || m.sender)}`

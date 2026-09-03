@@ -1,55 +1,107 @@
 /**
- * What a person means when they type words into a search box.
+ * ONE QUERY GRAMMAR, THE ONE EVERY LLM ALREADY KNOWS (faced#625).
  *
- * THE WHOLE STRING WAS ONE LITERAL BEFORE, and that is not what anybody means. Searching
- * `Shivani Hamilton` matched only messages where those two words sit next to each other in that order,
- * so a thread full of both came back as "No messages found" while `Shivani` alone found four. Caught on
- * a real Mac by a person watching a run go round in circles: the agent searched, got nothing, narrowed,
- * got something, widened, got nothing, and had no way to tell that the tool was answering a different
- * question from the one it asked.
+ * Nothing here has to be taught, because it is Google's: bare words rank, quotes mean exactly, and a
+ * leading minus excludes. An agent that has never read our documentation still writes a correct query,
+ * which is the whole point of a front door.
  *
- * So a query is AND OVER ITS WORDS: every word must appear somewhere in the message, in any order and
- * anywhere in the text. `shivani hamilton` means `shivani && hamilton`. That is the rule every search
- * box in the world uses, which is the point: this is the one place a small model does not have to be
- * taught anything, because it already writes queries for search boxes.
+ * WORDS RANK, THEY DO NOT FILTER, and that is the change this file exists for. Search used to require
+ * EVERY word in the same message, so `Hamilton Shivani meeting` returned nothing and a run stopped: no
+ * message contains all three words, and none ever would, because the discussion is in those two
+ * people's thread and reads "Sorry could we start at 10am PT actually?". Requiring every word answers
+ * "nothing matched" when the truth is "not everything matched", and those are different facts.
  *
- * TWO CONVENTIONS, BOTH THE ORDINARY ONES. Quoting keeps words together as a phrase, and accents fold,
- * so `rentree` finds `rentrée` and `cafe` finds `café`. The second matters more than it looks on a
- * machine whose messages are half French: without it a person has to type the accent to find their own
- * message, which no search box has required for twenty years.
- *
- * Pure, so the rule is tested rather than argued about.
+ * Matching MORE distinct terms simply scores higher. That is what the AND was reaching for, without
+ * throwing away the single-word hits that are usually the answer.
  */
 
 /** Lowercase and strip accents, so `rentrée` and `rentree` are the same word. */
 export function fold(s: string): string {
-	return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+	return s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+}
+
+export interface Query {
+	/** Optional words. Each one matched raises the score; none is required. */
+	terms: string[];
+	/** Quoted runs. These must appear contiguously, which is the exact-match escape hatch. */
+	phrases: string[];
+	/** Words and phrases whose presence removes a hit entirely. */
+	excluded: string[];
 }
 
 /**
- * The words a query is asking for. Quoted runs stay together as one phrase.
+ * Read a query the way a search box does.
  *
- * Returns [] for an empty query, which callers MUST treat as "search for nothing" rather than
- * "match everything": an accidental empty string should not return somebody's entire message history.
+ * Quotes first, then minus, then bare words, so `-"exactly this"` excludes a phrase rather than
+ * leaving a stray quote in a term.
  */
-export function queryTerms(raw: string): string[] {
+export function parseQuery(raw: string): Query {
 	const terms: string[] = [];
-	// Quoted phrases first, then whatever is left over as individual words.
-	const rest = raw.replace(/"([^"]*)"|'([^']*)'/g, (_m, a, b) => {
+	const phrases: string[] = [];
+	const excluded: string[] = [];
+	let rest = raw ?? "";
+
+	// Quoted runs, optionally negated: -"a b c" or "a b c"
+	rest = rest.replace(/(-?)"([^"]*)"|(-?)'([^']*)'/g, (_m, negA, a, negB, b) => {
 		const phrase = fold((a ?? b ?? "").trim());
-		if (phrase) terms.push(phrase);
+		if (phrase) (negA || negB ? excluded : phrases).push(phrase);
 		return " ";
 	});
 	for (const word of rest.split(/\s+/)) {
-		const t = fold(word.trim());
+		const w = word.trim();
+		if (!w) continue;
+		if (w.startsWith("-") && w.length > 1) {
+			const t = fold(w.slice(1));
+			if (t) excluded.push(t);
+			continue;
+		}
+		const t = fold(w);
 		if (t) terms.push(t);
 	}
-	return terms;
+	return { terms, phrases, excluded };
 }
 
-/** Whether one message satisfies the query: EVERY term present, in any order. */
-export function matchesQuery(text: string, terms: string[]): boolean {
-	if (!terms.length) return false;
-	const hay = fold(text);
-	return terms.every((t) => hay.includes(t));
+/** Whether a query asks for anything at all. An empty one must match NOTHING, never everything. */
+export function isEmptyQuery(q: Query): boolean {
+	return q.terms.length === 0 && q.phrases.length === 0;
+}
+
+/** One searchable part of a record, and how much a hit in it is worth. */
+export interface Field {
+	text: string;
+	/** A hit on WHO something is with outranks a hit in its body: names identify, prose mentions. */
+	weight: number;
+}
+
+/**
+ * How well one record answers the query, and `null` when it does not answer it at all.
+ *
+ * EXCLUSIONS ARE ABSOLUTE and everything else is a matter of degree. A required phrase that is absent
+ * scores nothing, so `"exactly this"` still behaves like an exact search; bare words only add.
+ */
+export function scoreFields(fields: Field[], q: Query): number | null {
+	if (isEmptyQuery(q)) return null;
+	const folded = fields.map((f) => ({ hay: fold(f.text), weight: f.weight }));
+	for (const bad of q.excluded) {
+		if (folded.some((f) => f.hay.includes(bad))) return null;
+	}
+	let score = 0;
+	// A quoted phrase is a REQUIREMENT: it is the one way to ask for exactly something.
+	for (const phrase of q.phrases) {
+		const best = folded.filter((f) => f.hay.includes(phrase)).map((f) => f.weight).sort((a, b) => b - a)[0];
+		if (best === undefined) return null;
+		score += best * 4;
+	}
+	let matched = 0;
+	for (const term of q.terms) {
+		const best = folded.filter((f) => f.hay.includes(term)).map((f) => f.weight).sort((a, b) => b - a)[0];
+		if (best === undefined) continue;
+		matched += 1;
+		score += best;
+	}
+	if (q.terms.length && matched === 0 && q.phrases.length === 0) return null;
+	// MATCHING MORE OF WHAT WAS ASKED WINS. Two words beat one, which is what the old AND was reaching
+	// for, and a single-word hit is still returned rather than thrown away.
+	score += matched * matched;
+	return score;
 }
