@@ -2771,29 +2771,6 @@ var init_recipient = __esm({
   }
 });
 
-// node_modules/run-applescript/index.js
-import process2 from "node:process";
-import { promisify } from "node:util";
-import { execFile, execFileSync } from "node:child_process";
-async function runAppleScript(script, { humanReadableOutput = true, signal } = {}) {
-  if (process2.platform !== "darwin") {
-    throw new Error("macOS only");
-  }
-  const outputArguments = humanReadableOutput ? [] : ["-ss"];
-  const execOptions = {};
-  if (signal) {
-    execOptions.signal = signal;
-  }
-  const { stdout } = await execFileAsync("osascript", ["-e", script, outputArguments], execOptions);
-  return stdout.trim();
-}
-var execFileAsync;
-var init_run_applescript = __esm({
-  "node_modules/run-applescript/index.js"() {
-    execFileAsync = promisify(execFile);
-  }
-});
-
 // utils/failure.ts
 function redactSecrets(body) {
   let out = body;
@@ -3277,8 +3254,8 @@ __export(message_exports, {
   decodeAttributedBody: () => decodeAttributedBody,
   default: () => message_default
 });
-import { promisify as promisify2 } from "node:util";
-import { execFile as execFile2 } from "node:child_process";
+import { promisify } from "node:util";
+import { execFile } from "node:child_process";
 import { access } from "node:fs/promises";
 async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -3302,13 +3279,21 @@ function clampLimit(limit) {
   if (!Number.isFinite(n) || n <= 0) return 10;
   return Math.min(n, CONFIG.MAX_MESSAGES);
 }
+async function runAppleScriptBounded(script) {
+  const { stdout } = await execFileAsync(
+    "osascript",
+    ["-e", script],
+    { timeout: CONFIG.TIMEOUT_MS, killSignal: "SIGKILL" }
+  );
+  return stdout.trim();
+}
 async function sendFailure(handle, sentAfter, scope = {}) {
   const threshold = Math.round((sentAfter / 1e3 - 978307200 - 2) * 1e9);
   const where = scope.chatGuid ? `cmj.chat_id IN (SELECT ROWID FROM chat WHERE guid = '${escapeSqlString(scope.chatGuid)}')` : `h.id IN (${(scope.ids ?? []).map((c) => `'${escapeSqlString(c)}'`).join(",") || "''"})`;
   for (let attempt = 0; attempt < 10; attempt++) {
     await new Promise((r) => setTimeout(r, 500));
     try {
-      const { stdout } = await execFileAsync2("sqlite3", ["-json", CHAT_DB, `
+      const { stdout } = await execFileAsync("sqlite3", ["-json", CHAT_DB, `
 				SELECT m.error AS err, m.is_sent AS sent
 				FROM message m
 				LEFT JOIN handle h ON h.ROWID = m.handle_id
@@ -3329,7 +3314,7 @@ async function sendFailure(handle, sentAfter, scope = {}) {
 }
 async function sendToConversation(guid2, message2) {
   await ensureMessagesDBAccess();
-  const { stdout: liveOut } = await execFileAsync2("sqlite3", ["-json", CHAT_DB, `
+  const { stdout: liveOut } = await execFileAsync("sqlite3", ["-json", CHAT_DB, `
 		SELECT COUNT(*) AS n FROM message m
 		JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
 		JOIN chat c ON c.ROWID = cmj.chat_id
@@ -3344,10 +3329,15 @@ async function sendToConversation(guid2, message2) {
   const chat = escapeAppleScriptString(guid2);
   const started = Date.now();
   try {
-    const out = await runAppleScript(`
+    let out = "";
+    try {
+      out = await runAppleScriptBounded(`
 tell application "Messages"
     send "${body}" to chat id "${chat}"
 end tell`);
+    } catch (timeout) {
+      console.error("send: Messages did not answer in time; reading the store to find out", timeout);
+    }
     const failed = await sendFailure(guid2, started, { chatGuid: guid2 });
     if (failed) throw new ToolFailure("message_not_sent", failed);
     return out;
@@ -3380,12 +3370,17 @@ async function sendMessage(phoneNumber, message2) {
   const body = escapeAppleScriptString(message2);
   const started = Date.now();
   try {
-    const out = await runAppleScript(`
+    let out = "";
+    try {
+      out = await runAppleScriptBounded(`
 tell application "Messages"
     set targetService to 1st service whose service type = iMessage
     set targetBuddy to buddy "${buddy}"
     send "${body}" to targetBuddy
 end tell`);
+    } catch (timeout) {
+      console.error("send: Messages did not answer in time; reading the store to find out", timeout);
+    }
     const failed = await sendFailure(target, started, { ids: await handleIdsFor(target) });
     if (failed) throw new ToolFailure("message_not_sent", failed);
     return out;
@@ -3418,7 +3413,7 @@ async function ensureMessagesDBAccess() {
     throwMessagesDbFailure(error2, MESSAGES_READ_FAILED);
   }
   try {
-    await execFileAsync2("sqlite3", [CHAT_DB, "SELECT 1;"]);
+    await execFileAsync("sqlite3", [CHAT_DB, "SELECT 1;"]);
   } catch (error2) {
     throwMessagesDbFailure(error2, MESSAGES_READ_FAILED);
   }
@@ -3446,7 +3441,7 @@ async function getAttachmentPaths(messageId) {
         `;
   let stdout;
   try {
-    ({ stdout } = await execFileAsync2("sqlite3", ["-json", CHAT_DB, query]));
+    ({ stdout } = await execFileAsync("sqlite3", ["-json", CHAT_DB, query]));
   } catch (error2) {
     throwMessagesDbFailure(
       error2,
@@ -3478,7 +3473,7 @@ async function countMessagesWith(phoneNumber) {
     if (phoneFormats.length === 0) return 0;
     const phoneList = phoneFormats.map((p) => `'${escapeSqlString(p)}'`).join(",");
     const { stdout } = await retryOperation(
-      () => execFileAsync2("sqlite3", [
+      () => execFileAsync("sqlite3", [
         "-json",
         CHAT_DB,
         `SELECT count(*) as n FROM message m INNER JOIN handle h ON h.ROWID = m.handle_id ` + conversationWhere(phoneList)
@@ -3529,7 +3524,7 @@ async function readMessages(phoneNumber, limit = 10) {
             LIMIT ${maxLimit}
         `;
     const { stdout } = await retryOperation(
-      () => execFileAsync2("sqlite3", ["-json", CHAT_DB, query])
+      () => execFileAsync("sqlite3", ["-json", CHAT_DB, query])
     );
     if (!stdout.trim()) {
       console.error("No messages found in database for the given phone number");
@@ -3544,7 +3539,7 @@ async function readMessages(phoneNumber, limit = 10) {
 async function countUnreadMessages() {
   try {
     const { stdout } = await retryOperation(
-      () => execFileAsync2("sqlite3", [
+      () => execFileAsync("sqlite3", [
         "-json",
         CHAT_DB,
         `SELECT count(*) as n FROM message m INNER JOIN handle h ON h.ROWID = m.handle_id ${UNREAD_WHERE}`
@@ -3586,7 +3581,7 @@ async function getUnreadMessages(limit = 10) {
             LIMIT ${maxLimit}
         `;
     const { stdout } = await retryOperation(
-      () => execFileAsync2("sqlite3", ["-json", CHAT_DB, query])
+      () => execFileAsync("sqlite3", ["-json", CHAT_DB, query])
     );
     if (!stdout.trim()) {
       console.error("No unread messages found");
@@ -3671,7 +3666,7 @@ async function recentConversations(limit = 10, resolveNames = contacts_default.n
   const capped = clampLimit(limit);
   try {
     const { stdout } = await retryOperation(
-      () => execFileAsync2("sqlite3", ["-json", CHAT_DB, `
+      () => execFileAsync("sqlite3", ["-json", CHAT_DB, `
 				SELECT
 					h.id AS handle,
 					CASE
@@ -3724,7 +3719,7 @@ async function searchMessages(query, limit = 10, scan2 = 5e4) {
       () => (
         // A ROOM BIG ENOUGH FOR WHAT WE ASKED FOR. Every other query here returns tens of rows of
         // plain text; this one returns up to `scan` rows of hex, which is a different order of size.
-        execFileAsync2(
+        execFileAsync(
           "sqlite3",
           ["-json", CHAT_DB, `
 				SELECT
@@ -3785,7 +3780,7 @@ async function searchMessages(query, limit = 10, scan2 = 5e4) {
   }
 }
 async function knownHandles() {
-  const { stdout } = await execFileAsync2("sqlite3", ["-json", CHAT_DB, "SELECT id FROM handle"]);
+  const { stdout } = await execFileAsync("sqlite3", ["-json", CHAT_DB, "SELECT id FROM handle"]);
   return JSON.parse(stdout || "[]").map((r) => r.id).filter(Boolean);
 }
 async function handleIdsFor(input) {
@@ -3802,7 +3797,7 @@ async function lastSeenByHandle() {
   const out = /* @__PURE__ */ new Map();
   try {
     const { stdout } = await retryOperation(
-      () => execFileAsync2("sqlite3", ["-json", CHAT_DB, `
+      () => execFileAsync("sqlite3", ["-json", CHAT_DB, `
 				SELECT h.id AS handle,
 					datetime(MAX(m.date)/1000000000 + 978307200, 'unixepoch', 'localtime') AS date
 				FROM message m JOIN handle h ON h.ROWID = m.handle_id
@@ -3826,11 +3821,10 @@ async function whoIsMeant(name, findCards = contacts_default.findContacts) {
   }
   return resolveRecipient(cards, await lastSeenByHandle());
 }
-var execFileAsync2, CHAT_DB, MESSAGES_SEND_SUMMARIES, MESSAGES_READ_DENIED, MESSAGES_READ_FAILED, CONFIG, MAX_RETRIES, RETRY_DELAY, UNREAD_WHERE, GENUINE_CONTACT, message_default;
+var execFileAsync, CHAT_DB, MESSAGES_SEND_SUMMARIES, MESSAGES_READ_DENIED, MESSAGES_READ_FAILED, CONFIG, MAX_RETRIES, RETRY_DELAY, UNREAD_WHERE, GENUINE_CONTACT, message_default;
 var init_message = __esm({
   "utils/message.ts"() {
     "use strict";
-    init_run_applescript();
     init_native();
     init_failure();
     init_phone();
@@ -3841,7 +3835,7 @@ var init_message = __esm({
     init_conversation();
     init_contacts();
     init_recipient();
-    execFileAsync2 = promisify2(execFile2);
+    execFileAsync = promisify(execFile);
     CHAT_DB = `${process.env.HOME}/Library/Messages/chat.db`;
     MESSAGES_SEND_SUMMARIES = {
       denied: "Could not send the message: macOS denied control of Messages. " + grantSentence("Automation > Messages"),
@@ -3894,8 +3888,8 @@ var init_message = __esm({
 });
 
 // utils/conversation.ts
-import { execFile as execFile3 } from "node:child_process";
-import { promisify as promisify3 } from "node:util";
+import { execFile as execFile2 } from "node:child_process";
+import { promisify as promisify2 } from "node:util";
 function toConversation(r) {
   const body = r.is_hex ? decodeAttributedBody(r.body).text ?? "" : r.body ?? "";
   return {
@@ -3946,7 +3940,7 @@ async function conversationsWith(handleSets, rows = sqlite, knownIds = sqliteIds
 }
 async function readConversation(chatId, limit = 10) {
   const capped = Math.max(1, Math.min(Math.floor(limit) || 10, 100));
-  const { stdout } = await execFileAsync3("sqlite3", ["-json", CHAT_DB2, `
+  const { stdout } = await execFileAsync2("sqlite3", ["-json", CHAT_DB2, `
 		SELECT
 			COALESCE(h.id, '') AS sender,
 			m.is_from_me AS from_me,
@@ -3964,7 +3958,7 @@ async function readConversation(chatId, limit = 10) {
 		ORDER BY m.date DESC
 		LIMIT ${capped}`], { maxBuffer: 64 * 1024 * 1024 });
   const raw = JSON.parse(stdout || "[]");
-  const { stdout: countOut } = await execFileAsync3("sqlite3", ["-json", CHAT_DB2, `
+  const { stdout: countOut } = await execFileAsync2("sqlite3", ["-json", CHAT_DB2, `
 		SELECT COUNT(*) AS n FROM message m
 		JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
 		WHERE cmj.chat_id = ${Math.floor(chatId)} AND m.item_type = 0`]);
@@ -4009,13 +4003,13 @@ async function conversationsNamed(raw, resolveOne, rows = sqlite, knownIds = sql
   if (!found.length) return { kind: "no-thread", who: names };
   return { kind: "one", conversation: found[0], others: found.slice(1) };
 }
-var execFileAsync3, CHAT_DB2, LATEST_PER_CHAT, CHAT_COLUMNS, sqliteIds, sqlite;
+var execFileAsync2, CHAT_DB2, LATEST_PER_CHAT, CHAT_COLUMNS, sqliteIds, sqlite;
 var init_conversation = __esm({
   "utils/conversation.ts"() {
     "use strict";
     init_message();
     init_phone();
-    execFileAsync3 = promisify3(execFile3);
+    execFileAsync2 = promisify2(execFile2);
     CHAT_DB2 = `${process.env.HOME}/Library/Messages/chat.db`;
     LATEST_PER_CHAT = `
 	JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
@@ -4043,11 +4037,11 @@ var init_conversation = __esm({
 	CASE WHEN m.text IS NOT NULL AND m.text != '' THEN 0 ELSE 1 END AS is_hex,
 	datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') AS date`;
     sqliteIds = async () => {
-      const { stdout } = await execFileAsync3("sqlite3", ["-json", CHAT_DB2, "SELECT id FROM handle"]);
+      const { stdout } = await execFileAsync2("sqlite3", ["-json", CHAT_DB2, "SELECT id FROM handle"]);
       return JSON.parse(stdout || "[]").map((r) => r.id).filter(Boolean);
     };
     sqlite = async (sql) => {
-      const { stdout } = await execFileAsync3(
+      const { stdout } = await execFileAsync2(
         "sqlite3",
         ["-json", CHAT_DB2, sql],
         { maxBuffer: 64 * 1024 * 1024 }
@@ -12073,7 +12067,7 @@ var require_run = __commonJS({
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.run = exports.runJXACode = void 0;
-    var execFile4 = __require("child_process").execFile;
+    var execFile3 = __require("child_process").execFile;
     var macosVersion = require_macos_version();
     function runJXACode(jxaCode) {
       return executeInOsa(jxaCode, []);
@@ -12092,7 +12086,7 @@ var require_run = __commonJS({
     function executeInOsa(code, args) {
       return new Promise(function(resolve, reject) {
         macosVersion.assertGreaterThanOrEqualTo("10.10");
-        var child = execFile4("/usr/bin/osascript", ["-l", "JavaScript"], {
+        var child = execFile3("/usr/bin/osascript", ["-l", "JavaScript"], {
           env: {
             OSA_ARGS: JSON.stringify(args)
           },
@@ -19745,7 +19739,7 @@ var Server = class extends Protocol {
 };
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
-import process3 from "node:process";
+import process2 from "node:process";
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/shared/stdio.js
 var ReadBuffer = class {
@@ -19777,7 +19771,7 @@ function serializeMessage(message2) {
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
 var StdioServerTransport = class {
-  constructor(_stdin = process3.stdin, _stdout = process3.stdout) {
+  constructor(_stdin = process2.stdin, _stdout = process2.stdout) {
     this._stdin = _stdin;
     this._stdout = _stdout;
     this._readBuffer = new ReadBuffer();
@@ -20427,13 +20421,26 @@ ${note.content}`).join("\n\n") + trimmed : `No notes found for "${args.searchTex
                     intoChat = found.conversation.guid;
                   }
                 }
-                if (intoChat) await messageModule.sendToConversation(intoChat, args.message);
-                else await messageModule.sendMessage(target, args.message);
+                let addressed = target;
+                if (intoChat) {
+                  await messageModule.sendToConversation(intoChat, args.message);
+                  const conv = (await messageModule.listConversations(100)).find((c) => c.guid === intoChat);
+                  if (conv) {
+                    let named = /* @__PURE__ */ new Map();
+                    try {
+                      named = await (await loadModule("contacts")).namesForHandles(conv.participants);
+                    } catch {
+                    }
+                    addressed = conv.participants.map((h) => named.get(h.trim()) || h).join(", ") + (conv.isGroup ? " (group)" : "");
+                  }
+                } else {
+                  await messageModule.sendMessage(target, args.message);
+                }
                 return {
                   content: [
                     {
                       type: "text",
-                      text: `Message sent to ${args.phoneNumber}`
+                      text: `Message sent to ${addressed}` + (addressed !== args.phoneNumber ? ` (asked for "${args.phoneNumber}")` : "")
                     }
                   ],
                   isError: false

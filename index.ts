@@ -620,13 +620,37 @@ function initServer() {
 										intoChat = found.conversation.guid;
 									}
 								}
-								if (intoChat) await messageModule.sendToConversation(intoChat, args.message);
-								else await messageModule.sendMessage(target, args.message);
+								// SAY WHAT WAS ADDRESSED, not what was typed.
+								//
+								// This printed `args.phoneNumber` back, the raw input, after `target` had
+								// been reassigned by the name lookup or replaced by a conversation guid. So
+								// "Message sent to Linda" appeared whether it went to her mobile, her
+								// landline, a namesake, or a group with three other people in it. The one
+								// fact that would catch a wrong recipient by eye was the one fact withheld.
+								let addressed = target;
+								if (intoChat) {
+									await messageModule.sendToConversation(intoChat, args.message);
+									const conv = (await messageModule.listConversations(100))
+										.find((c: { guid: string }) => c.guid === intoChat);
+									if (conv) {
+										let named = new Map<string, string>();
+										try {
+											named = await (await loadModule("contacts"))
+												.namesForHandles(conv.participants);
+										} catch { /* handles will do */ }
+										addressed = conv.participants
+											.map((h: string) => named.get(h.trim()) || h).join(", ")
+											+ (conv.isGroup ? " (group)" : "");
+									}
+								} else {
+									await messageModule.sendMessage(target, args.message);
+								}
 								return {
 									content: [
 										{
 											type: "text",
-											text: `Message sent to ${args.phoneNumber}`,
+											text: `Message sent to ${addressed}`
+												+ (addressed !== args.phoneNumber ? ` (asked for "${args.phoneNumber}")` : ""),
 										},
 									],
 									isError: false,

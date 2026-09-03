@@ -115,6 +115,24 @@ function clampLimit(limit: number): number {
  * this there was no way to answer three people at once in the thread they were talking in.
  */
 /**
+ * Run one AppleScript, and NEVER wait on it forever.
+ *
+ * `CONFIG.TIMEOUT_MS` was declared here and used nowhere: `runAppleScript` passes no timeout, so a
+ * wedged Messages held a send open indefinitely. That is not hypothetical on this app, which crashed
+ * six times in one morning; a send into a dying Messages would simply never return, and the turn above
+ * it would sit there with nothing to report.
+ *
+ * A TIMEOUT IS NOT A VERDICT. Messages may well have accepted the text before it stopped answering, so
+ * this does not decide anything: it stops WAITING, and the caller then reads the database, which is the
+ * only thing that actually knows whether the message left.
+ */
+async function runAppleScriptBounded(script: string): Promise<string> {
+	const { stdout } = await execFileAsync("osascript", ["-e", script],
+		{ timeout: CONFIG.TIMEOUT_MS, killSignal: "SIGKILL" });
+	return stdout.trim();
+}
+
+/**
  * Did OUR message actually leave? AppleScript will not say.
  *
  * `send` returns the moment Messages accepts the text, long before the network has an opinion, so
@@ -196,10 +214,17 @@ async function sendToConversation(guid: string, message: string) {
 	const chat = escapeAppleScriptString(guid);
 	const started = Date.now();
 	try {
-		const out = await runAppleScript(`
+		let out = "";
+		try {
+			out = await runAppleScriptBounded(`
 tell application "Messages"
     send "${body}" to chat id "${chat}"
 end tell`);
+		} catch (timeout) {
+			// It stopped ANSWERING; whether it stopped SENDING is a different question, and the database
+			// below is the only thing that knows. Never decided here.
+			console.error("send: Messages did not answer in time; reading the store to find out", timeout);
+		}
 		const failed = await sendFailure(guid, started, { chatGuid: guid });
 		if (failed) throw new ToolFailure("message_not_sent", failed);
 		return out;
@@ -241,12 +266,17 @@ async function sendMessage(phoneNumber: string, message: string) {
 	const body = escapeAppleScriptString(message);
 	const started = Date.now();
 	try {
-		const out = await runAppleScript(`
+		let out = "";
+		try {
+			out = await runAppleScriptBounded(`
 tell application "Messages"
     set targetService to 1st service whose service type = iMessage
     set targetBuddy to buddy "${buddy}"
     send "${body}" to targetBuddy
 end tell`);
+		} catch (timeout) {
+			console.error("send: Messages did not answer in time; reading the store to find out", timeout);
+		}
 		const failed = await sendFailure(target, started, { ids: await handleIdsFor(target) });
 		if (failed) throw new ToolFailure("message_not_sent", failed);
 		return out;
