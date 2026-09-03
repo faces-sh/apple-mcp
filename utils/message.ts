@@ -115,41 +115,67 @@ function clampLimit(limit: number): number {
  * this there was no way to answer three people at once in the thread they were talking in.
  */
 /**
- * Did the message actually LEAVE? AppleScript will not say.
+ * Did OUR message actually leave? AppleScript will not say.
  *
- * `send` returns the moment Messages accepts the text, which is long before the network has an opinion,
- * so "Message sent to Linda Therrien" was printed over a message that never went. In chat.db it sat with
- * `is_sent = 0` and `error = 22`, and on screen it was red and said "Not Delivered". The person was told
- * it worked, and the one thing they needed to know was that it had not.
+ * `send` returns the moment Messages accepts the text, long before the network has an opinion, so
+ * "Message sent to Linda" was printed over a message that never went: in chat.db it sat with
+ * `is_sent = 0` and `error = 22`, and on screen it was red and said "Not Delivered".
  *
- * So the row is read back. A short poll, because delivery is asynchronous: what is being waited for is
- * the send LEAVING, not the recipient receiving, which can take much longer and is not ours to promise.
- * Silence after the wait is reported as sent, deliberately: a slow network must not be called a failure,
- * and `error` is what distinguishes the two.
+ * THE FIRST VERSION OF THIS CHECK WAS A NO-OP, and an adversarial review caught it. It compared
+ * `m.date/1000000000 + 978307200` (unix seconds) against a threshold built as
+ * `Date.now()/1000 - 978307200` (apple-epoch seconds). Off by 978,307,200, so the predicate reduced to
+ * "sent since 1995" and admitted all 21,139 outgoing messages on the machine. There was no recipient
+ * filter either. It read the newest outgoing row in the WHOLE DATABASE and reported on that: a text
+ * sent from the user's iPhone, an unrelated failure three minutes old, or the other half of two sends
+ * racing. Both directions were live, including the false success this function exists to prevent.
+ *
+ * So it now waits for OUR row: newer than the moment we asked, and addressed to what we addressed.
+ * Time is compared in the column's own units (apple-epoch NANOSECONDS) so there is nothing to convert
+ * and nothing to get wrong.
+ *
+ * A row that never appears is a FAILURE, not a shrug: `buddy` accepts an unregistered address and
+ * silently does nothing, which is exactly how the first false success happened.
  */
-async function sendFailure(handle: string, sentAfter: number): Promise<string | null> {
-	const since = Math.floor(sentAfter / 1000) - 978307200 - 2;
-	for (let attempt = 0; attempt < 8; attempt++) {
+async function sendFailure(
+	handle: string,
+	sentAfter: number,
+	scope: { chatGuid?: string } = {},
+): Promise<string | null> {
+	// The column is apple-epoch nanoseconds. Convert ONCE, into its units, not the other way about.
+	const threshold = Math.round((sentAfter / 1000 - 978307200 - 2) * 1e9);
+	const where = scope.chatGuid
+		? `cmj.chat_id IN (SELECT ROWID FROM chat WHERE guid = '${escapeSqlString(scope.chatGuid)}')`
+		: `h.id IN (${[handle, ...handleCandidates(handle)]
+			.map((c) => `'${escapeSqlString(c)}'`).join(",") || "''"})`;
+	for (let attempt = 0; attempt < 10; attempt++) {
 		await new Promise((r) => setTimeout(r, 500));
 		try {
 			const { stdout } = await execFileAsync("sqlite3", ["-json", CHAT_DB, `
 				SELECT m.error AS err, m.is_sent AS sent
-				FROM message m LEFT JOIN handle h ON h.ROWID = m.handle_id
-				WHERE m.is_from_me = 1 AND m.date/1000000000 + 978307200 > ${since}
+				FROM message m
+				LEFT JOIN handle h ON h.ROWID = m.handle_id
+				LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+				WHERE m.is_from_me = 1 AND m.date > ${threshold} AND ${where}
 				ORDER BY m.date DESC LIMIT 1`]);
 			const row = (JSON.parse(stdout || "[]") as { err: number; sent: number }[])[0];
-			if (!row) continue;
+			if (!row) continue;                              // ours has not landed yet: keep waiting
 			if (row.err && row.err !== 0) {
 				return `The message was NOT delivered to ${handle} (Messages reported error ${row.err}). `
-					+ "It may not be reachable at that number on iMessage. Check the number, or send to "
-					+ "the one they have actually been messaging from.";
+					+ "They may not be reachable at that address on iMessage. Check it, or use the one "
+					+ "they have actually been messaging from.";
 			}
-			if (row.sent) return null;
+			if (row.sent) return null;                       // ours, and it left
 		} catch {
-			return null;   // cannot read the store: do not invent a failure
+			// The store could not be read, so nothing is known either way. Say that rather than either
+			// inventing a failure or claiming a success.
+			return `The message to ${handle} was handed to Messages, but your message database could `
+				+ "not be read to confirm it was sent. Check the conversation before sending it again.";
 		}
 	}
-	return null;
+	// NOTHING WAS EVER WRITTEN. `buddy` takes an unregistered address and quietly does nothing, and this
+	// is what that looks like from here. Never reported as sent.
+	return `No record of the message to ${handle} was written by Messages, so it does not appear to `
+		+ "have been sent. Check the conversation before sending it again, to avoid sending it twice.";
 }
 
 async function sendToConversation(guid: string, message: string) {
@@ -161,7 +187,7 @@ async function sendToConversation(guid: string, message: string) {
 tell application "Messages"
     send "${body}" to chat id "${chat}"
 end tell`);
-		const failed = await sendFailure(guid, started);
+		const failed = await sendFailure(guid, started, { chatGuid: guid });
 		if (failed) throw new ToolFailure("message_not_sent", failed);
 		return out;
 	} catch (error) {
@@ -792,7 +818,13 @@ async function searchMessages(
 					m.is_from_me AS from_me,
 					datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') AS date
 				FROM message m
-				JOIN handle h ON h.ROWID = m.handle_id
+				-- LEFT, because a message the USER sent to a GROUP carries handle_id = 0. An inner join
+				-- silently dropped 14,640 of 45,038 rows on a real Mac: a third of the history and 69%
+				-- of everything they had ever sent. "merci" found 379 instead of 628. The answer still
+				-- said "No messages found" with no caveat, which is the quietly-partial answer this file
+				-- keeps having to relearn. Found by an adversarial review; the doc comment above quoted
+				-- 232 hits for "meeting" as evidence, and the true figure was 338.
+				LEFT JOIN handle h ON h.ROWID = m.handle_id
 				LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
 				WHERE m.item_type = 0
 					AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL)
@@ -804,7 +836,7 @@ async function searchMessages(
 				{ maxBuffer: 256 * 1024 * 1024 }),
 		);
 		const rows = JSON.parse(stdout || "[]") as {
-			sender: string; chat_id: number | null; body: string; is_hex: number;
+			sender: string | null; chat_id: number | null; body: string; is_hex: number;
 			from_me: number; date: string;
 		}[];
 		const hits: Message[] = [];
@@ -818,7 +850,7 @@ async function searchMessages(
 			// THE THREAD IT CAME FROM, so a hit is somewhere to go rather than a dead end. A search
 			// found the right message ("Nice to see you today Shivani") and the caller then had no way
 			// to open the conversation it was sitting in.
-			hits.push({ content: text, date: r.date, sender: r.sender, is_from_me: r.from_me === 1,
+			hits.push({ content: text, date: r.date, sender: r.sender ?? "", is_from_me: r.from_me === 1,
 				chatId: r.chat_id ?? undefined });
 		}
 		return {

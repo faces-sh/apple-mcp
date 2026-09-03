@@ -37,7 +37,17 @@ export async function unusedNumberFor(
 		const name = await deps.whoOwns(target);
 		if (!name) return null;                              // nobody owns it: a new number, allowed
 		const cards = await deps.cardsFor(name);
-		const theirs = cards.flatMap((c) => [...c.phones, ...c.emails])
+		// ONLY THE CARD THAT ACTUALLY HOLDS THIS NUMBER. `findContacts` matches loosely, on the full name
+		// AND on each word of it, so looking up "Linda Therrien" also returns "Troy Conrad Therrien".
+		// Pooling every match's handles made this name HER number and then offer HER SON'S as the one to
+		// use, in a sentence telling the caller to send there. That is the same union leak
+		// `conversation.ts` documents as fixed, still live one file over, on the irreversible path.
+		const wanted = new Set([target, ...handleCandidates(target)].map((h) => h.toLowerCase()));
+		const owner = cards.filter((c) => [...c.phones, ...c.emails].some((h) =>
+			[h.trim(), ...handleCandidates(h.trim())].some((f) => wanted.has(f.toLowerCase()))));
+		// Nobody's card actually carries it: say nothing rather than guess whose it is.
+		if (owner.length !== 1) return null;
+		const theirs = owner.flatMap((c) => [...c.phones, ...c.emails])
 			.map((h) => h.trim()).filter(Boolean);
 		// Their handle with the most recent traffic, if any has any.
 		let best: { handle: string; at: string } | null = null;
@@ -47,7 +57,7 @@ export async function unusedNumberFor(
 				if (at && (!best || at > best.at)) best = { handle: c, at };
 			}
 		}
-		return best ? { name, better: best.handle } : null;
+		return best ? { name: owner[0]!.name, better: best.handle } : null;
 	} catch {
 		return null;   // Contacts unreadable, or the store is: never block a send on a nicety
 	}

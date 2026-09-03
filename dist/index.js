@@ -2710,12 +2710,19 @@ function looksLikeHandle(who) {
 function resolveRecipient(cards, lastSeenByHandle2) {
   const people = cards.map((c) => {
     const all = [...c.phones, ...c.emails].map((h) => h.trim()).filter(Boolean);
+    const lastSeen = (h) => {
+      for (const form of [h, ...handleCandidates(h)]) {
+        const at = lastSeenByHandle2.get(form);
+        if (at) return at;
+      }
+      return "";
+    };
     const handles = [...all].sort((a, b) => {
-      const sa = lastSeenByHandle2.get(a) ?? "";
-      const sb = lastSeenByHandle2.get(b) ?? "";
+      const sa = lastSeen(a);
+      const sb = lastSeen(b);
       return sa === sb ? 0 : sa < sb ? 1 : -1;
     });
-    const seen = handles.map((h) => lastSeenByHandle2.get(h)).filter((d) => Boolean(d)).sort().pop();
+    const seen = handles.map(lastSeen).filter(Boolean).sort().pop();
     return { name: c.name, handles, lastSeen: seen };
   }).filter((p) => p.handles.length > 0);
   if (people.length === 0) return { kind: "unknown" };
@@ -2909,7 +2916,10 @@ async function unusedNumberFor(target, deps) {
     const name = await deps.whoOwns(target);
     if (!name) return null;
     const cards = await deps.cardsFor(name);
-    const theirs = cards.flatMap((c) => [...c.phones, ...c.emails]).map((h) => h.trim()).filter(Boolean);
+    const wanted = new Set([target, ...handleCandidates(target)].map((h) => h.toLowerCase()));
+    const owner = cards.filter((c) => [...c.phones, ...c.emails].some((h) => [h.trim(), ...handleCandidates(h.trim())].some((f) => wanted.has(f.toLowerCase()))));
+    if (owner.length !== 1) return null;
+    const theirs = owner.flatMap((c) => [...c.phones, ...c.emails]).map((h) => h.trim()).filter(Boolean);
     let best = null;
     for (const h of theirs) {
       for (const c of [h, ...handleCandidates(h)]) {
@@ -2917,7 +2927,7 @@ async function unusedNumberFor(target, deps) {
         if (at && (!best || at > best.at)) best = { handle: c, at };
       }
     }
-    return best ? { name, better: best.handle } : null;
+    return best ? { name: owner[0].name, better: best.handle } : null;
   } catch {
     return null;
   }
@@ -3261,27 +3271,30 @@ function clampLimit(limit) {
   if (!Number.isFinite(n) || n <= 0) return 10;
   return Math.min(n, CONFIG.MAX_MESSAGES);
 }
-async function sendFailure(handle, sentAfter) {
-  const since = Math.floor(sentAfter / 1e3) - 978307200 - 2;
-  for (let attempt = 0; attempt < 8; attempt++) {
+async function sendFailure(handle, sentAfter, scope = {}) {
+  const threshold = Math.round((sentAfter / 1e3 - 978307200 - 2) * 1e9);
+  const where = scope.chatGuid ? `cmj.chat_id IN (SELECT ROWID FROM chat WHERE guid = '${escapeSqlString(scope.chatGuid)}')` : `h.id IN (${[handle, ...handleCandidates(handle)].map((c) => `'${escapeSqlString(c)}'`).join(",") || "''"})`;
+  for (let attempt = 0; attempt < 10; attempt++) {
     await new Promise((r) => setTimeout(r, 500));
     try {
       const { stdout } = await execFileAsync2("sqlite3", ["-json", CHAT_DB, `
 				SELECT m.error AS err, m.is_sent AS sent
-				FROM message m LEFT JOIN handle h ON h.ROWID = m.handle_id
-				WHERE m.is_from_me = 1 AND m.date/1000000000 + 978307200 > ${since}
+				FROM message m
+				LEFT JOIN handle h ON h.ROWID = m.handle_id
+				LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+				WHERE m.is_from_me = 1 AND m.date > ${threshold} AND ${where}
 				ORDER BY m.date DESC LIMIT 1`]);
       const row = JSON.parse(stdout || "[]")[0];
       if (!row) continue;
       if (row.err && row.err !== 0) {
-        return `The message was NOT delivered to ${handle} (Messages reported error ${row.err}). It may not be reachable at that number on iMessage. Check the number, or send to the one they have actually been messaging from.`;
+        return `The message was NOT delivered to ${handle} (Messages reported error ${row.err}). They may not be reachable at that address on iMessage. Check it, or use the one they have actually been messaging from.`;
       }
       if (row.sent) return null;
     } catch {
-      return null;
+      return `The message to ${handle} was handed to Messages, but your message database could not be read to confirm it was sent. Check the conversation before sending it again.`;
     }
   }
-  return null;
+  return `No record of the message to ${handle} was written by Messages, so it does not appear to have been sent. Check the conversation before sending it again, to avoid sending it twice.`;
 }
 async function sendToConversation(guid2, message2) {
   const body = escapeAppleScriptString(message2);
@@ -3292,7 +3305,7 @@ async function sendToConversation(guid2, message2) {
 tell application "Messages"
     send "${body}" to chat id "${chat}"
 end tell`);
-    const failed = await sendFailure(guid2, started);
+    const failed = await sendFailure(guid2, started, { chatGuid: guid2 });
     if (failed) throw new ToolFailure("message_not_sent", failed);
     return out;
   } catch (error2) {
@@ -3682,7 +3695,13 @@ async function searchMessages(query, limit = 10, scan2 = 5e4) {
 					m.is_from_me AS from_me,
 					datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') AS date
 				FROM message m
-				JOIN handle h ON h.ROWID = m.handle_id
+				-- LEFT, because a message the USER sent to a GROUP carries handle_id = 0. An inner join
+				-- silently dropped 14,640 of 45,038 rows on a real Mac: a third of the history and 69%
+				-- of everything they had ever sent. "merci" found 379 instead of 628. The answer still
+				-- said "No messages found" with no caveat, which is the quietly-partial answer this file
+				-- keeps having to relearn. Found by an adversarial review; the doc comment above quoted
+				-- 232 hits for "meeting" as evidence, and the true figure was 338.
+				LEFT JOIN handle h ON h.ROWID = m.handle_id
 				LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
 				WHERE m.item_type = 0
 					AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL)
@@ -3704,7 +3723,7 @@ async function searchMessages(query, limit = 10, scan2 = 5e4) {
       hits.push({
         content: text,
         date: r.date,
-        sender: r.sender,
+        sender: r.sender ?? "",
         is_from_me: r.from_me === 1,
         chatId: r.chat_id ?? void 0
       });
@@ -3876,12 +3895,20 @@ async function readConversation(chatId, limit = 10) {
 		ORDER BY m.date DESC
 		LIMIT ${capped}`], { maxBuffer: 64 * 1024 * 1024 });
   const raw = JSON.parse(stdout || "[]");
-  return raw.map((r) => ({
-    sender: r.sender,
-    fromMe: r.from_me === 1,
-    text: (r.is_hex ? decodeAttributedBody(r.body).text : r.body) ?? "",
-    date: r.date
-  }));
+  const { stdout: countOut } = await execFileAsync3("sqlite3", ["-json", CHAT_DB2, `
+		SELECT COUNT(*) AS n FROM message m
+		JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+		WHERE cmj.chat_id = ${Math.floor(chatId)} AND m.item_type = 0`]);
+  const total = JSON.parse(countOut || "[]")[0]?.n ?? raw.length;
+  return {
+    messages: raw.map((r) => ({
+      sender: r.sender,
+      fromMe: r.from_me === 1,
+      text: (r.is_hex ? decodeAttributedBody(r.body).text : r.body) ?? "",
+      date: r.date
+    })),
+    total
+  };
 }
 function namesAsked(raw) {
   return raw.split(/\s*(?:,|&|\+|\band\b|\bet\b)\s*/i).map((n) => n.trim()).filter(Boolean);
@@ -3927,6 +3954,7 @@ var init_conversation = __esm({
 		SELECT cmj2.chat_id AS cid, MAX(m2.date) AS latest
 		FROM chat_message_join cmj2 JOIN message m2 ON m2.ROWID = cmj2.message_id
 		WHERE m2.item_type = 0
+			AND (m2.is_from_me = 0 OR (m2.is_sent = 1 AND COALESCE(m2.error, 0) = 0))
 		GROUP BY cmj2.chat_id
 	) last ON last.cid = c.ROWID AND last.latest = m.date`;
     CHAT_COLUMNS = `
@@ -19953,7 +19981,7 @@ function calendarTruncationNote(cut) {
 async function readThread(conv, others, limit) {
   const messageModule = await loadModule("message");
   const contactsForNames = await loadModule("contacts");
-  const messages = await messageModule.readConversation(conv.chatId, limit);
+  const { messages, total } = await messageModule.readConversation(conv.chatId, limit);
   let names = /* @__PURE__ */ new Map();
   try {
     names = await contactsForNames.namesForHandles(conv.participants);
@@ -19968,8 +19996,7 @@ async function readThread(conv, others, limit) {
   return {
     content: [{
       type: "text",
-      text: messages.length ? `${messages.length} message(s) in your ${conv.isGroup ? "group " : ""}conversation with ${heading}, most recent first:
-` + messages.map(
+      text: messages.length ? `Showing ${messages.length} of ${total} message(s) in your ${conv.isGroup ? "group " : ""}conversation with ${heading}` + (total > messages.length ? ", most recent first. Ask for more with limit:\n" : ", most recent first:\n") + messages.map(
         (msg) => `[${new Date(msg.date).toLocaleString()}] ${msg.fromMe ? "Me" : who(msg.sender)}: ${msg.text}`
       ).join("\n") + alsoIn : `Your conversation with ${heading} has no messages in it.`
     }],
@@ -20281,7 +20308,7 @@ ${note.content}`).join("\n\n") + trimmed : `No notes found for "${args.searchTex
                           type: "text",
                           text: `Nothing was sent yet: more than one person is called "${target}":
 ` + who.candidates.map(
-                            (c) => `  ${c.name} \u2014 ${c.handles[0]}` + (c.lastSeen ? `, last in touch ${c.lastSeen}` : ", never in touch")
+                            (c) => `  ${c.name}: ${c.handles[0]}` + (c.lastSeen ? `, last in touch ${c.lastSeen}` : ", never in touch")
                           ).join("\n") + "\nSend again with the number of the one you mean."
                         }],
                         isError: false
@@ -20304,6 +20331,21 @@ ${note.content}`).join("\n\n") + trimmed : `No notes found for "${args.searchTex
                         content: [{
                           type: "text",
                           text: `Nothing was sent yet: ${names.join(" and ")} share ${found.others.length + 1} conversations, and a message must not go to the wrong one. Send to one person's number instead.`
+                        }],
+                        isError: false
+                      };
+                    }
+                    if (found.conversation.participants.length > names.length) {
+                      let others = found.conversation.participants;
+                      try {
+                        const named = await (await loadModule("contacts")).namesForHandles(found.conversation.participants);
+                        others = found.conversation.participants.map((h) => named.get(h.trim()) || h);
+                      } catch {
+                      }
+                      return {
+                        content: [{
+                          type: "text",
+                          text: `Nothing was sent yet: the only conversation with ${names.join(" and ")} also has other people in it (${others.join(", ")}). Send to one person's number if this was meant to be private, or say to go ahead in that group.`
                         }],
                         isError: false
                       };
@@ -20355,7 +20397,7 @@ ${note.content}`).join("\n\n") + trimmed : `No notes found for "${args.searchTex
                         type: "text",
                         text: `More than one person is called "${found.name}":
 ` + found.candidates.map(
-                          (c) => `  ${c.name} \u2014 ${c.handles[0]}` + (c.lastSeen ? `, last in touch ${c.lastSeen}` : ", never in touch")
+                          (c) => `  ${c.name}: ${c.handles[0]}` + (c.lastSeen ? `, last in touch ${c.lastSeen}` : ", never in touch")
                         ).join("\n") + "\nRead again with the number of the one you mean."
                       }],
                       isError: false

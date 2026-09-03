@@ -1,4 +1,4 @@
-import { isEmailHandle } from "./phone";
+import { handleCandidates, isEmailHandle } from "./phone";
 
 /** One person this name could mean, and whether they have actually been in touch. */
 export interface Candidate {
@@ -68,17 +68,31 @@ export function resolveRecipient(
 			// Same rule as choosing between two PEOPLE, one level down: recency decides, and a handle
 			// nobody has ever written to sorts last rather than being dropped, because a person with no
 			// history at all must still be reachable.
+			// LOOKED UP THROUGH EVERY SPELLING, because the two sides do not agree on one.
+			//
+			// The map is keyed by chat.db's `handle.id`, which is E.164 for 295 of the 384 handles on a
+			// real Mac. A contact card gives back what the person TYPED: "+1 (604) 657-1752". So a raw
+			// `get()` missed every time, every key tied at "", the sort became a no-op, and this fell
+			// back to card order, which is the bug it was written to fix. Worse one level up: with all
+			// candidates tied, `resolveRecipient` could return `kind: "one"` for a DIFFERENT PERSON whose
+			// number happened to be typed without punctuation, and send to them without asking.
+			//
+			// The regression test could not catch it: its fixture wrote the card number as the
+			// byte-identical "+16046571752", which real Contacts never produces.
+			const lastSeen = (h: string): string => {
+				for (const form of [h, ...handleCandidates(h)]) {
+					const at = lastSeenByHandle.get(form);
+					if (at) return at;
+				}
+				return "";
+			};
 			const handles = [...all].sort((a, b) => {
-				const sa = lastSeenByHandle.get(a) ?? "";
-				const sb = lastSeenByHandle.get(b) ?? "";
+				const sa = lastSeen(a);
+				const sb = lastSeen(b);
 				return sa === sb ? 0 : sa < sb ? 1 : -1;
 			});
 			// The most recent time ANY of this person's handles was in touch.
-			const seen = handles
-				.map((h) => lastSeenByHandle.get(h))
-				.filter((d): d is string => Boolean(d))
-				.sort()
-				.pop();
+			const seen = handles.map(lastSeen).filter(Boolean).sort().pop();
 			return { name: c.name, handles, lastSeen: seen };
 		})
 		.filter((p) => p.handles.length > 0);

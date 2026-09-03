@@ -72,7 +72,7 @@ async function readThread(
 ): Promise<{ content: { type: "text"; text: string }[]; isError: boolean }> {
 	const messageModule = await loadModule("message");
 	const contactsForNames = await loadModule("contacts");
-	const messages = await messageModule.readConversation(conv.chatId, limit);
+	const { messages, total } = await messageModule.readConversation(conv.chatId, limit);
 	let names = new Map<string, string>();
 	try {
 		// A name is a nicety; the messages are the answer. Kept OUTSIDE the read so a Contacts denial
@@ -91,8 +91,9 @@ async function readThread(
 		content: [{
 			type: "text",
 			text: messages.length
-				? `${messages.length} message(s) in your ${conv.isGroup ? "group " : ""}`
-					+ `conversation with ${heading}, most recent first:\n`
+				? `Showing ${messages.length} of ${total} message(s) in your `
+					+ `${conv.isGroup ? "group " : ""}conversation with ${heading}`
+					+ (total > messages.length ? ", most recent first. Ask for more with limit:\n" : ", most recent first:\n")
 					+ messages.map((msg: { date: string; fromMe: boolean; sender: string; text: string }) =>
 						`[${new Date(msg.date).toLocaleString()}] `
 						+ `${msg.fromMe ? "Me" : who(msg.sender)}: ${msg.text}`,
@@ -559,7 +560,7 @@ function initServer() {
 													text: `Nothing was sent yet: more than one person is called `
 														+ `"${target}":\n`
 														+ who.candidates.map((c) =>
-															`  ${c.name} — ${c.handles[0]}`
+															`  ${c.name}: ${c.handles[0]}`
 															+ (c.lastSeen ? `, last in touch ${c.lastSeen}` : ", never in touch"),
 														).join("\n")
 														+ "\nSend again with the number of the one you mean.",
@@ -587,6 +588,31 @@ function initServer() {
 														+ `${names.join(" and ")} share ${found.others.length + 1} `
 														+ "conversations, and a message must not go to the wrong one. "
 														+ "Send to one person's number instead.",
+												}],
+												isError: false,
+											};
+										}
+										// AND WHO ELSE IS IN IT. Matching is "every person named is here",
+										// never "and nobody else", so the only thread two people share can
+										// hold three more. On a real Mac that is true of 33 pairs. Sending
+										// silently is exactly the thing this branch says it exists to
+										// prevent: a private note in front of four people.
+										if (found.conversation.participants.length > names.length) {
+											let others = found.conversation.participants;
+											try {
+												const named = await (await loadModule("contacts"))
+													.namesForHandles(found.conversation.participants);
+												others = found.conversation.participants
+													.map((h) => named.get(h.trim()) || h);
+											} catch { /* handles will do */ }
+											return {
+												content: [{
+													type: "text",
+													text: "Nothing was sent yet: the only conversation with "
+														+ `${names.join(" and ")} also has other people in it `
+														+ `(${others.join(", ")}). Send to one person's number `
+														+ "if this was meant to be private, or say to go ahead "
+														+ "in that group.",
 												}],
 												isError: false,
 											};
@@ -671,7 +697,7 @@ function initServer() {
 												type: "text",
 												text: `More than one person is called "${found.name}":\n`
 													+ found.candidates.map((c) =>
-														`  ${c.name} — ${c.handles[0]}`
+														`  ${c.name}: ${c.handles[0]}`
 														+ (c.lastSeen ? `, last in touch ${c.lastSeen}` : ", never in touch"),
 													).join("\n")
 													+ "\nRead again with the number of the one you mean.",

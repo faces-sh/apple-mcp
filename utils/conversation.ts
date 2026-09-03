@@ -21,7 +21,7 @@
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { decodeAttributedBody } from "./message";
+import { GENUINE_CONTACT, decodeAttributedBody } from "./message";
 import { handleCandidates } from "./phone";
 
 const execFileAsync = promisify(execFile);
@@ -43,6 +43,20 @@ export interface Conversation {
 	lastFromMe?: boolean;
 }
 
+/**
+ * A chat, and the last thing that GENUINELY happened in it.
+ *
+ * THE SAME POISON, ONE TABLE OVER. `lastSeenByHandle` was taught to ignore our own failed sends and
+ * these queries were not, so five undelivered messages to a dead landline made a chat that exists only
+ * because we created it the freshest thread on the machine. Reading "Linda" then answered
+ * "5 message(s) in your conversation with Linda Therrien" with five of the user's own red bubbles,
+ * while the real thread, 7,754 messages of it, was not even in the list. On the send path the same
+ * ghost supplied the guid.
+ *
+ * A conversation nobody has ever reached is not a conversation. Found by an adversarial review after
+ * the handle-level fix had already shipped, which is the lesson: the same rule has to be applied
+ * everywhere the same question is asked, not where the bug happened to surface.
+ */
 const LATEST_PER_CHAT = `
 	JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
 	JOIN message m ON m.ROWID = cmj.message_id
@@ -50,6 +64,7 @@ const LATEST_PER_CHAT = `
 		SELECT cmj2.chat_id AS cid, MAX(m2.date) AS latest
 		FROM chat_message_join cmj2 JOIN message m2 ON m2.ROWID = cmj2.message_id
 		WHERE m2.item_type = 0
+			AND (m2.is_from_me = 0 OR (m2.is_sent = 1 AND COALESCE(m2.error, 0) = 0))
 		GROUP BY cmj2.chat_id
 	) last ON last.cid = c.ROWID AND last.latest = m.date`;
 
@@ -146,7 +161,7 @@ export async function conversationsWith(
 export async function readConversation(
 	chatId: number,
 	limit = 10,
-): Promise<{ sender: string; fromMe: boolean; text: string; date: string }[]> {
+): Promise<{ messages: { sender: string; fromMe: boolean; text: string; date: string }[]; total: number }> {
 	const capped = Math.max(1, Math.min(Math.floor(limit) || 10, 100));
 	const { stdout } = await execFileAsync("sqlite3", ["-json", CHAT_DB, `
 		SELECT
@@ -167,12 +182,23 @@ export async function readConversation(
 		LIMIT ${capped}`], { maxBuffer: 64 * 1024 * 1024 });
 	const raw = JSON.parse(stdout || "[]") as
 		{ sender: string; from_me: number; body: string; is_hex: number; date: string }[];
-	return raw.map((r) => ({
-		sender: r.sender,
-		fromMe: r.from_me === 1,
-		text: (r.is_hex ? decodeAttributedBody(r.body).text : r.body) ?? "",
-		date: r.date,
-	}));
+	// HOW MANY THE CONVERSATION HOLDS. The handle path has said this for months, with a comment about
+	// the week it was got wrong in four places; the new name path printed ten of 5,325 as though that
+	// were the conversation. An adversarial review caught the rule going missing when the path changed.
+	const { stdout: countOut } = await execFileAsync("sqlite3", ["-json", CHAT_DB, `
+		SELECT COUNT(*) AS n FROM message m
+		JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+		WHERE cmj.chat_id = ${Math.floor(chatId)} AND m.item_type = 0`]);
+	const total = (JSON.parse(countOut || "[]") as { n: number }[])[0]?.n ?? raw.length;
+	return {
+		messages: raw.map((r) => ({
+			sender: r.sender,
+			fromMe: r.from_me === 1,
+			text: (r.is_hex ? decodeAttributedBody(r.body).text : r.body) ?? "",
+			date: r.date,
+		})),
+		total,
+	};
 }
 
 /**

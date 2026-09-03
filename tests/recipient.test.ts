@@ -165,3 +165,30 @@ describe("the spelling a send hands to Messages", () => {
 		expect(sendableHandle("Free Mobile")).toBe("Free Mobile");
 	});
 });
+
+
+// EVERY FIXTURE HERE WRITES THE CARD NUMBER THE WAY REAL CONTACTS WRITES IT, which is as the person
+// TYPED it. The previous version of this suite used "+16046571752", byte-identical to chat.db's key, so
+// the lookup could not miss and the test passed while the code was inert on every real machine. An
+// adversarial review found it: card values come from CNPhoneNumber.stringValue and keep their
+// punctuation, chat.db stores E.164, and nothing normalised between them.
+describe("ranking handles the way real Contacts spells them", () => {
+	const SEEN = new Map([["+16046571752", "2026-09-02 19:04:05"], ["+15551110000", "2019-01-01 00:00:00"]]);
+
+	test("a formatted card number still finds its history", () => {
+		const r = resolveRecipient(
+			[{ name: "Linda Therrien", phones: ["(604) 730-4051", "+1 (604) 657-1752"], emails: [] }], SEEN);
+		expect(r.kind).toBe("one");
+		// The ORDER is the assertion: the number with history first, the landline after it.
+		expect((r as any).handles).toEqual(["+1 (604) 657-1752", "(604) 730-4051"]);
+	});
+
+	// The worst outcome the old bug allowed: every candidate tied at "", so one person was picked with
+	// kind "one" and no question asked, and it was whoever happened to be typed without punctuation.
+	test("two people are a QUESTION, not a silent pick of the tidily-typed one", () => {
+		const r = resolveRecipient([
+			{ name: "Linda Therrien", phones: ["+1 (604) 657-1752"], emails: [] },
+			{ name: "Melinda Gates", phones: ["+15551110000"], emails: [] }], SEEN);
+		expect(r.kind).toBe("several");
+	});
+});
