@@ -43,3 +43,24 @@ export function handleCandidates(input: string): string[] {
 	}
 	return Array.from(set).filter(Boolean);
 }
+
+/**
+ * The spelling to hand Messages when SENDING to a phone number: E.164 wherever one can be parsed.
+ *
+ * NEVER A FORMATTED NUMBER. Sending to "(604) 730-4051" made Messages open a brand-new chat whose
+ * identifier is that literal string, with `is_sent = 0` and `error = 22` on the message, and one second
+ * later Messages itself crashed in IMCore sorting its chats (`-[NSString containsString:]` inside
+ * `__CFSimpleMergeSort`). It happened twice, on the two occasions a send used that spelling, and never
+ * on a send to an E.164 number. The crash is Apple's; handing it a shape it clearly cannot cope with is
+ * ours, and there was never a reason to: the number is parsed here already, for reads.
+ *
+ * Anything that is not a phone number (an email, a short code, a carrier name like "Free Mobile") is
+ * returned untouched, because those are handles in their own right and reformatting them is how a
+ * working recipient becomes an unreachable one.
+ */
+export function sendableHandle(input: string): string {
+	const trimmed = input.trim();
+	if (!trimmed || isEmailHandle(trimmed)) return trimmed;
+	const e164 = handleCandidates(trimmed).find((h) => h.startsWith("+"));
+	return e164 ?? trimmed;
+}

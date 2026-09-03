@@ -11,7 +11,7 @@ import {
 	escapeSqlString,
 } from "./native";
 import { rawBody } from "./failure";
-import { handleCandidates } from "./phone";
+import { handleCandidates, sendableHandle } from "./phone";
 import { looksLikeHandle } from "./recipient";
 import { typedstreamText } from "./typedstream";
 import { matchesQuery, queryTerms } from "./query";
@@ -177,7 +177,9 @@ async function sendMessage(phoneNumber: string, message: string) {
 			+ "address. Read their conversation to get it, or look the name up in Contacts.",
 		);
 	}
-	const buddy = escapeAppleScriptString(phoneNumber);
+	// E.164, never the formatted spelling: see `sendableHandle`. Messages crashed on the other one.
+	const target = sendableHandle(phoneNumber);
+	const buddy = escapeAppleScriptString(target);
 	const body = escapeAppleScriptString(message);
 	const started = Date.now();
 	try {
@@ -187,7 +189,7 @@ tell application "Messages"
     set targetBuddy to buddy "${buddy}"
     send "${body}" to targetBuddy
 end tell`);
-		const failed = await sendFailure(phoneNumber, started);
+		const failed = await sendFailure(target, started);
 		if (failed) throw new ToolFailure("message_not_sent", failed);
 		return out;
 	} catch (error) {

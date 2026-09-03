@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { looksLikeHandle, resolveRecipient } from "../utils/recipient";
+import { sendableHandle } from "../utils/phone";
 
 /**
  * Turning "Caroline" into a conversation.
@@ -131,5 +132,25 @@ describe("which of one person's handles to use", () => {
 		const r = resolveRecipient(cards, new Map());
 		expect(r.kind).toBe("one");
 		expect((r as any).handles).toEqual(["+1555", "+1666"]);
+	});
+});
+
+// NEVER HAND MESSAGES A FORMATTED NUMBER. Sending to "(604) 730-4051" made it open a new chat whose
+// identifier is that literal string, mark the message error 22, and crash one second later in IMCore
+// sorting its chats. Twice, on the two sends that used that spelling, and never on an E.164 one.
+describe("the spelling a send hands to Messages", () => {
+	test("a formatted number becomes E.164", () => {
+		expect(sendableHandle("(604) 730-4051")).toBe("+16047304051");
+		expect(sendableHandle("604-730-4051")).toBe("+16047304051");
+	});
+
+	test("an E.164 number is already right", () => {
+		expect(sendableHandle("+16046571752")).toBe("+16046571752");
+	});
+
+	// Reformatting one of these turns a working recipient into an unreachable one.
+	test("an email, a short code or a carrier name is left alone", () => {
+		expect(sendableHandle("troyth@gmail.com")).toBe("troyth@gmail.com");
+		expect(sendableHandle("Free Mobile")).toBe("Free Mobile");
 	});
 });

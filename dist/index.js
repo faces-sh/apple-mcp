@@ -2686,6 +2686,12 @@ function handleCandidates(input) {
   }
   return Array.from(set).filter(Boolean);
 }
+function sendableHandle(input) {
+  const trimmed = input.trim();
+  if (!trimmed || isEmailHandle(trimmed)) return trimmed;
+  const e1642 = handleCandidates(trimmed).find((h) => h.startsWith("+"));
+  return e1642 ?? trimmed;
+}
 var init_phone = __esm({
   "utils/phone.ts"() {
     "use strict";
@@ -3270,7 +3276,8 @@ async function sendMessage(phoneNumber, message2) {
       `Nothing was sent: "${phoneNumber}" is a name, and a message needs a phone number or email address. Read their conversation to get it, or look the name up in Contacts.`
     );
   }
-  const buddy = escapeAppleScriptString(phoneNumber);
+  const target = sendableHandle(phoneNumber);
+  const buddy = escapeAppleScriptString(target);
   const body = escapeAppleScriptString(message2);
   const started = Date.now();
   try {
@@ -3280,7 +3287,7 @@ tell application "Messages"
     set targetBuddy to buddy "${buddy}"
     send "${body}" to targetBuddy
 end tell`);
-    const failed = await sendFailure(phoneNumber, started);
+    const failed = await sendFailure(target, started);
     if (failed) throw new ToolFailure("message_not_sent", failed);
     return out;
   } catch (error2) {
