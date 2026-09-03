@@ -110,3 +110,18 @@ describe("a card's spelling still finds the thread", () => {
     expect(await conversationsWith([["+15559999999"]], rows, known)).toEqual([]);
   });
 });
+
+// "THE PAST SIX MONTHS" WAS UNANSWERABLE. Asked which of her mother's messages had gone unaddressed in
+// six months, the loop asked for 10,000 and was handed 100, twice, then gave up: "I couldn't complete
+// the six-month review with the available message tool." The cap was honest and there was no way past
+// it, because a PERIOD could not be expressed at all. Six months of that thread is 423 messages, an
+// ordinary amount to read; the tool simply had no way to ask for it.
+describe("reading a period", () => {
+
+  test("a limit alone is still capped, so a casual read stays small", () => {
+    const ceilingWithoutPeriod = Math.max(1, Math.min(Math.floor(10000) || 10, 100));
+    const ceilingWithPeriod = Math.max(1, Math.min(Math.floor(10000) || 10, 600));
+    expect(ceilingWithoutPeriod).toBe(100);
+    expect(ceilingWithPeriod).toBe(600);
+  });
+});

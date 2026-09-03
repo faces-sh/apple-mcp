@@ -3905,6 +3905,9 @@ function toConversation(r) {
     lastFromMe: r.from_me === 1
   };
 }
+function escapeSql(v) {
+  return v.replace(/'/g, "''");
+}
 async function listConversations(limit = 10, rows = sqlite) {
   const capped = Math.max(1, Math.min(Math.floor(limit) || 10, 100));
   return (await rows(`
@@ -3938,8 +3941,10 @@ async function conversationsWith(handleSets, rows = sqlite, knownIds = sqliteIds
     return wanted.every((person) => [...person].some((h) => here.has(h)));
   });
 }
-async function readConversation(chatId, limit = 10) {
-  const capped = Math.max(1, Math.min(Math.floor(limit) || 10, 100));
+async function readConversation(chatId, limit = 10, since) {
+  const ceiling = since ? 600 : 100;
+  const capped = Math.max(1, Math.min(Math.floor(limit) || 10, ceiling));
+  const window = since && /^\d{4}-\d{2}-\d{2}/.test(since.trim()) ? `AND m.date > (strftime('%s','${escapeSql(since.trim().slice(0, 10))}') - 978307200) * 1000000000` : "";
   const { stdout } = await execFileAsync2("sqlite3", ["-json", CHAT_DB2, `
 		SELECT
 			COALESCE(h.id, '') AS sender,
@@ -3954,16 +3959,17 @@ async function readConversation(chatId, limit = 10) {
 		FROM message m
 		JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
 		LEFT JOIN handle h ON h.ROWID = m.handle_id
-		WHERE cmj.chat_id = ${Math.floor(chatId)} AND m.item_type = 0
+		WHERE cmj.chat_id = ${Math.floor(chatId)} AND m.item_type = 0 ${window}
 		ORDER BY m.date DESC
 		LIMIT ${capped}`], { maxBuffer: 64 * 1024 * 1024 });
   const raw = JSON.parse(stdout || "[]");
   const { stdout: countOut } = await execFileAsync2("sqlite3", ["-json", CHAT_DB2, `
 		SELECT COUNT(*) AS n FROM message m
 		JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-		WHERE cmj.chat_id = ${Math.floor(chatId)} AND m.item_type = 0`]);
+		WHERE cmj.chat_id = ${Math.floor(chatId)} AND m.item_type = 0 ${window}`]);
   const total = JSON.parse(countOut || "[]")[0]?.n ?? raw.length;
   return {
+    since: window ? since : void 0,
     messages: raw.map((r) => ({
       sender: r.sender,
       fromMe: r.from_me === 1,
@@ -19898,6 +19904,10 @@ var MESSAGES_TOOL = {
         type: "number",
         description: "How many to return (optional, for read, search, recent and unread operations)"
       },
+      since: {
+        type: "string",
+        description: "Optional, for read: only messages on or after this date, as YYYY-MM-DD. This is how you cover a PERIOD, for example the last six months; without it a read returns only the most recent handful."
+      },
       query: {
         type: "string",
         description: "Words to look for inside the messages themselves (required for search operation)"
@@ -20046,10 +20056,10 @@ function calendarTruncationNote(cut) {
 
 (Showing ${cut.shown} of ${cut.total} in that window. Ask for a bigger limit or a narrower window.)` : "";
 }
-async function readThread(conv, others, limit) {
+async function readThread(conv, others, limit, since) {
   const messageModule = await loadModule("message");
   const contactsForNames = await loadModule("contacts");
-  const { messages, total } = await messageModule.readConversation(conv.chatId, limit);
+  const { messages, total } = await messageModule.readConversation(conv.chatId, limit, since);
   let names = /* @__PURE__ */ new Map();
   try {
     names = await contactsForNames.namesForHandles(conv.participants);
@@ -20064,7 +20074,7 @@ async function readThread(conv, others, limit) {
   return {
     content: [{
       type: "text",
-      text: messages.length ? `Showing ${messages.length} of ${total} message(s) in your ${conv.isGroup ? "group " : ""}conversation with ${heading}` + (total > messages.length ? ", most recent first. Ask for more with limit:\n" : ", most recent first:\n") + messages.map(
+      text: messages.length ? `Showing ${messages.length} of ${total} message(s)${since ? ` since ${since}` : ""} in your ${conv.isGroup ? "group " : ""}conversation with ${heading}` + (total > messages.length ? ", most recent first. Ask for more with limit:\n" : ", most recent first:\n") + messages.map(
         (msg) => `[${new Date(msg.date).toLocaleString()}] ${msg.fromMe ? "Me" : who(msg.sender)}: ${msg.text}`
       ).join("\n") + alsoIn : `Your conversation with ${heading} has no messages in it.`
     }],
@@ -20490,11 +20500,11 @@ ${note.content}`).join("\n\n") + trimmed : `No notes found for "${args.searchTex
                       `No conversation holds ${found.who.join(" and ")} together. They may each have their own thread: read one name at a time.`
                     );
                   }
-                  return await readThread(found.conversation, found.others, args.limit);
+                  return await readThread(found.conversation, found.others, args.limit, args.since);
                 }
                 const byHandle = await messageModule.conversationsForHandle(handle);
                 if (byHandle.length) {
-                  return await readThread(byHandle[0], byHandle.slice(1), args.limit);
+                  return await readThread(byHandle[0], byHandle.slice(1), args.limit, args.since);
                 }
                 const messages = await messageModule.readMessages(
                   handle,
@@ -20971,6 +20981,7 @@ function isMessagesArgs(args) {
       break;
   }
   if (phoneNumber && typeof phoneNumber !== "string") return false;
+  if (args.since !== void 0 && typeof args.since !== "string") return false;
   if (message2 && typeof message2 !== "string") return false;
   if (limit && typeof limit !== "number") return false;
   if (scheduledTime && typeof scheduledTime !== "string") return false;

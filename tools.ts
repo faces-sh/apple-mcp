@@ -69,6 +69,12 @@ const CONTACTS_TOOL: Tool = {
           type: "number",
           description: "How many to return (optional, for read, search, recent and unread operations)"
         },
+        since: {
+          type: "string",
+          description: "Optional, for read: only messages on or after this date, as YYYY-MM-DD. This "
+            + "is how you cover a PERIOD, for example the last six months; without it a read returns "
+            + "only the most recent handful."
+        },
         query: {
           type: "string",
           description: "Words to look for inside the messages themselves (required for search operation)"

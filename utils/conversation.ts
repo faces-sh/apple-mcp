@@ -117,6 +117,9 @@ export type ChatRows = (sql: string) => Promise<ChatRow[]>;
 /** Every handle string the database holds. Injectable for the same reason `ChatRows` is. */
 export type KnownIds = () => Promise<string[]>;
 
+/** Single quotes doubled, for the one literal this file interpolates. */
+function escapeSql(v: string): string { return v.replace(/'/g, "''"); }
+
 const sqliteIds: KnownIds = async () => {
 	const { stdout } = await execFileAsync("sqlite3", ["-json", CHAT_DB, "SELECT id FROM handle"]);
 	return (JSON.parse(stdout || "[]") as { id: string }[]).map((r) => r.id).filter(Boolean);
@@ -188,11 +191,32 @@ export async function conversationsWith(
 }
 
 /** Every message in one conversation, most recent first, with who said each one. */
+/**
+ * `since` is what makes "the past six months" answerable at all.
+ *
+ * Asked which of her mother's messages had gone unanswered in six months, the loop asked for 10,000 and
+ * was handed 100, twice, and gave up: "I couldn't complete the six-month review with the available
+ * message tool." The cap was honest ("Showing 100 of 7,689") and there was no way past it, because a
+ * PERIOD could not be expressed at all. Six months of that thread is 423 messages, which is a perfectly
+ * ordinary amount to read; the tool simply had no way to ask for it.
+ *
+ * A period raises the ceiling because it BOUNDS the answer itself: "since March" cannot run away the
+ * way a bare limit can. Without one the old ceiling stands, so a casual read still costs a handful of
+ * lines rather than a thread.
+ */
 export async function readConversation(
 	chatId: number,
 	limit = 10,
-): Promise<{ messages: { sender: string; fromMe: boolean; text: string; date: string }[]; total: number }> {
-	const capped = Math.max(1, Math.min(Math.floor(limit) || 10, 100));
+	since?: string,
+): Promise<{ messages: { sender: string; fromMe: boolean; text: string; date: string }[];
+            total: number; since?: string }> {
+	const ceiling = since ? 600 : 100;
+	const capped = Math.max(1, Math.min(Math.floor(limit) || 10, ceiling));
+	// A date the person named, as SQLite reads it. Anything it cannot parse is ignored rather than
+	// silently narrowing the answer to nothing, which would read as "they never wrote".
+	const window = since && /^\d{4}-\d{2}-\d{2}/.test(since.trim())
+		? `AND m.date > (strftime('%s','${escapeSql(since.trim().slice(0, 10))}') - 978307200) * 1000000000`
+		: "";
 	const { stdout } = await execFileAsync("sqlite3", ["-json", CHAT_DB, `
 		SELECT
 			COALESCE(h.id, '') AS sender,
@@ -207,7 +231,7 @@ export async function readConversation(
 		FROM message m
 		JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
 		LEFT JOIN handle h ON h.ROWID = m.handle_id
-		WHERE cmj.chat_id = ${Math.floor(chatId)} AND m.item_type = 0
+		WHERE cmj.chat_id = ${Math.floor(chatId)} AND m.item_type = 0 ${window}
 		ORDER BY m.date DESC
 		LIMIT ${capped}`], { maxBuffer: 64 * 1024 * 1024 });
 	const raw = JSON.parse(stdout || "[]") as
@@ -218,9 +242,10 @@ export async function readConversation(
 	const { stdout: countOut } = await execFileAsync("sqlite3", ["-json", CHAT_DB, `
 		SELECT COUNT(*) AS n FROM message m
 		JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-		WHERE cmj.chat_id = ${Math.floor(chatId)} AND m.item_type = 0`]);
+		WHERE cmj.chat_id = ${Math.floor(chatId)} AND m.item_type = 0 ${window}`]);
 	const total = (JSON.parse(countOut || "[]") as { n: number }[])[0]?.n ?? raw.length;
 	return {
+		since: window ? since : undefined,
 		messages: raw.map((r) => ({
 			sender: r.sender,
 			fromMe: r.from_me === 1,
