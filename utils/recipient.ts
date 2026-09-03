@@ -55,7 +55,24 @@ export function resolveRecipient(
 ): Resolution {
 	const people: Candidate[] = cards
 		.map((c) => {
-			const handles = [...c.phones, ...c.emails].map((h) => h.trim()).filter(Boolean);
+			const all = [...c.phones, ...c.emails].map((h) => h.trim()).filter(Boolean);
+			// THE HANDLE THEY ACTUALLY MESSAGE FROM COMES FIRST, and the caller takes handles[0].
+			//
+			// A card holds every number a person has ever had: a landline, an old mobile, a work line.
+			// Card order is the order somebody typed them in years ago and says nothing about which one
+			// reaches them. This cost a real message: the reply to somebody's mother went to the first
+			// number on her card, "(604) 730-4051", which has never carried a message; her actual thread,
+			// 7,754 messages of it, is on another number entirely. Messages accepted the send, opened a
+			// brand-new empty chat for that number, and marked it error 22, undelivered.
+			//
+			// Same rule as choosing between two PEOPLE, one level down: recency decides, and a handle
+			// nobody has ever written to sorts last rather than being dropped, because a person with no
+			// history at all must still be reachable.
+			const handles = [...all].sort((a, b) => {
+				const sa = lastSeenByHandle.get(a) ?? "";
+				const sb = lastSeenByHandle.get(b) ?? "";
+				return sa === sb ? 0 : sa < sb ? 1 : -1;
+			});
 			// The most recent time ANY of this person's handles was in touch.
 			const seen = handles
 				.map((h) => lastSeenByHandle.get(h))

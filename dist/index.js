@@ -2702,7 +2702,12 @@ function looksLikeHandle(who) {
 }
 function resolveRecipient(cards, lastSeenByHandle2) {
   const people = cards.map((c) => {
-    const handles = [...c.phones, ...c.emails].map((h) => h.trim()).filter(Boolean);
+    const all = [...c.phones, ...c.emails].map((h) => h.trim()).filter(Boolean);
+    const handles = [...all].sort((a, b) => {
+      const sa = lastSeenByHandle2.get(a) ?? "";
+      const sb = lastSeenByHandle2.get(b) ?? "";
+      return sa === sb ? 0 : sa < sb ? 1 : -1;
+    });
     const seen = handles.map((h) => lastSeenByHandle2.get(h)).filter((d) => Boolean(d)).sort().pop();
     return { name: c.name, handles, lastSeen: seen };
   }).filter((p) => p.handles.length > 0);
@@ -3219,15 +3224,42 @@ function clampLimit(limit) {
   if (!Number.isFinite(n) || n <= 0) return 10;
   return Math.min(n, CONFIG.MAX_MESSAGES);
 }
+async function sendFailure(handle, sentAfter) {
+  const since = Math.floor(sentAfter / 1e3) - 978307200 - 2;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      const { stdout } = await execFileAsync2("sqlite3", ["-json", CHAT_DB, `
+				SELECT m.error AS err, m.is_sent AS sent
+				FROM message m LEFT JOIN handle h ON h.ROWID = m.handle_id
+				WHERE m.is_from_me = 1 AND m.date/1000000000 + 978307200 > ${since}
+				ORDER BY m.date DESC LIMIT 1`]);
+      const row = JSON.parse(stdout || "[]")[0];
+      if (!row) continue;
+      if (row.err && row.err !== 0) {
+        return `The message was NOT delivered to ${handle} (Messages reported error ${row.err}). It may not be reachable at that number on iMessage. Check the number, or send to the one they have actually been messaging from.`;
+      }
+      if (row.sent) return null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
 async function sendToConversation(guid2, message2) {
   const body = escapeAppleScriptString(message2);
   const chat = escapeAppleScriptString(guid2);
+  const started = Date.now();
   try {
-    return await runAppleScript(`
+    const out = await runAppleScript(`
 tell application "Messages"
     send "${body}" to chat id "${chat}"
 end tell`);
+    const failed = await sendFailure(guid2, started);
+    if (failed) throw new ToolFailure("message_not_sent", failed);
+    return out;
   } catch (error2) {
+    if (error2 instanceof ToolFailure) throw error2;
     throwAppleFailure(error2, MESSAGES_SEND_SUMMARIES);
   }
 }
@@ -3240,14 +3272,19 @@ async function sendMessage(phoneNumber, message2) {
   }
   const buddy = escapeAppleScriptString(phoneNumber);
   const body = escapeAppleScriptString(message2);
+  const started = Date.now();
   try {
-    return await runAppleScript(`
+    const out = await runAppleScript(`
 tell application "Messages"
     set targetService to 1st service whose service type = iMessage
     set targetBuddy to buddy "${buddy}"
     send "${body}" to targetBuddy
 end tell`);
+    const failed = await sendFailure(phoneNumber, started);
+    if (failed) throw new ToolFailure("message_not_sent", failed);
+    return out;
   } catch (error2) {
+    if (error2 instanceof ToolFailure) throw error2;
     throwAppleFailure(error2, MESSAGES_SEND_SUMMARIES);
   }
 }

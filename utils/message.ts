@@ -113,15 +113,58 @@ function clampLimit(limit: number): number {
  * THE ONLY WAY TO REPLY TO A GROUP. `buddy` addresses a person, and a group is not a person, so before
  * this there was no way to answer three people at once in the thread they were talking in.
  */
+/**
+ * Did the message actually LEAVE? AppleScript will not say.
+ *
+ * `send` returns the moment Messages accepts the text, which is long before the network has an opinion,
+ * so "Message sent to Linda Therrien" was printed over a message that never went. In chat.db it sat with
+ * `is_sent = 0` and `error = 22`, and on screen it was red and said "Not Delivered". The person was told
+ * it worked, and the one thing they needed to know was that it had not.
+ *
+ * So the row is read back. A short poll, because delivery is asynchronous: what is being waited for is
+ * the send LEAVING, not the recipient receiving, which can take much longer and is not ours to promise.
+ * Silence after the wait is reported as sent, deliberately: a slow network must not be called a failure,
+ * and `error` is what distinguishes the two.
+ */
+async function sendFailure(handle: string, sentAfter: number): Promise<string | null> {
+	const since = Math.floor(sentAfter / 1000) - 978307200 - 2;
+	for (let attempt = 0; attempt < 8; attempt++) {
+		await new Promise((r) => setTimeout(r, 500));
+		try {
+			const { stdout } = await execFileAsync("sqlite3", ["-json", CHAT_DB, `
+				SELECT m.error AS err, m.is_sent AS sent
+				FROM message m LEFT JOIN handle h ON h.ROWID = m.handle_id
+				WHERE m.is_from_me = 1 AND m.date/1000000000 + 978307200 > ${since}
+				ORDER BY m.date DESC LIMIT 1`]);
+			const row = (JSON.parse(stdout || "[]") as { err: number; sent: number }[])[0];
+			if (!row) continue;
+			if (row.err && row.err !== 0) {
+				return `The message was NOT delivered to ${handle} (Messages reported error ${row.err}). `
+					+ "It may not be reachable at that number on iMessage. Check the number, or send to "
+					+ "the one they have actually been messaging from.";
+			}
+			if (row.sent) return null;
+		} catch {
+			return null;   // cannot read the store: do not invent a failure
+		}
+	}
+	return null;
+}
+
 async function sendToConversation(guid: string, message: string) {
 	const body = escapeAppleScriptString(message);
 	const chat = escapeAppleScriptString(guid);
+	const started = Date.now();
 	try {
-		return await runAppleScript(`
+		const out = await runAppleScript(`
 tell application "Messages"
     send "${body}" to chat id "${chat}"
 end tell`);
+		const failed = await sendFailure(guid, started);
+		if (failed) throw new ToolFailure("message_not_sent", failed);
+		return out;
 	} catch (error) {
+		if (error instanceof ToolFailure) throw error;
 		throwAppleFailure(error, MESSAGES_SEND_SUMMARIES);
 	}
 }
@@ -136,14 +179,19 @@ async function sendMessage(phoneNumber: string, message: string) {
 	}
 	const buddy = escapeAppleScriptString(phoneNumber);
 	const body = escapeAppleScriptString(message);
+	const started = Date.now();
 	try {
-		return await runAppleScript(`
+		const out = await runAppleScript(`
 tell application "Messages"
     set targetService to 1st service whose service type = iMessage
     set targetBuddy to buddy "${buddy}"
     send "${body}" to targetBuddy
 end tell`);
+		const failed = await sendFailure(phoneNumber, started);
+		if (failed) throw new ToolFailure("message_not_sent", failed);
+		return out;
 	} catch (error) {
+		if (error instanceof ToolFailure) throw error;
 		throwAppleFailure(error, MESSAGES_SEND_SUMMARIES);
 	}
 }

@@ -105,3 +105,31 @@ describe("telling a handle from a name", () => {
 		expect(looksLikeHandle("38951")).toBe(true);
 	});
 });
+
+// THE NUMBER THEY ACTUALLY MESSAGE FROM. A card holds every number a person has ever had, in the order
+// somebody typed them in years ago. A real reply to somebody's mother went to the first one, a landline
+// that has never carried a message; her actual thread, 7,754 messages of it, is on another number.
+// Messages accepted it, opened a new empty chat for the dead number, and marked it error 22.
+describe("which of one person's handles to use", () => {
+	test("the one with the most recent traffic comes first", () => {
+		const cards = [{ name: "Linda Therrien", phones: ["(604) 730-4051", "+16046571752"], emails: [] }];
+		const seen = new Map([["+16046571752", "2026-09-01 19:04:05"]]);
+		const r = resolveRecipient(cards, seen);
+		expect(r.kind).toBe("one");
+		expect((r as any).handles[0]).toBe("+16046571752");
+	});
+
+	test("a dead number is ordered last, never dropped", () => {
+		const cards = [{ name: "Linda", phones: ["(604) 730-4051", "+16046571752"], emails: [] }];
+		const seen = new Map([["+16046571752", "2026-09-01 19:04:05"]]);
+		expect((resolveRecipient(cards, seen) as any).handles).toContain("(604) 730-4051");
+	});
+
+	// The ten-years-ago case must survive: somebody with no history is still reachable at their number.
+	test("somebody who has never messaged keeps their handles in card order", () => {
+		const cards = [{ name: "Nobody", phones: ["+1555", "+1666"], emails: [] }];
+		const r = resolveRecipient(cards, new Map());
+		expect(r.kind).toBe("one");
+		expect((r as any).handles).toEqual(["+1555", "+1666"]);
+	});
+});
