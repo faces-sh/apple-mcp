@@ -3230,6 +3230,7 @@ var init_contacts = __esm({
 // utils/message.ts
 var message_exports = {};
 __export(message_exports, {
+  GENUINE_CONTACT: () => GENUINE_CONTACT,
   MESSAGES_READ_DENIED: () => MESSAGES_READ_DENIED,
   MESSAGES_SEND_SUMMARIES: () => MESSAGES_SEND_SUMMARIES,
   decodeAttributedBody: () => decodeAttributedBody,
@@ -3729,6 +3730,7 @@ async function lastSeenByHandle() {
 					datetime(MAX(m.date)/1000000000 + 978307200, 'unixepoch', 'localtime') AS date
 				FROM message m JOIN handle h ON h.ROWID = m.handle_id
 				WHERE m.item_type = 0
+					AND ${GENUINE_CONTACT}
 				GROUP BY h.id`])
     );
     for (const r of JSON.parse(stdout || "[]")) {
@@ -3747,7 +3749,7 @@ async function whoIsMeant(name, findCards = contacts_default.findContacts) {
   }
   return resolveRecipient(cards, await lastSeenByHandle());
 }
-var execFileAsync2, CHAT_DB, MESSAGES_SEND_SUMMARIES, MESSAGES_READ_DENIED, MESSAGES_READ_FAILED, CONFIG, MAX_RETRIES, RETRY_DELAY, UNREAD_WHERE, message_default;
+var execFileAsync2, CHAT_DB, MESSAGES_SEND_SUMMARIES, MESSAGES_READ_DENIED, MESSAGES_READ_FAILED, CONFIG, MAX_RETRIES, RETRY_DELAY, UNREAD_WHERE, GENUINE_CONTACT, message_default;
 var init_message = __esm({
   "utils/message.ts"() {
     "use strict";
@@ -3788,6 +3790,7 @@ var init_message = __esm({
                 AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL OR m.cache_has_attachments = 1)
                 AND m.is_audio_message = 0  -- Skip audio messages
                 AND m.item_type = 0  -- Regular messages only`;
+    GENUINE_CONTACT = "(m.is_from_me = 0 OR (m.is_sent = 1 AND COALESCE(m.error, 0) = 0))";
     message_default = {
       /** The hard ceiling on one read, so a caller can say "50 is the most" instead of
        *  advising somebody to ask for a hundred and hand them fifty again. */

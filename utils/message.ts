@@ -834,7 +834,36 @@ async function searchMessages(
 	}
 }
 
-/** When each handle was last in touch, for deciding between two people with the same name. */
+/**
+ * What counts as CONTACT with a handle, in SQL.
+ *
+ * Exported so the rule can be run against a real SQLite database in a test rather than trusted as a
+ * substring of a query nobody executes. The bug it encodes cost six sends and six crashes.
+ */
+export const GENUINE_CONTACT =
+	"(m.is_from_me = 0 OR (m.is_sent = 1 AND COALESCE(m.error, 0) = 0))";
+
+/**
+ * When each handle was last in touch. GENUINE CONTACT ONLY.
+ *
+ * A FAILED SEND OF OUR OWN IS NOT EVIDENCE THAT A NUMBER WORKS, and counting it built a loop that took
+ * six attempts and six crashes of the user's Messages app to see. Every row was counted, including our
+ * own undelivered ones, so:
+ *
+ *   we send to a dead landline -> it fails (is_sent = 0, error = 22)
+ *   the failed row makes that handle the MOST RECENTLY seen on the machine
+ *   `resolveRecipient` ranks handles by recency, so it now prefers the dead number
+ *   `unusedNumberFor` sees "history" there, so it stops refusing
+ *   the next send goes to the same dead number, and fails again
+ *
+ * Each failure made the wrong answer look more right. On the real machine that number ended with five
+ * messages against it, ZERO of them incoming and ZERO actually sent, while the number she really writes
+ * from has 5,325.
+ *
+ * So contact means: something they sent us, or something of ours that genuinely left (`is_sent = 1`
+ * with no error). Anything else is our own noise, and reading our own noise as evidence is how a bug
+ * teaches itself to persist.
+ */
 async function lastSeenByHandle(): Promise<Map<string, string>> {
 	const out = new Map<string, string>();
 	try {
@@ -844,6 +873,7 @@ async function lastSeenByHandle(): Promise<Map<string, string>> {
 					datetime(MAX(m.date)/1000000000 + 978307200, 'unixepoch', 'localtime') AS date
 				FROM message m JOIN handle h ON h.ROWID = m.handle_id
 				WHERE m.item_type = 0
+					AND ${GENUINE_CONTACT}
 				GROUP BY h.id`]),
 		);
 		for (const r of JSON.parse(stdout || "[]") as { handle: string; date: string }[]) {
