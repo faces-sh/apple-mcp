@@ -20699,7 +20699,7 @@ ${msg.content}`
 ` + m.content
                     ).join("\n\n") + (reach ? `
 
-(${reach.trim()})` : "") : `No messages found matching "${args.query}".${reach}`
+(${reach.trim()})` : "") : `No messages found matching "${args.query}".${reach} Every word has to appear in the same message, so fewer words find more. If those are people's names, what they SAID is in their conversation: read it by their names instead of searching for them.`
                   }],
                   isError: false
                 };

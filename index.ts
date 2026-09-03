@@ -976,7 +976,18 @@ function initServer() {
 													+ `${threadOf.get(m.chatId ?? -1) ? ` in ${threadOf.get(m.chatId ?? -1)}` : ""}:\n`
 													+ m.content,
 												).join("\n\n") + (reach ? `\n\n(${reach.trim()})` : "")
-											: `No messages found matching "${args.query}".${reach}`,
+											// SAY WHAT WOULD WORK, at the one moment the caller is stuck.
+											//
+											// Every word must appear in the SAME message, so a natural
+											// phrase narrows hard: "Hamilton Shivani meeting" found
+											// nothing, and could not have, because the discussion is in
+											// their group thread and says "could we start at 10am PT".
+											// The conversation was one `read` away and the run gave up.
+											: `No messages found matching "${args.query}".${reach} Every `
+												+ "word has to appear in the same message, so fewer words "
+												+ "find more. If those are people's names, what they SAID "
+												+ "is in their conversation: read it by their names "
+												+ "instead of searching for them.",
 									}],
 									isError: false,
 								};
