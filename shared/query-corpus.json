@@ -9,52 +9,142 @@
     "Terms and phrases are folded: lowercased, accents stripped."
   ],
   "cases": [
-    { "why": "bare words are optional terms, and they RANK rather than filter",
+    {
+      "why": "bare words are optional terms, and they RANK rather than filter",
       "query": "shivani hamilton",
-      "terms": ["shivani", "hamilton"], "phrases": [], "excluded": [] },
-
-    { "why": "quotes are the exact-match escape hatch",
+      "terms": [
+        "shivani",
+        "hamilton"
+      ],
+      "phrases": [],
+      "excluded": []
+    },
+    {
+      "why": "quotes are the exact-match escape hatch",
       "query": "\"start at 10am\"",
-      "terms": [], "phrases": ["start at 10am"], "excluded": [] },
-
-    { "why": "words and phrases mix freely",
+      "terms": [],
+      "phrases": [
+        "start at 10am"
+      ],
+      "excluded": []
+    },
+    {
+      "why": "words and phrases mix freely",
       "query": "meeting \"10am PT\" shivani",
-      "terms": ["meeting", "shivani"], "phrases": ["10am pt"], "excluded": [] },
-
-    { "why": "a leading minus excludes a word",
+      "terms": [
+        "meeting",
+        "shivani"
+      ],
+      "phrases": [
+        "10am pt"
+      ],
+      "excluded": []
+    },
+    {
+      "why": "a leading minus excludes a word",
       "query": "invoice -paid",
-      "terms": ["invoice"], "phrases": [], "excluded": ["paid"] },
-
-    { "why": "a minus before a quoted run excludes the whole phrase, not a stray quote",
+      "terms": [
+        "invoice"
+      ],
+      "phrases": [],
+      "excluded": [
+        "paid"
+      ]
+    },
+    {
+      "why": "a minus before a quoted run excludes the whole phrase, not a stray quote",
       "query": "invoice -\"already paid\"",
-      "terms": ["invoice"], "phrases": [], "excluded": ["already paid"] },
-
-    { "why": "accents fold, so a French message is found without typing the accent",
+      "terms": [
+        "invoice"
+      ],
+      "phrases": [],
+      "excluded": [
+        "already paid"
+      ]
+    },
+    {
+      "why": "accents fold, so a French message is found without typing the accent",
       "query": "rentrée",
-      "terms": ["rentree"], "phrases": [], "excluded": [] },
-
-    { "why": "case never matters",
+      "terms": [
+        "rentree"
+      ],
+      "phrases": [],
+      "excluded": []
+    },
+    {
+      "why": "case never matters",
       "query": "CAROLINE",
-      "terms": ["caroline"], "phrases": [], "excluded": [] },
-
-    { "why": "single quotes work like double, because people type both",
+      "terms": [
+        "caroline"
+      ],
+      "phrases": [],
+      "excluded": []
+    },
+    {
+      "why": "single quotes work like double, because people type both",
       "query": "'bonne fin'",
-      "terms": [], "phrases": ["bonne fin"], "excluded": [] },
-
-    { "why": "an empty query asks for nothing, and must never mean everything",
+      "terms": [],
+      "phrases": [
+        "bonne fin"
+      ],
+      "excluded": []
+    },
+    {
+      "why": "an empty query asks for nothing, and must never mean everything",
       "query": "   ",
-      "terms": [], "phrases": [], "excluded": [] },
-
-    { "why": "a bare minus is a word, not an exclusion of nothing",
+      "terms": [],
+      "phrases": [],
+      "excluded": []
+    },
+    {
+      "why": "a bare minus is a word, not an exclusion of nothing",
       "query": "-",
-      "terms": ["-"], "phrases": [], "excluded": [] },
-
-    { "why": "extra whitespace is not a term",
+      "terms": [
+        "-"
+      ],
+      "phrases": [],
+      "excluded": []
+    },
+    {
+      "why": "extra whitespace is not a term",
       "query": "  shivani    hamilton  ",
-      "terms": ["shivani", "hamilton"], "phrases": [], "excluded": [] },
-
-    { "why": "an unclosed quote does not swallow the rest of the query",
+      "terms": [
+        "shivani",
+        "hamilton"
+      ],
+      "phrases": [],
+      "excluded": []
+    },
+    {
+      "why": "an unclosed quote does not swallow the rest of the query",
       "query": "shivani \"hamilton",
-      "terms": ["shivani", "\"hamilton"], "phrases": [], "excluded": [] }
+      "terms": [
+        "shivani",
+        "\"hamilton"
+      ],
+      "phrases": [],
+      "excluded": []
+    },
+    {
+      "why": "OR and AND spelled out are operators, not words to search for",
+      "query": "\"Rob Therrien\" OR \"robstours@yahoo.ca\"",
+      "terms": [],
+      "phrases": [
+        "rob therrien",
+        "robstours@yahoo.ca"
+      ],
+      "excluded": []
+    },
+    {
+      "why": "a lowercase 'or' is an ordinary word, because that is how people write it in prose",
+      "query": "coffee or tea",
+      "terms": [
+        "coffee",
+        "or",
+        "tea"
+      ],
+      "phrases": [],
+      "excluded": []
+    }
   ]
 }

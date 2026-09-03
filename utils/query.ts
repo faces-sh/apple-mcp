@@ -50,6 +50,11 @@ export function parseQuery(raw: string): Query {
 	for (const word of rest.split(/\s+/)) {
 		const w = word.trim();
 		if (!w) continue;
+		// `OR` and `AND` spelled out are OPERATORS in the dialect models write, not words to look for.
+		// Bare words are already or-ish and ranked, so both are no-ops; searching for the letters "or"
+		// would match half the corpus and drown the real terms. Watched a run write
+		// `"Rob Therrien" OR "robstours@yahoo.ca"` and find nothing.
+		if (w === "OR" || w === "AND") continue;
 		if (w.startsWith("-") && w.length > 1) {
 			const t = fold(w.slice(1));
 			if (t) excluded.push(t);
@@ -86,20 +91,26 @@ export function scoreFields(fields: Field[], q: Query): number | null {
 		if (folded.some((f) => f.hay.includes(bad))) return null;
 	}
 	let score = 0;
-	// A quoted phrase is a REQUIREMENT: it is the one way to ask for exactly something.
+	let matched = 0;
+	// A QUOTED PHRASE IS EXACT, NOT MANDATORY. Requiring every phrase made two of them an AND wearing
+	// quotes, which is the bug this grammar exists to remove: `"Rob Therrien" OR "robstours@yahoo.ca"`
+	// demanded both and found nothing. Quotes say "these words, in this order"; they do not say "and
+	// also everything else I typed". A phrase that matches simply scores, and scores heavily, so the
+	// single-phrase case still behaves like an exact search: nothing else matching means no hit at all.
 	for (const phrase of q.phrases) {
 		const best = folded.filter((f) => f.hay.includes(phrase)).map((f) => f.weight).sort((a, b) => b - a)[0];
-		if (best === undefined) return null;
+		if (best === undefined) continue;
+		matched += 1;
 		score += best * 4;
 	}
-	let matched = 0;
 	for (const term of q.terms) {
 		const best = folded.filter((f) => f.hay.includes(term)).map((f) => f.weight).sort((a, b) => b - a)[0];
 		if (best === undefined) continue;
 		matched += 1;
 		score += best;
 	}
-	if (q.terms.length && matched === 0 && q.phrases.length === 0) return null;
+	// Nothing asked for was found: not an answer.
+	if (matched === 0) return null;
 	// MATCHING MORE OF WHAT WAS ASKED WINS. Two words beat one, which is what the old AND was reaching
 	// for, and a single-word hit is still returned rather than thrown away.
 	score += matched * matched;
