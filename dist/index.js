@@ -2900,6 +2900,35 @@ var init_native = __esm({
   }
 });
 
+// utils/wrongnumber.ts
+async function unusedNumberFor(target, deps) {
+  try {
+    const seen = await deps.seenByHandle();
+    const known = (h) => handleCandidates(h).some((c) => seen.has(c)) || seen.has(h);
+    if (known(target)) return null;
+    const name = await deps.whoOwns(target);
+    if (!name) return null;
+    const cards = await deps.cardsFor(name);
+    const theirs = cards.flatMap((c) => [...c.phones, ...c.emails]).map((h) => h.trim()).filter(Boolean);
+    let best = null;
+    for (const h of theirs) {
+      for (const c of [h, ...handleCandidates(h)]) {
+        const at = seen.get(c);
+        if (at && (!best || at > best.at)) best = { handle: c, at };
+      }
+    }
+    return best ? { name, better: best.handle } : null;
+  } catch {
+    return null;
+  }
+}
+var init_wrongnumber = __esm({
+  "utils/wrongnumber.ts"() {
+    "use strict";
+    init_phone();
+  }
+});
+
 // utils/typedstream.ts
 function typedstreamStrings(blob) {
   const out = [];
@@ -3278,6 +3307,17 @@ async function sendMessage(phoneNumber, message2) {
     );
   }
   const target = sendableHandle(phoneNumber);
+  const unused = await unusedNumberFor(target, {
+    seenByHandle: lastSeenByHandle,
+    whoOwns: contacts_default.findContactByPhone,
+    cardsFor: contacts_default.findContacts
+  });
+  if (unused) {
+    throw new ToolFailure(
+      "wrong_number",
+      `Nothing was sent: ${unused.name} has never sent or received a message at ${target}. They write from ${unused.better}. Send again with that number if you meant them.`
+    );
+  }
   const buddy = escapeAppleScriptString(target);
   const body = escapeAppleScriptString(message2);
   const started = Date.now();
@@ -3715,6 +3755,7 @@ var init_message = __esm({
     init_native();
     init_failure();
     init_phone();
+    init_wrongnumber();
     init_recipient();
     init_typedstream();
     init_query();

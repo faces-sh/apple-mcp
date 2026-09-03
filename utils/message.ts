@@ -12,6 +12,7 @@ import {
 } from "./native";
 import { rawBody } from "./failure";
 import { handleCandidates, sendableHandle } from "./phone";
+import { unusedNumberFor } from "./wrongnumber";
 import { looksLikeHandle } from "./recipient";
 import { typedstreamText } from "./typedstream";
 import { matchesQuery, queryTerms } from "./query";
@@ -177,8 +178,20 @@ async function sendMessage(phoneNumber: string, message: string) {
 			+ "address. Read their conversation to get it, or look the name up in Contacts.",
 		);
 	}
-	// E.164, never the formatted spelling: see `sendableHandle`. Messages crashed on the other one.
+	// E.164 only where the country is stated: see `sendableHandle`.
 	const target = sendableHandle(phoneNumber);
+	const unused = await unusedNumberFor(target, {
+		seenByHandle: lastSeenByHandle,
+		whoOwns: contacts.findContactByPhone,
+		cardsFor: contacts.findContacts,
+	});
+	if (unused) {
+		throw new ToolFailure(
+			"wrong_number",
+			`Nothing was sent: ${unused.name} has never sent or received a message at ${target}. `
+			+ `They write from ${unused.better}. Send again with that number if you meant them.`,
+		);
+	}
 	const buddy = escapeAppleScriptString(target);
 	const body = escapeAppleScriptString(message);
 	const started = Date.now();
